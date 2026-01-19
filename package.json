@@ -32,10 +32,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/sapper.git"
+    "url": "https://github.com/aledanee/sapper.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/sapper/issues"
+    "url": "https://github.com/aledanee/sapper/issues"
   },
-  "homepage": "https://github.com/yourusername/sapper#readme"
+  "homepage": "https://github.com/aledanee/sapper#readme"
 }
