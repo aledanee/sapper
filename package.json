@@ -4,7 +4,7 @@
   "description": "AI-powered development assistant that executes commands and builds projects",
   "main": "sapper.mjs",
   "bin": {
-    "sapper": "./sapper.mjs"
+    "sapper": "sapper.mjs"
   },
   "type": "module",
   "scripts": {
@@ -32,7 +32,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/aledanee/sapper.git"
+    "url": "git+https://github.com/aledanee/sapper.git"
   },
   "bugs": {
     "url": "https://github.com/aledanee/sapper/issues"

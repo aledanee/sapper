@@ -1,0 +1,15 @@
+# Include everything except these
+node_modules/
+.env
+.env.local
+.sapper_context.json
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.tmp
+*.temp
+
+# Include .github for documentation
+!.github/
