@@ -95,14 +95,28 @@ function recreateReadline() {
 
 // --- Tool Logic ---
 const tools = {
-  read: (path) => fs.readFileSync(path.trim(), 'utf8'),
+  read: (path) => {
+    try {
+      return fs.readFileSync(path.trim(), 'utf8');
+    } catch (error) {
+      return `Error reading file: ${error.message}`;
+    }
+  },
   write: (path, content) => {
-    fs.writeFileSync(path.trim(), content);
-    return `Successfully saved changes to ${path}`;
+    try {
+      fs.writeFileSync(path.trim(), content);
+      return `Successfully saved changes to ${path}`;
+    } catch (error) {
+      return `Error writing file: ${error.message}`;
+    }
   },
   mkdir: (path) => {
-    fs.mkdirSync(path.trim(), { recursive: true });
-    return `Directory created: ${path}`;
+    try {
+      fs.mkdirSync(path.trim(), { recursive: true });
+      return `Directory created: ${path}`;
+    } catch (error) {
+      return `Error creating directory: ${error.message}`;
+    }
   },
   shell: async (cmd) => {
     console.log(chalk.red.bold(`\n[SECURITY] Sapper wants to execute: `) + chalk.white(cmd));
@@ -148,24 +162,48 @@ const tools = {
     }
     return "Command blocked by user.";
   },
-  list: (path) => fs.readdirSync(path || '.').join('\n'),
+  list: (path) => {
+    try {
+      return fs.readdirSync(path || '.').join('\n');
+    } catch (error) {
+      return `Error listing directory: ${error.message}`;
+    }
+  },
   search: (pattern) => {
     try {
       const { execSync } = require('child_process');
       const cmd = `grep -rnEi "${pattern.trim()}" . --exclude-dir=node_modules --exclude-dir=.git`;
       return execSync(cmd, { encoding: 'utf8' }) || "No matches found.";
-    } catch (e) { return "No matches found."; }
+    } catch (e) { 
+      return "No matches found."; 
+    }
   }
 };
 
 async function selectModel() {
-  const localModels = await ollama.list();
-  if (localModels.models.length === 0) process.exit(1);
-  console.log(chalk.magenta.bold("\nAvailable Models:"));
-  localModels.models.forEach((m, i) => console.log(`${i + 1}. ${chalk.white(m.name)}`));
-  const choice = await safeQuestion(chalk.yellow('\nChoose model: '));
-  const index = parseInt(choice) - 1;
-  return localModels.models[index]?.name || localModels.models[0].name;
+  try {
+    const localModels = await ollama.list();
+    if (localModels.models.length === 0) {
+      console.log(chalk.red('❌ No Ollama models found!'));
+      console.log(chalk.yellow('Please install at least one model:'));
+      console.log(chalk.gray('  ollama pull llama2'));
+      console.log(chalk.gray('  ollama pull codellama'));
+      process.exit(1);
+    }
+    console.log(chalk.magenta.bold("\nAvailable Models:"));
+    localModels.models.forEach((m, i) => console.log(`${i + 1}. ${chalk.white(m.name)}`));
+    const choice = await safeQuestion(chalk.yellow('\nChoose model: '));
+    const index = parseInt(choice) - 1;
+    return localModels.models[index]?.name || localModels.models[0].name;
+  } catch (error) {
+    console.log(chalk.red('❌ Failed to connect to Ollama!'));
+    console.log(chalk.yellow('Please make sure Ollama is running:'));
+    console.log(chalk.gray('  1. Install Ollama: https://ollama.ai'));
+    console.log(chalk.gray('  2. Start Ollama: ollama serve'));
+    console.log(chalk.gray('  3. Install a model: ollama pull llama2'));
+    console.log(chalk.red(`\nError details: ${error.message}`));
+    process.exit(1);
+  }
 }
 
 async function runSapper() {
@@ -176,6 +214,9 @@ async function runSapper() {
   // Check for updates on startup
   await checkForUpdates();
 
+  // Early Ollama connectivity check
+  console.log(chalk.gray('🔍 Checking Ollama connection...'));
+  
   let messages = [];
   if (fs.existsSync(CONTEXT_FILE)) {
     const resume = await safeQuestion(chalk.green('Resume previous session? (y/n): '));
@@ -325,21 +366,42 @@ async function runSapper() {
         spinner.stop();
         console.log(chalk.blue(`\n${selectedModel} is thinking...`));
         
-        const response = await ollama.chat({ 
-          model: selectedModel, 
-          messages, 
-          stream: true,
-          options: { num_ctx: 16384 } 
-        });
+        let response;
+        try {
+          response = await ollama.chat({ 
+            model: selectedModel, 
+            messages, 
+            stream: true,
+            options: { num_ctx: 16384 } 
+          });
+        } catch (error) {
+          console.log(chalk.red('\n❌ Failed to communicate with Ollama!'));
+          console.log(chalk.yellow('Possible issues:'));
+          console.log(chalk.gray('  - Ollama service stopped'));
+          console.log(chalk.gray('  - Model was removed'));
+          console.log(chalk.gray('  - Network connection issue'));
+          console.log(chalk.red(`Error: ${error.message}`));
+          console.log(chalk.cyan('\n💡 Try restarting Sapper or check Ollama status'));
+          active = false;
+          ask();
+          return;
+        }
         
         let msg = '';
         process.stdout.write(chalk.white('Sapper: '));
         
-        for await (const chunk of response) {
-          if (chunk.message && chunk.message.content) {
-            process.stdout.write(chunk.message.content);
-            msg += chunk.message.content;
+        try {
+          for await (const chunk of response) {
+            if (chunk.message && chunk.message.content) {
+              process.stdout.write(chunk.message.content);
+              msg += chunk.message.content;
+            }
           }
+        } catch (error) {
+          console.log(chalk.red('\n\n❌ Connection interrupted while streaming response!'));
+          console.log(chalk.yellow(`Error: ${error.message}`));
+          console.log(chalk.cyan('💡 The conversation will continue, but you may want to restart Sapper'));
+          msg += `\n[ERROR: Response interrupted - ${error.message}]`;
         }
         console.log();
         
