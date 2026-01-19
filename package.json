@@ -1,0 +1,41 @@
+{
+  "name": "sapper",
+  "version": "1.0.0",
+  "description": "AI-powered development assistant that executes commands and builds projects",
+  "main": "sapper.mjs",
+  "bin": {
+    "sapper": "./sapper.mjs"
+  },
+  "type": "module",
+  "scripts": {
+    "start": "node sapper.mjs"
+  },
+  "dependencies": {
+    "ollama": "^0.5.0",
+    "chalk": "^5.3.0",
+    "ora": "^8.0.1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": [
+    "cli",
+    "ai",
+    "development",
+    "assistant",
+    "ollama",
+    "automation",
+    "productivity",
+    "developer-tools"
+  ],
+  "author": "Ibrahim Ihsan",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/sapper.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/sapper/issues"
+  },
+  "homepage": "https://github.com/yourusername/sapper#readme"
+}
