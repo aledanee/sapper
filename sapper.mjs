@@ -37,7 +37,7 @@ async function safeQuestion(query) {
 // Helper function to check for updates
 async function checkForUpdates() {
   try {
-    const response = await fetch('https://registry.npmjs.org/sapper/latest');
+    const response = await fetch('https://registry.npmjs.org/sapper-iq/latest');
     const data = await response.json();
     const latestVersion = data.version;
     
@@ -45,7 +45,7 @@ async function checkForUpdates() {
       console.log(chalk.yellow('🔄 UPDATE AVAILABLE!'));
       console.log(chalk.gray(`   Current: v${CURRENT_VERSION}`));
       console.log(chalk.green(`   Latest:  v${latestVersion}`));
-      console.log(chalk.cyan('   Run: npm update -g sapper\n'));
+      console.log(chalk.cyan('   Run: npm update -g sapper-iq\n'));
     }
   } catch (error) {
     // Silently fail if update check fails
@@ -58,7 +58,7 @@ async function updateSapper() {
   const confirm = await safeQuestion(chalk.yellow('Continue with update? (y/n): '));
   if (confirm.toLowerCase() === 'y') {
     return new Promise((resolve) => {
-      const proc = spawn('npm', ['update', '-g', 'sapper'], { 
+      const proc = spawn('npm', ['update', '-g', 'sapper-iq'], { 
         stdio: 'inherit' 
       });
       
@@ -68,7 +68,7 @@ async function updateSapper() {
           console.log(chalk.green('\n✅ Sapper updated successfully!'));
           console.log(chalk.gray('Please restart Sapper to use the new version.\n'));
         } else {
-          console.log(chalk.red('\n❌ Update failed. Try manually: npm update -g sapper\n'));
+          console.log(chalk.red('\n❌ Update failed. Try manually: npm update -g sapper-iq\n'));
         }
         resolve();
       });
