@@ -60,48 +60,6 @@ try {
 const spinner = ora();
 const CONTEXT_FILE = '.sapper_context.json';
 
-// ═══════════════════════════════════════════════════════════════
-// FANCY UI HELPERS
-// ═══════════════════════════════════════════════════════════════
-
-const BANNER = `
-${chalk.cyan('  ███████╗ █████╗ ██████╗ ██████╗ ███████╗██████╗ ')}
-${chalk.cyan('  ██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔════╝██╔══██╗')}
-${chalk.cyan('  ███████╗███████║██████╔╝██████╔╝█████╗  ██████╔╝')}
-${chalk.cyan('  ╚════██║██╔══██║██╔═══╝ ██╔═══╝ ██╔══╝  ██╔══██╗')}
-${chalk.cyan('  ███████║██║  ██║██║     ██║     ███████╗██║  ██║')}
-${chalk.cyan('  ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝     ╚══════╝╚═╝  ╚═╝')}
-`;
-
-function box(content, title = '', color = 'cyan') {
-  const lines = content.split('\n');
-  const maxLen = Math.max(...lines.map(l => l.length), title.length + 4);
-  const colorFn = chalk[color] || chalk.cyan;
-  
-  let result = colorFn('╭' + (title ? `─ ${title} ` : '') + '─'.repeat(maxLen - title.length - (title ? 3 : 0)) + '╮') + '\n';
-  for (const line of lines) {
-    result += colorFn('│') + ' ' + line.padEnd(maxLen) + ' ' + colorFn('│') + '\n';
-  }
-  result += colorFn('╰' + '─'.repeat(maxLen + 2) + '╯');
-  return result;
-}
-
-function divider(char = '─', color = 'gray') {
-  const width = process.stdout.columns || 60;
-  return chalk[color](char.repeat(Math.min(width, 60)));
-}
-
-function statusBadge(text, type = 'info') {
-  const badges = {
-    info: chalk.bgCyan.black(` ${text} `),
-    success: chalk.bgGreen.black(` ${text} `),
-    warning: chalk.bgYellow.black(` ${text} `),
-    error: chalk.bgRed.white(` ${text} `),
-    action: chalk.bgMagenta.white(` ${text} `)
-  };
-  return badges[type] || badges.info;
-}
-
 let stepMode = false;
 let debugMode = false; // Toggle with /debug command
 let rl = readline.createInterface({ 
@@ -254,15 +212,11 @@ const tools = {
       const newContent = content.replace(oldText, newText);
       
       // Show diff preview
-      console.log();
-      const diffContent = 
-        `${chalk.white('File:')} ${chalk.cyan(trimmedPath)}\n` +
-        chalk.gray('─'.repeat(40)) + '\n' +
-        chalk.red('- ' + oldText.split('\n').join('\n- ')) + '\n' +
-        chalk.green('+ ' + newText.split('\n').join('\n+ '));
-      console.log(box(diffContent, '🔧 Patch', 'yellow'));
+      console.log(chalk.yellow.bold(`\n[PATCH] ${trimmedPath}`));
+      console.log(chalk.red('- ' + oldText.split('\n').join('\n- ')));
+      console.log(chalk.green('+ ' + newText.split('\n').join('\n+ ')));
       
-      const confirm = await safeQuestion(chalk.yellow('\n↪ Apply patch? ') + chalk.gray('(y/n): '));
+      const confirm = await safeQuestion(chalk.yellow('Apply this patch? (y/n): '));
       if (confirm.toLowerCase() === 'y') {
         fs.writeFileSync(trimmedPath, newContent);
         return `Successfully patched ${trimmedPath}`;
@@ -272,15 +226,9 @@ const tools = {
   },
   write: async (path, content) => {
     const trimmedPath = path.trim();
-    console.log();
-    console.log(box(
-      `${chalk.white('File:')} ${chalk.cyan(trimmedPath)}\n` +
-      `${chalk.white('Size:')} ${content?.length || 0} chars\n` +
-      chalk.gray('─'.repeat(40)) + '\n' +
-      chalk.gray(content?.substring(0, 300)?.split('\n').slice(0, 8).join('\n') + (content?.length > 300 ? '\n...' : '')),
-      '✏️  Write File', 'yellow'
-    ));
-    const confirm = await safeQuestion(chalk.yellow('\n↪ Allow write? ') + chalk.gray('(y/n): '));
+    console.log(chalk.yellow.bold(`\n[WRITE] Sapper wants to write to: `) + chalk.white(trimmedPath));
+    console.log(chalk.gray(`Content preview (first 200 chars):\n${content?.substring(0, 200)}${content?.length > 200 ? '...' : ''}`));
+    const confirm = await safeQuestion(chalk.yellow('Allow write? (y/n): '));
     if (confirm.toLowerCase() === 'y') {
       try {
         fs.writeFileSync(trimmedPath, content);
@@ -296,12 +244,8 @@ const tools = {
     } catch (error) { return `Error creating directory: ${error.message}`; }
   },
   shell: async (cmd) => {
-    console.log();
-    console.log(box(
-      chalk.white.bold(cmd),
-      '🔐 Shell Command', 'red'
-    ));
-    const confirm = await safeQuestion(chalk.red('\n↪ Execute? ') + chalk.gray('(y/n): '));
+    console.log(chalk.red.bold(`\n[SECURITY] Sapper wants to execute: `) + chalk.white(cmd));
+    const confirm = await safeQuestion(chalk.yellow('Allow? (y/n): '));
     if (confirm.toLowerCase() === 'y') {
       return new Promise((resolve) => {
         const useShell = cmd.includes('&&') || cmd.includes('|') || cmd.includes('cd ');
@@ -380,47 +324,27 @@ async function checkForUpdates() {
 
 async function runSapper() {
   console.clear();
-  console.log(BANNER);
-  console.log(chalk.gray.dim('  ') + chalk.white.bold(`v${CURRENT_VERSION}`) + chalk.gray(' │ ') + chalk.cyan('Autonomous AI Coding Agent'));
-  console.log(chalk.gray.dim('  ') + chalk.gray('📁 ') + chalk.white(process.cwd()));
-  console.log();
-  
-  // Quick tips box
-  console.log(box(
-    `${chalk.yellow('💡')} Type ${chalk.cyan('/help')} for commands\n` +
-    `${chalk.yellow('💡')} Type ${chalk.cyan('/scan')} to load entire codebase\n` +
-    `${chalk.yellow('💡')} Type ${chalk.cyan('exit')} to quit`,
-    'Quick Tips', 'gray'
-  ));
-  console.log();
+  console.log(chalk.cyan.bold(` SAPPER v${CURRENT_VERSION} | Autonomous "OpenCode" Mode`));
+  console.log(chalk.gray(`📁 Working Directory: ${process.cwd()}\n`));
   
   // Check for updates
   await checkForUpdates();
   
   let messages = [];
   if (fs.existsSync(CONTEXT_FILE)) {
-    console.log();
-    console.log(box('Previous session found! Resume where you left off?', '📂 Session', 'green'));
-    const resume = await safeQuestion(chalk.green('\n↪ Resume? ') + chalk.gray('(y/n): '));
+    const resume = await safeQuestion(chalk.green('Resume previous session? (y/n): '));
     if (resume.toLowerCase() === 'y') {
       messages = JSON.parse(fs.readFileSync(CONTEXT_FILE, 'utf8'));
-      console.log(chalk.green('  ✓ Session restored\n'));
     } else {
+      // User said no - delete the old context file
       fs.unlinkSync(CONTEXT_FILE);
-      console.log(chalk.gray('  ✓ Starting fresh...\n'));
+      console.log(chalk.gray('Starting fresh session...\n'));
     }
   }
 
   const localModels = await ollama.list();
-  console.log(divider());
-  console.log(statusBadge('MODELS', 'info') + chalk.gray(' Available Ollama models:\n'));
-  localModels.models.forEach((m, i) => {
-    const num = chalk.cyan.bold(`[${i + 1}]`);
-    const name = chalk.white(m.name);
-    console.log(`  ${num} ${name}`);
-  });
-  console.log(divider());
-  const choice = await safeQuestion(chalk.cyan('\n⚡ Select model: '));
+  localModels.models.forEach((m, i) => console.log(`${i + 1}. ${m.name}`));
+  const choice = await safeQuestion(chalk.yellow('\nChoose model: '));
   const selectedModel = localModels.models[parseInt(choice) - 1]?.name || localModels.models[0].name;
 
   if (messages.length === 0) {
@@ -480,15 +404,11 @@ CRITICAL: Stay focused. If user asks for X, deliver X only.`
       // Context size warning - large context causes hangs
       const contextSize = JSON.stringify(messages).length;
       if (contextSize > 32000) {
-        console.log();
-        console.log(box(
-          `Context is ${chalk.red.bold(Math.round(contextSize/1024) + 'KB')} - this may cause slowdowns!\n` +
-          `${chalk.yellow('Tip:')} Type ${chalk.cyan('/prune')} to reduce context size`,
-          '⚠️  Warning', 'yellow'
-        ));
+        console.log(chalk.red.bold('\n⚠️  WARNING: Context is very large (~' + Math.round(contextSize/1024) + 'KB). Sapper might hang.'));
+        console.log(chalk.yellow('👉 Suggestion: Type /prune to keep only the latest analysis.'));
       }
       
-      const input = await safeQuestion(chalk.cyan('\n┌─[') + chalk.white.bold('You') + chalk.cyan(']\n└─➤ '));
+      const input = await safeQuestion(chalk.blue.bold('\nIbrahim ➔ '));
       
       if (input.toLowerCase() === 'exit') process.exit();
       
@@ -544,17 +464,14 @@ Do NOT just display content. Actually WRITE files using the tool.`
       
       // Handle help command
       if (input.toLowerCase() === '/help') {
-        console.log();
-        const helpContent = 
-          `${chalk.cyan('/scan')}          ${chalk.gray('│')} Scan codebase into context\n` +
-          `${chalk.cyan('/reset /clear')}  ${chalk.gray('│')} Clear all context\n` +
-          `${chalk.cyan('/prune')}         ${chalk.gray('│')} Keep only last 4 messages\n` +
-          `${chalk.cyan('/context')}       ${chalk.gray('│')} Show context size\n` +
-          `${chalk.cyan('/debug')}         ${chalk.gray('│')} Toggle debug mode\n` +
-          `${chalk.cyan('/help')}          ${chalk.gray('│')} Show this help\n` +
-          `${chalk.cyan('exit')}           ${chalk.gray('│')} Quit Sapper`;
-        console.log(box(helpContent, '📚 Commands', 'cyan'));
-        console.log();
+        console.log(chalk.cyan('\n📚 SAPPER COMMANDS:'));
+        console.log(chalk.white('  /scan') + chalk.gray('          - Scan entire codebase and add to context'));
+        console.log(chalk.white('  /reset, /clear') + chalk.gray(' - Clear all context and start fresh'));
+        console.log(chalk.white('  /prune') + chalk.gray('         - Remove old messages, keep last 4'));
+        console.log(chalk.white('  /context') + chalk.gray('       - Show current context size'));
+        console.log(chalk.white('  /debug') + chalk.gray('         - Toggle debug mode (shows regex analysis)'));
+        console.log(chalk.white('  /help') + chalk.gray('          - Show this help message'));
+        console.log(chalk.white('  exit') + chalk.gray('           - Exit Sapper\n'));
         continue;
       }
       
@@ -632,8 +549,7 @@ Do NOT just display content. Actually WRITE files using the tool.`
         let msg = '';
         const MAX_RESPONSE_LENGTH = 29000; // Guard against infinite loops (increased for multi-file reads)
         
-        console.log(chalk.magenta('┌─[') + chalk.white.bold('Sapper') + chalk.magenta(']'));
-        process.stdout.write(chalk.magenta('│ '));
+        process.stdout.write(chalk.white('Sapper: '));
         for await (const chunk of response) {
           const content = chunk.message.content;
           process.stdout.write(content);
@@ -700,8 +616,7 @@ Do NOT just display content. Actually WRITE files using the tool.`
           
           for (const match of toolMatches) {
             const [_, type, path, content] = match;
-            console.log();
-            console.log(statusBadge(type.toUpperCase(), 'action') + chalk.gray(' → ') + chalk.white(path));
+            console.log(chalk.cyan(`\n[ACTION] ${type} -> ${path}`));
             
             let result;
             if (type.toLowerCase() === 'list') result = tools.list(path);
