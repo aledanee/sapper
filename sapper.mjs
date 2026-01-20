@@ -202,7 +202,9 @@ WORKFLOW:
         console.log();
         messages.push({ role: 'assistant', content: msg });
 
-        const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\]([^\]\n]+)(?:\]([\s\S]*?))?\[\/TOOL\]/g)];
+        // Fixed regex: .+? (non-greedy) stops correctly before [/TOOL]
+        // Old regex [^\]\n]+ was broken - it stopped at ] which is at END of [/TOOL]
+        const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\](.+?)(?:\]([\s\S]*?))?\[\/TOOL\]/g)];
         
         if (toolMatches.length > 0) {
           for (const match of toolMatches) {
