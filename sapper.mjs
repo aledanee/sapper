@@ -353,10 +353,23 @@ IMPORTANT RULES:
         // 3. Rebuild the messages array starting with the ORIGINAL prompt
         messages = [originalSystemPrompt, ...recentMessages];
         
-        // 4. Save to context file so it persists
+        // 4. Add reminder to stay in Agent Mode (not chatbot mode)
+        messages.push({ 
+          role: 'system', 
+          content: `CONTEXT PRUNED. REMINDER: You are an AGENT, not a chatbot. You MUST use tools to take action:
+- [TOOL:LIST]path[/TOOL] - List directory
+- [TOOL:READ]path[/TOOL] - Read file
+- [TOOL:SEARCH]pattern[/TOOL] - Search codebase
+- [TOOL:WRITE]path]content[/TOOL] - Create/overwrite file
+- [TOOL:PATCH]path]old|||new[/TOOL] - Edit file
+- [TOOL:SHELL]command[/TOOL] - Run terminal command
+Do NOT just display content. Actually WRITE files using the tool.`
+        });
+        
+        // 5. Save to context file so it persists
         fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
         
-        console.log(chalk.green(`✅ Pruned context. Original "Senior Engineer" instructions restored.`));
+        console.log(chalk.green(`✅ Pruned context. Sapper reminded to stay in Agent Mode.`));
         console.log(chalk.gray(`Context size: ${messages.length} messages\n`));
         continue;
       }
