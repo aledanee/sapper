@@ -87,10 +87,30 @@ const tools = {
   }
 };
 
+async function checkForUpdates() {
+  try {
+    const response = await fetch('https://registry.npmjs.org/sapper-iq/latest');
+    const data = await response.json();
+    const latestVersion = data.version;
+    
+    if (latestVersion && latestVersion !== CURRENT_VERSION) {
+      console.log(chalk.yellow('🔄 UPDATE AVAILABLE!'));
+      console.log(chalk.gray(`   Current: v${CURRENT_VERSION}`));
+      console.log(chalk.green(`   Latest:  v${latestVersion}`));
+      console.log(chalk.cyan('   Run: npm update -g sapper-iq\n'));
+    }
+  } catch (error) {
+    // Silently fail if update check fails
+  }
+}
+
 async function runSapper() {
   console.clear();
   console.log(chalk.cyan.bold(` SAPPER v${CURRENT_VERSION} | Autonomous "OpenCode" Mode`));
   console.log(chalk.gray(`📁 Working Directory: ${process.cwd()}\n`));
+  
+  // Check for updates
+  await checkForUpdates();
   
   let messages = [];
   if (fs.existsSync(CONTEXT_FILE)) {
