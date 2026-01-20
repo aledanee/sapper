@@ -382,7 +382,7 @@ IMPORTANT RULES:
       messages.push({ role: 'user', content: input });
 
       let toolRounds = 0; // Prevent infinite loops
-      const MAX_TOOL_ROUNDS = 5;
+      const MAX_TOOL_ROUNDS = 20;
       
       let active = true;
       while (active) {
