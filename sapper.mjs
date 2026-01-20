@@ -344,16 +344,19 @@ IMPORTANT RULES:
           continue;
         }
         
-        // Keep system prompt + last 4 messages
-        const systemPrompt = messages[0];
+        // 1. Capture the ORIGINAL detailed system prompt from the very first message
+        const originalSystemPrompt = messages[0];
+        
+        // 2. Capture the last 4 messages (the most recent conversation)
         const recentMessages = messages.slice(-4);
         
-        // Count what we're removing
-        const removedCount = messages.length - 5;
+        // 3. Rebuild the messages array starting with the ORIGINAL prompt
+        messages = [originalSystemPrompt, ...recentMessages];
         
-        messages = [systemPrompt, ...recentMessages];
+        // 4. Save to context file so it persists
         fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
-        console.log(chalk.green(`✅ Pruned ${removedCount} old messages. Kept system prompt + last 4 messages.`));
+        
+        console.log(chalk.green(`✅ Pruned context. Original "Senior Engineer" instructions restored.`));
         console.log(chalk.gray(`Context size: ${messages.length} messages\n`));
         continue;
       }
