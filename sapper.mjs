@@ -64,16 +64,30 @@ function recreateReadline() {
   });
 }
 
+// Directories to ignore when listing files
+const IGNORE_DIRS = new Set([
+  'node_modules', '.git', '.svn', '.hg', 'dist', 'build', 
+  '.next', '.nuxt', '__pycache__', '.cache', 'coverage',
+  '.idea', '.vscode', 'vendor', 'target', '.gradle'
+]);
+
 const tools = {
   read: (path) => {
     try { return fs.readFileSync(path.trim(), 'utf8'); } 
     catch (error) { return `Error reading file: ${error.message}`; }
   },
-  write: (path, content) => {
-    try {
-      fs.writeFileSync(path.trim(), content);
-      return `Successfully saved changes to ${path}`;
-    } catch (error) { return `Error writing file: ${error.message}`; }
+  write: async (path, content) => {
+    const trimmedPath = path.trim();
+    console.log(chalk.yellow.bold(`\n[WRITE] Sapper wants to write to: `) + chalk.white(trimmedPath));
+    console.log(chalk.gray(`Content preview (first 200 chars):\n${content?.substring(0, 200)}${content?.length > 200 ? '...' : ''}`));
+    const confirm = await safeQuestion(chalk.yellow('Allow write? (y/n): '));
+    if (confirm.toLowerCase() === 'y') {
+      try {
+        fs.writeFileSync(trimmedPath, content);
+        return `Successfully saved changes to ${trimmedPath}`;
+      } catch (error) { return `Error writing file: ${error.message}`; }
+    }
+    return "Write blocked by user.";
   },
   mkdir: (path) => {
     try {
@@ -100,8 +114,18 @@ const tools = {
     return "Command blocked by user.";
   },
   list: (path) => {
-    try { return fs.readdirSync(path.trim() || '.').join('\n'); } 
-    catch (e) { return `Error: ${e.message}`; }
+    try {
+      const dir = path.trim() || '.';
+      const entries = fs.readdirSync(dir);
+      // Filter out ignored directories
+      const filtered = entries.filter(entry => {
+        if (IGNORE_DIRS.has(entry)) return false;
+        // Also skip hidden files/folders (starting with .) except current dir
+        if (entry.startsWith('.') && entry !== '.') return false;
+        return true;
+      });
+      return filtered.length > 0 ? filtered.join('\n') : '(empty or all files filtered)';
+    } catch (e) { return `Error: ${e.message}`; }
   }
 };
 
@@ -258,7 +282,7 @@ WORKFLOW:
             if (type.toLowerCase() === 'list') result = tools.list(path);
             else if (type.toLowerCase() === 'read') result = tools.read(path);
             else if (type.toLowerCase() === 'mkdir') result = tools.mkdir(path);
-            else if (type.toLowerCase() === 'write') result = tools.write(path, content);
+            else if (type.toLowerCase() === 'write') result = await tools.write(path, content);
             else if (type.toLowerCase() === 'shell') result = await tools.shell(path);
 
             messages.push({ role: 'user', content: `RESULT (${path}): ${result}` });
