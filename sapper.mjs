@@ -435,7 +435,9 @@ const tools = {
   },
   list: (path) => {
     try {
-      const dir = path.trim() || '.';
+      let dir = path.trim() || '.';
+      // If AI sends "/" (root), treat as current directory "."
+      if (dir === '/') dir = '.';
       const entries = fs.readdirSync(dir);
       // Filter out ignored directories
       const filtered = entries.filter(entry => {
