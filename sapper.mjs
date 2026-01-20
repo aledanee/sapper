@@ -27,10 +27,13 @@ process.on('SIGINT', () => {
     console.log(chalk.red('\nForce quitting...'));
     process.exit(1);
   }
+  // Set flag to abort current stream
+  abortStream = true;
+  
   // Clear current line and move to new one - stops ghost output
   process.stdout.clearLine(0);
   process.stdout.cursorTo(0);
-  console.log(chalk.yellow('\nStopping AI stream... (Ctrl+C again to force quit)'));
+  console.log(chalk.yellow('\n⏹️  Stopping response... (Ctrl+C again to force quit)'));
   
   // Reset terminal immediately
   resetTerminal();
@@ -104,6 +107,7 @@ function statusBadge(text, type = 'info') {
 
 let stepMode = false;
 let debugMode = false; // Toggle with /debug command
+let abortStream = false; // Flag to interrupt AI response
 let rl = readline.createInterface({ 
   input: process.stdin, 
   output: process.stdout,
@@ -624,10 +628,17 @@ Do NOT just display content. Actually WRITE files using the tool.`
 
         let msg = '';
         const MAX_RESPONSE_LENGTH = 29000; // Guard against infinite loops (increased for multi-file reads)
+        abortStream = false; // Reset abort flag before streaming
         
         console.log(chalk.magenta('┌─[') + chalk.white.bold('Sapper') + chalk.magenta(']'));
         process.stdout.write(chalk.magenta('│ '));
         for await (const chunk of response) {
+          // Check if user pressed Ctrl+C
+          if (abortStream) {
+            console.log(chalk.yellow('\n│ [Response interrupted]'));
+            break;
+          }
+          
           const content = chunk.message.content;
           process.stdout.write(content);
           msg += content;
