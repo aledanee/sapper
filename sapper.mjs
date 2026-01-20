@@ -640,8 +640,8 @@ Do NOT just display content. Actually WRITE files using the tool.`
         console.log();
         messages.push({ role: 'assistant', content: msg });
 
-        // Fixed regex: .+? (non-greedy) stops correctly before [/TOOL]
-        const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\](.+?)(?:\]([\s\S]*?))?\[\/TOOL\]/g)];
+        // Fixed regex: [^\]]+ stops at first ] to correctly separate path from content
+        const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\]([^\]]+)(?:\]([\s\S]*?))?\[\/TOOL\]/g)];
         
         // Debug mode: show what regex sees
         if (debugMode) {
