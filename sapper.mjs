@@ -155,6 +155,20 @@ Don't keep executing tools endlessly - provide insights after reading!`
   const ask = () => {
     safeQuestion(chalk.blue.bold('\nIbrahim ➔ ')).then(async (input) => {
       if (input.toLowerCase() === 'exit') process.exit();
+      
+      // Handle reset command
+      if (input.toLowerCase() === '/reset' || input.toLowerCase() === '/clear') {
+        if (fs.existsSync(CONTEXT_FILE)) {
+          fs.unlinkSync(CONTEXT_FILE);
+          console.log(chalk.green('✅ Context cleared! Starting fresh...\n'));
+        }
+        messages = [{
+          role: 'system',
+          content: messages[0].content // Keep system prompt
+        }];
+        return ask();
+      }
+      
       messages.push({ role: 'user', content: input });
 
       let active = true;
