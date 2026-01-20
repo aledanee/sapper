@@ -234,24 +234,16 @@ async function runSapper() {
 
 **CRITICAL - Tool Format Rules:**
 - NEVER use JSON format
-- ONLY use this EXACT format for tools: [TOOL:TYPE:path]content[/TOOL]
-- For single-line content: [TOOL:TYPE:path:content] (legacy format still supported)
+- ONLY use this EXACT format for tools: [TOOL:TYPE:path:content]
 - Types: SHELL, READ, WRITE, MKDIR, LIST, SEARCH
 
 **Examples:**
-[TOOL:SHELL:npm install][/TOOL]
-[TOOL:READ:./package.json][/TOOL]
-[TOOL:WRITE:./app.js]console.log('hello')[/TOOL]
-[TOOL:MKDIR:./src/components][/TOOL]
-[TOOL:LIST:./src][/TOOL]
-[TOOL:SEARCH:function myFunction][/TOOL]
-
-**For multi-line content (like markdown files):**
-[TOOL:WRITE:./file.md]
-Multi-line
-content here
-with - [ ] checkboxes
-[/TOOL]
+[TOOL:SHELL:npm install]
+[TOOL:READ:./package.json]
+[TOOL:WRITE:./app.js:console.log('hello')]
+[TOOL:MKDIR:./src/components]
+[TOOL:LIST:./src]
+[TOOL:SEARCH:function myFunction]
 
 **Shell Command Rules:**
 - For operations in a specific directory, chain with cd: cd /path/to/project && npm install
@@ -416,18 +408,7 @@ with - [ ] checkboxes
         messages.push({ role: 'assistant', content: msg });
 
         const summaryMatch = msg.match(/\[SUMMARY:(.*?)\]/s);
-        
-        // Support both formats:
-        // New: [TOOL:TYPE:path]content[/TOOL] (handles multi-line content with brackets)
-        // Old: [TOOL:TYPE:path:content] (for backward compatibility)
-        const newFormatMatches = [...msg.matchAll(/\[TOOL:(\w+):([^\]]+)\]([\s\S]*?)\[\/TOOL\]/g)];
-        const oldFormatMatches = [...msg.matchAll(/\[TOOL:(\w+):([^:\]]+):([^\]]+)\]/g)];
-        
-        // Normalize to unified format: [fullMatch, type, path, content]
-        const toolMatches = [
-          ...newFormatMatches.map(m => [m[0], m[1], m[2], m[3]]),
-          ...oldFormatMatches.map(m => [m[0], m[1], m[2], m[3]])
-        ];
+        const toolMatches = [...msg.matchAll(/\[TOOL:(\w+):([^:\]]+):?([\s\S]*?)\]/g)];
 
         if (summaryMatch) {
           console.log(chalk.green.bold("\n✅ MISSION COMPLETE:"));
@@ -469,7 +450,7 @@ with - [ ] checkboxes
             break;
           }
         } else {
-          const planMatch = msg.match(/\[PLAN:([\s\S]*?)\]/) || msg.match(/\[PLAN\]([\s\S]*?)\[\/PLAN\]/);
+          const planMatch = msg.match(/\[PLAN:(.*?)\]/);
           if (planMatch) {
             const feedback = await safeQuestion(chalk.yellow('\nModify plan or type "go": '));
             if (feedback.toLowerCase() === '/stop') { active = false; break; }
