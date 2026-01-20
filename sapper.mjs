@@ -148,6 +148,27 @@ const tools = {
       });
       return filtered.length > 0 ? filtered.join('\n') : '(empty or all files filtered)';
     } catch (e) { return `Error: ${e.message}`; }
+  },
+  search: (pattern) => {
+    return new Promise((resolve) => {
+      const excludeDirs = Array.from(IGNORE_DIRS).join(',');
+      // Use grep to search for pattern, excluding ignored directories
+      const cmd = `grep -rEin "${pattern.replace(/"/g, '\\"')}" . --exclude-dir={${excludeDirs}} --include="*.{js,ts,jsx,tsx,py,java,go,rs,rb,php,c,cpp,h,css,scss,html,json,md,txt,yml,yaml,toml,sh}" 2>/dev/null | head -50`;
+      
+      const proc = spawn('sh', ['-c', cmd], { cwd: process.cwd() });
+      let output = '';
+      
+      proc.stdout.on('data', (data) => { output += data.toString(); });
+      proc.stderr.on('data', (data) => { output += data.toString(); });
+      
+      proc.on('close', () => {
+        if (output.trim()) {
+          resolve(`Found matches:\n${output.trim()}`);
+        } else {
+          resolve(`No matches found for: ${pattern}`);
+        }
+      });
+    });
   }
 };
 
@@ -221,16 +242,31 @@ READING GUIDELINES:
 TOOL FORMAT (CRITICAL - FOLLOW EXACTLY):
 ✅ CORRECT: [TOOL:LIST].[/TOOL]
 ✅ CORRECT: [TOOL:READ]./file.js[/TOOL]
+✅ CORRECT: [TOOL:SEARCH]functionName[/TOOL]
 ✅ CORRECT: [TOOL:WRITE]./file.js]full content here[/TOOL]
 ✅ CORRECT: [TOOL:PATCH]./file.js]old code|||new code[/TOOL]
 ❌ WRONG: [TOOL:LIST].[/] - missing TOOL at end!
+
+AVAILABLE TOOLS:
+- LIST: List directory contents
+- READ: Read file contents
+- SEARCH: Find text/code across all files (grep-like, returns file:line:match)
+- WRITE: Create or overwrite entire file (requires confirmation)
+- PATCH: Make small edits to existing file (requires confirmation)
+- MKDIR: Create directory
+- SHELL: Run terminal command (requires confirmation)
+
+SMART WORKFLOW:
+1. For unknown codebases: [TOOL:SEARCH]main|index|app[/TOOL] to find entry points
+2. To find where something is defined: [TOOL:SEARCH]function myFunc[/TOOL]
+3. SEARCH returns file paths + line numbers - then READ specific files
 
 PATCH vs WRITE:
 - Use PATCH for small changes (1-10 lines): [TOOL:PATCH]path]old|||new[/TOOL]
 - Use WRITE only for new files or complete rewrites
 
 WORKFLOW:
-1. LIST directory → 2. READ files (as many as needed) → 3. ANALYZE and RESPOND`
+1. LIST or SEARCH → 2. READ relevant files → 3. ANALYZE and RESPOND`
     }];
   }
 
@@ -360,6 +396,7 @@ WORKFLOW:
                 result = 'Error: PATCH requires format [TOOL:PATCH]path]OLD_TEXT|||NEW_TEXT[/TOOL]';
               }
             }
+            else if (type.toLowerCase() === 'search') result = await tools.search(path);
             else if (type.toLowerCase() === 'shell') result = await tools.shell(path);
 
             messages.push({ role: 'user', content: `RESULT (${path}): ${result}` });
