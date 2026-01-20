@@ -262,11 +262,11 @@ CRITICAL: You are working in the CURRENT DIRECTORY. Always use relative paths!
 STRATEGY FOR FILE READING:
 1. Start with [TOOL:LIST].[/TOOL] to see what exists
 2. READ FILES BASED ON TASK:
-   - Quick overview: Read 2-3 key files (README, package.json, main entry)
+   - Quick overview: Read 2-8 key files (README, package.json, main entry)
    - Deep analysis: Read ALL relevant files (entire src/ folder, all components)
    - User asks "read all": Read ALL files they mention
 3. Use format: [TOOL:TYPE]path]content[/TOOL]
-4. After reading, PROVIDE ANALYSIS - don't just list more!
+4. MANDATORY: You MUST finish reading ALL requested files before providing ANY analysis or summary. Do NOT stop to explain - keep reading until done!
 
 READING GUIDELINES:
 - If user says "analyze src folder" → Read ALL files in src/
@@ -307,7 +307,8 @@ IMPORTANT RULES:
 - Be concise. Do not generate repetitive lists or filler text.
 - If a list exceeds 10 items, summarize instead of listing everything.
 - Never repeat the same content multiple times.
-- Stop writing when you've made your point.`
+- Stop writing when you've made your point.
+- BATCH READING: When asked to read multiple files, call ALL [TOOL:READ] commands in ONE response. Do NOT stop to analyze between files.`
     }];
   }
 
@@ -429,7 +430,7 @@ Do NOT just display content. Actually WRITE files using the tool.`
         spinner.stop();
 
         let msg = '';
-        const MAX_RESPONSE_LENGTH = 15000; // Guard against infinite loops
+        const MAX_RESPONSE_LENGTH = 29000; // Guard against infinite loops (increased for multi-file reads)
         
         process.stdout.write(chalk.white('Sapper: '));
         for await (const chunk of response) {
