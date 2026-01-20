@@ -166,8 +166,10 @@ WORKFLOW:
     }];
   }
 
-  const ask = () => {
-    safeQuestion(chalk.blue.bold('\nIbrahim ➔ ')).then(async (input) => {
+  const ask = async () => {
+    try {
+      const input = await safeQuestion(chalk.blue.bold('\nIbrahim ➔ '));
+      
       if (input.toLowerCase() === 'exit') process.exit();
       
       // Handle reset command
@@ -190,7 +192,14 @@ WORKFLOW:
         if (stepMode) await safeQuestion(chalk.gray('[STEP] Press Enter to let AI think...'));
         
         spinner.start('Thinking...');
-        const response = await ollama.chat({ model: selectedModel, messages, stream: true });
+        let response;
+        try {
+          response = await ollama.chat({ model: selectedModel, messages, stream: true });
+        } catch (ollamaError) {
+          spinner.stop();
+          console.error(chalk.red('\n❌ Ollama error:'), ollamaError.message);
+          return ask();
+        }
         spinner.stop();
 
         let msg = '';
@@ -203,7 +212,6 @@ WORKFLOW:
         messages.push({ role: 'assistant', content: msg });
 
         // Fixed regex: .+? (non-greedy) stops correctly before [/TOOL]
-        // Old regex [^\]\n]+ was broken - it stopped at ] which is at END of [/TOOL]
         const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\](.+?)(?:\]([\s\S]*?))?\[\/TOOL\]/g)];
         
         if (toolMatches.length > 0) {
@@ -222,30 +230,29 @@ WORKFLOW:
           }
           fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
           
-          // Warn if reading many files at once
           if (toolMatches.length > 30) {
             console.log(chalk.yellow('\n⚠️  Reading 30+ files! This might take time.'));
           }
         } else {
           // No tools found - check if malformed command
           if (msg.includes('[TOOL:') && msg.includes('[/]')) {
-            console.log(chalk.red('\n❌ Malformed tool command detected! Expected format: [TOOL:TYPE]path[/TOOL]'));
+            console.log(chalk.red('\n❌ Malformed tool command detected!'));
             messages.push({ 
               role: 'user', 
               content: 'ERROR: Your tool command is malformed. Use [TOOL:TYPE]path]content[/TOOL] or [TOOL:TYPE]path[/TOOL]' 
             });
           } else {
-            // Normal response without tools - save context and wait for next input
+            // Normal response - save and wait for next input
             fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
             active = false;
           }
         }
       }
-      ask();
-    }).catch((error) => {
+    } catch (error) {
       console.error(chalk.red('\n❌ Error:'), error.message);
-      ask(); // Continue despite error
-    });
+    }
+    // ALWAYS call ask() again - keep the conversation going
+    ask();
   };
   ask();
 }
