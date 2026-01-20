@@ -90,6 +90,7 @@ const tools = {
 async function runSapper() {
   console.clear();
   console.log(chalk.cyan.bold(` SAPPER v${CURRENT_VERSION} | Autonomous "OpenCode" Mode`));
+  console.log(chalk.gray(`📁 Working Directory: ${process.cwd()}\n`));
   
   let messages = [];
   if (fs.existsSync(CONTEXT_FILE)) {
@@ -105,12 +106,23 @@ async function runSapper() {
   if (messages.length === 0) {
     messages = [{
       role: 'system',
-      content: `You are Sapper, a senior engineer. 
-      STRATEGY:
-      1. When asked to analyze, use [TOOL:LIST]./[/TOOL] first.
-      2. Immediately [TOOL:READ] key files (package.json, README.md, entry points) in the SAME turn.
-      3. Use the format: [TOOL:TYPE]path]content[/TOOL]. For LIST/READ, content is empty.
-      4. DO NOT ask for permission to read or list. Just do it.`
+      content: `You are Sapper, a senior engineer working in: ${process.cwd()}
+
+CRITICAL: You are working in the CURRENT DIRECTORY. Always use relative paths!
+- Use . or ./ for current directory
+- NEVER use / (that's the root directory)
+- Use relative paths like ./file.js or subfolder/file.js
+
+STRATEGY:
+1. When asked to analyze, use [TOOL:LIST].[/TOOL] first (NOTE: dot, not slash!)
+2. Immediately [TOOL:READ] key files from current directory in the SAME turn
+3. Use format: [TOOL:TYPE]path]content[/TOOL]
+4. DO NOT ask permission - just execute tools immediately
+
+EXAMPLES:
+✅ CORRECT: [TOOL:LIST].[/TOOL] - lists current directory
+✅ CORRECT: [TOOL:READ]./package.json[/TOOL] - reads from current dir
+❌ WRONG: [TOOL:LIST]/[/TOOL] - lists root, not current directory!`
     }];
   }
 
