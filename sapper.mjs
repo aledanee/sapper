@@ -166,7 +166,8 @@ WORKFLOW:
     }];
   }
 
-  const ask = async () => {
+  // Main conversation loop - never exits unless user types 'exit'
+  while (true) {
     try {
       const input = await safeQuestion(chalk.blue.bold('\nIbrahim ➔ '));
       
@@ -182,7 +183,7 @@ WORKFLOW:
           role: 'system',
           content: messages[0].content // Keep system prompt
         }];
-        return await ask();
+        continue;
       }
       
       messages.push({ role: 'user', content: input });
@@ -201,7 +202,8 @@ WORKFLOW:
         } catch (ollamaError) {
           spinner.stop();
           console.error(chalk.red('\n❌ Ollama error:'), ollamaError.message);
-          return await ask();
+          active = false;
+          continue;
         }
         spinner.stop();
 
@@ -265,11 +267,9 @@ WORKFLOW:
       }
     } catch (error) {
       console.error(chalk.red('\n❌ Error:'), error.message);
+      // Loop continues automatically
     }
-    // ALWAYS call ask() again with await - keep the conversation going
-    await ask();
-  };
-  await ask();
+  }
 }
 
 runSapper();
