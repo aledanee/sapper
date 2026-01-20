@@ -93,6 +93,241 @@ function recreateReadline() {
   });
 }
 
+// Specialized prompt profiles for different tasks
+const PROMPT_PROFILES = {
+  documentation: `
+🎯 DOCUMENTATION MODE ACTIVATED
+Write comprehensive technical documentation. Execute tools to analyze codebase first.
+
+Documentation Types & Formats:
+
+**Use Cases:**
+Title: [Action User Wants to Perform]
+- Actor: [Who performs the action]
+- Preconditions: [What must be true before]
+- Main Flow:
+  1. User does X
+  2. System responds with Y
+  3. User confirms Z
+- Postconditions: [Result after completion]
+- Alternative Flows: [Error cases, edge cases]
+
+**User Stories:**
+"As a [role], I want [feature] so that [benefit]"
+- Acceptance Criteria:
+  - Given [context]
+  - When [action]
+  - Then [result]
+
+**BRD (Business Requirements Document):**
+## Background
+## Problem Statement
+## Objectives
+## Functional Requirements (numbered list)
+## Non-Functional Requirements (performance, security, scalability)
+## Success Metrics
+## Timeline & Milestones
+
+**Technical Documentation:**
+- API endpoints with request/response examples
+- Architecture diagrams (use mermaid)
+- Setup instructions
+- Environment variables
+
+Execute [TOOL:LIST] and [TOOL:READ] to understand project before documenting.`,
+
+  backend: `
+🎯 BACKEND MODE ACTIVATED - Node.js Specialist
+Build server-side APIs, business logic, and integrations using Node.js/Express.
+
+Tech Stack & Standards:
+- Framework: Express.js or Fastify
+- Runtime: Node.js (ES6+ with async/await)
+- Architecture: MVC, Clean Architecture, or layered approach
+
+Implementation Checklist:
+✓ RESTful API Design:
+  - GET /api/resource (list/read)
+  - POST /api/resource (create)
+  - PUT /PATCH /api/resource/:id (update)
+  - DELETE /api/resource/:id (delete)
+  - Return proper status codes: 200, 201, 400, 401, 404, 500
+
+✓ Request Handling:
+  - Use express.json() for body parsing
+  - Validate inputs with joi or zod
+  - Implement error middleware
+  - Add request logging (morgan/winston)
+
+✓ Security:
+  - Use helmet for security headers
+  - Implement CORS properly
+  - JWT authentication with bcrypt password hashing
+  - Rate limiting with express-rate-limit
+  - Input sanitization
+
+✓ Project Structure:
+/src
+  /routes     - API endpoints
+  /controllers - Request handlers
+  /services   - Business logic
+  /models     - Data models
+  /middleware - Auth, validation, errors
+  /config     - Environment configs
+  /utils      - Helper functions
+
+✓ Best Practices:
+  - Use environment variables (.env with dotenv)
+  - Implement graceful shutdown
+  - Add health check endpoint: GET /health
+  - Use async/await with try-catch
+  - Create separate router files
+
+Execute tools to create Express server structure immediately.`,
+
+  frontend: `
+🎯 FRONTEND MODE ACTIVATED
+Focus on UI components, styling, and user interactions.
+
+Implementation Rules:
+- Component-based architecture (React/Vue/Svelte)
+- Responsive design with mobile-first approach
+- Use Tailwind CSS or styled-components
+- Implement proper state management
+- Add loading states and error boundaries
+- Handle forms with validation
+- Optimize for performance (lazy loading, memoization)
+
+Execute tools to create component structure immediately.`,
+
+  testing: `
+🎯 TESTING MODE ACTIVATED
+Write comprehensive test suites with high coverage.
+
+Test Requirements:
+- Unit tests: Test individual functions/components
+- Integration tests: Test feature workflows
+- Use describe/it blocks with clear names
+- Add assertions: expect().toBe(), toEqual(), toHaveBeenCalled()
+- Mock external dependencies
+- Test edge cases and error scenarios
+- Aim for 80%+ coverage
+
+Execute tools to create test files immediately.`,
+
+  database: `
+🎯 DATABASE MODE ACTIVATED - PostgreSQL Specialist
+Design schemas, write migrations, and optimize queries for PostgreSQL.
+
+Tech Stack:
+- Database: PostgreSQL 14+
+- ORM Options: Prisma (recommended), Sequelize, or TypeORM
+- Query Builder: Knex.js
+- Migrations: Prisma Migrate or Knex migrations
+
+Schema Design Best Practices:
+✓ Data Types:
+  - Use SERIAL or UUID for primary keys
+  - TEXT for variable strings (not VARCHAR)
+  - TIMESTAMP WITH TIME ZONE for dates
+  - JSONB for flexible data (indexed)
+  - ENUM types for fixed choices
+
+✓ Table Structure:
+CREATE TABLE users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+✓ Relationships:
+  - Foreign Keys: REFERENCES other_table(id) ON DELETE CASCADE
+  - Indexes on FK columns: CREATE INDEX idx_user_id ON posts(user_id)
+  - Join tables for many-to-many
+
+✓ Performance:
+  - Add indexes on frequently queried columns
+  - Use partial indexes for conditional queries
+  - Create composite indexes for multi-column queries
+  - Analyze query plans: EXPLAIN ANALYZE
+
+✓ Migrations Pattern:
+  - Up: Create/alter tables and indexes
+  - Down: Rollback changes safely
+  - Version control all migrations
+  - Never edit existing migrations
+
+✓ Prisma Schema Example:
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  posts     Post[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+✓ Connection:
+  - Use connection pooling (pg.Pool)
+  - Set max connections: 20-50
+  - Use prepared statements
+  - Handle connection errors gracefully
+
+✓ Seed Data:
+  - Create seed files for development
+  - Use transactions for bulk inserts
+  - Make seeds idempotent
+
+Execute tools to create schema files and migrations immediately.`,
+
+  devops: `
+🎯 DEVOPS MODE ACTIVATED
+Setup CI/CD, containerization, deployment automation.
+
+DevOps Tasks:
+- Write Dockerfile with multi-stage builds
+- Create docker-compose.yml for local dev
+- Setup GitHub Actions or GitLab CI
+- Add environment-specific configs
+- Implement health checks and monitoring
+- Use secrets management
+- Optimize build times
+
+Execute tools to create config files immediately.`
+};
+
+// Auto-detect task profile from user input
+function detectTaskProfile(input) {
+  const text = input.toLowerCase();
+  
+  // Documentation keywords
+  if (text.match(/\b(document|documentation|readme|brd|prd|user stor(y|ies)|use case|spec|wiki|guide)\b/))
+    return 'documentation';
+  
+  // Backend keywords
+  if (text.match(/\b(api|endpoint|backend|server|route|controller|middleware|rest|graphql|service)\b/))
+    return 'backend';
+  
+  // Frontend keywords
+  if (text.match(/\b(ui|frontend|component|page|design|style|css|tailwind|react|vue|svelte|button|form|navbar)\b/))
+    return 'frontend';
+  
+  // Testing keywords
+  if (text.match(/\b(test|testing|spec|jest|vitest|cypress|unit test|integration|e2e|coverage)\b/))
+    return 'testing';
+  
+  // Database keywords
+  if (text.match(/\b(database|schema|migration|model|orm|sql|postgres|mysql|mongo|prisma|sequelize)\b/))
+    return 'database';
+  
+  // DevOps keywords
+  if (text.match(/\b(docker|container|ci\/cd|deploy|pipeline|kubernetes|k8s|helm|terraform|ansible)\b/))
+    return 'devops';
+  
+  return null;
+}
+
 // --- Tool Logic ---
 const tools = {
   read: (path) => {
@@ -352,16 +587,25 @@ Working directory: ${process.cwd()}`
         return ask();
       }
 
+      // Auto-detect task profile and inject specialized instructions
+      const profile = detectTaskProfile(input);
+      let contextMsg = input;
+      
+      // Inject profile if detected
+      if (profile) {
+        console.log(chalk.magenta(`\n🎯 ${profile.toUpperCase()} MODE DETECTED\n`));
+        contextMsg = `${input}\n\n${PROMPT_PROFILES[profile]}`;
+      }
+      
       // Check if user mentioned a directory and provide context
       const dirMatch = input.match(/\/Users\/[^\s]+|\/[a-zA-Z0-9_\/-]+/g);
-      let contextMsg = input;
       
       if (dirMatch && dirMatch[0]) {
         const mentionedDir = dirMatch[0];
         try {
           if (fs.existsSync(mentionedDir) && fs.statSync(mentionedDir).isDirectory()) {
             const files = fs.readdirSync(mentionedDir).slice(0, 10).join(', ');
-            contextMsg = `${input}\n\n[CONTEXT: Directory "${mentionedDir}" contains: ${files}${fs.readdirSync(mentionedDir).length > 10 ? '...' : ''}]`;
+            contextMsg += `\n\n[CONTEXT: Directory "${mentionedDir}" contains: ${files}${fs.readdirSync(mentionedDir).length > 10 ? '...' : ''}]`;
           }
         } catch (e) {
           // Silently ignore if directory doesn't exist
