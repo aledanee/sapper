@@ -212,27 +212,29 @@ Don't keep executing tools endlessly - provide insights after reading!`
           }
           fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
           
-          // Limit tool executions - if too many, warn and exit
+          // Warn if too many tools
           if (toolMatches.length > 10) {
-            console.log(chalk.yellow('\n⚠️  Too many tool calls in one response! AI should analyze, not just read endlessly.'));
-            active = false;
+            console.log(chalk.yellow('\n⚠️  Too many tool calls! Read 2-3 files, then analyze.'));
           }
         } else {
-          // No tools found - check if malformed command
+          // No tools - check for malformed commands
           if (msg.includes('[TOOL:') && msg.includes('[/]')) {
-            console.log(chalk.red('\n❌ Malformed tool command detected! Expected format: [TOOL:TYPE]path[/TOOL]'));
+            console.log(chalk.red('\n❌ Malformed tool: Use [TOOL:TYPE]path[/TOOL]'));
             messages.push({ 
               role: 'user', 
-              content: 'ERROR: Your tool command is malformed. Use [TOOL:TYPE]path]content[/TOOL] or [TOOL:TYPE]path[/TOOL]' 
+              content: 'ERROR: Tool format wrong! Use [TOOL:TYPE]path[/TOOL]' 
             });
           } else {
-            // Normal response without tools - save context and wait for next input
+            // Normal response - save and continue
             fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
             active = false;
           }
         }
       }
       ask();
+    }).catch((error) => {
+      console.error(chalk.red('\n❌ Error in conversation loop:'), error);
+      ask(); // Continue despite error
     });
   };
   ask();
