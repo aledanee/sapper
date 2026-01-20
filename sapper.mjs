@@ -522,7 +522,22 @@ async function runSapper() {
     }
   }
 
-  const localModels = await ollama.list();
+  let localModels;
+  try {
+    localModels = await ollama.list();
+  } catch (e) {
+    console.error(chalk.red('\n❌ Cannot connect to Ollama!'));
+    console.log(chalk.yellow('   Make sure Ollama is running: ') + chalk.cyan('ollama serve'));
+    console.log(chalk.gray('   Or install from: https://ollama.ai\n'));
+    process.exit(1);
+  }
+  
+  if (!localModels.models || localModels.models.length === 0) {
+    console.error(chalk.red('\n❌ No models found!'));
+    console.log(chalk.yellow('   Pull a model first: ') + chalk.cyan('ollama pull llama3.2'));
+    process.exit(1);
+  }
+  
   console.log(divider());
   console.log(statusBadge('MODELS', 'info') + chalk.gray(' Available Ollama models:\n'));
   localModels.models.forEach((m, i) => {
