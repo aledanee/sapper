@@ -7,6 +7,8 @@ import ora from 'ora';
 import readline from 'readline';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { marked } from 'marked';
+import TerminalRenderer from 'marked-terminal';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -176,6 +178,36 @@ function statusBadge(text, type = 'info') {
     action: chalk.bgMagenta.white(` ${text} `)
   };
   return badges[type] || badges.info;
+}
+
+// Configure marked with terminal renderer
+marked.setOptions({
+  renderer: new TerminalRenderer({
+    code: chalk.cyan,
+    blockquote: chalk.gray.italic,
+    html: chalk.gray,
+    heading: chalk.bold.cyan,
+    firstHeading: chalk.bold.cyan,
+    hr: chalk.gray('─'.repeat(40)),
+    listitem: chalk.yellow('• ') + '%s',
+    table: chalk.white,
+    paragraph: chalk.white,
+    strong: chalk.bold.white,
+    em: chalk.italic,
+    codespan: chalk.cyan,
+    del: chalk.strikethrough,
+    link: chalk.underline.blue,
+    href: chalk.gray
+  })
+});
+
+// Render markdown to terminal
+function renderMarkdown(text) {
+  try {
+    return marked(text).trim();
+  } catch (e) {
+    return text; // Fallback to raw text
+  }
 }
 
 let stepMode = false;
@@ -765,6 +797,19 @@ async function runSapper() {
           }
         }
         console.log();
+        
+        // If response has markdown, show rendered version
+        const hasMarkdown = /\*\*|__|`|^#|^[-*] /m.test(msg);
+        if (hasMarkdown && !msg.includes('[TOOL:')) {
+          console.log(chalk.gray('─'.repeat(40)));
+          const rendered = renderMarkdown(msg);
+          const lines = rendered.split('\n');
+          for (const line of lines) {
+            console.log(chalk.magenta('│ ') + line);
+          }
+          console.log();
+        }
+        
         messages.push({ role: 'assistant', content: msg });
 
         // Fixed regex: [^\]]+ stops at first ] to correctly separate path from content
