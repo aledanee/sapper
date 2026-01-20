@@ -814,8 +814,8 @@ async function runSapper() {
         
         messages.push({ role: 'assistant', content: msg });
 
-        // Fixed regex: [^\]]+ stops at first ] to correctly separate path from content
-        const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\]([^\]]+)(?:\]([\s\S]*?))?\[\/TOOL\]/g)];
+        // Fixed regex: [^\]]* allows empty path (AI sometimes sends [TOOL:LIST][/TOOL])
+        const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\]([^\]]*)(?:\]([\s\S]*?))?\[\/TOOL\]/g)];
         
         // Debug mode: show what regex sees
         if (debugMode) {
