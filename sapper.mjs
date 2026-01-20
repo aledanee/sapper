@@ -135,14 +135,20 @@ CRITICAL: You are working in the CURRENT DIRECTORY. Always use relative paths!
 
 STRATEGY:
 1. When asked to analyze, use [TOOL:LIST].[/TOOL] first (NOTE: dot, not slash!)
-2. Immediately [TOOL:READ] key files from current directory in the SAME turn
-3. Use format: [TOOL:TYPE]path]content[/TOOL]
-4. DO NOT ask permission - just execute tools immediately
+2. Read ONLY 2-3 KEY files in the SAME turn (README, package.json, main entry)
+3. DON'T read ALL files at once - read strategically!
+4. After reading files, PROVIDE ANALYSIS - don't just list more!
+5. Use format: [TOOL:TYPE]path]content[/TOOL]
 
-EXAMPLES:
-✅ CORRECT: [TOOL:LIST].[/TOOL] - lists current directory
-✅ CORRECT: [TOOL:READ]./package.json[/TOOL] - reads from current dir
-❌ WRONG: [TOOL:LIST]/[/TOOL] - lists root, not current directory!`
+TOOL FORMAT (CRITICAL - FOLLOW EXACTLY):
+✅ CORRECT: [TOOL:LIST].[/TOOL]
+✅ CORRECT: [TOOL:READ]./file.js[/TOOL]
+❌ WRONG: [TOOL:LIST].[/] - missing TOOL at end!
+❌ WRONG: [TOOL:LIST]/[/TOOL] - wrong directory!
+
+WORKFLOW:
+1. LIST directory → 2. READ 2-3 key files → 3. ANALYZE and RESPOND
+Don't keep executing tools endlessly - provide insights after reading!`
     }];
   }
 
@@ -185,8 +191,23 @@ EXAMPLES:
             messages.push({ role: 'user', content: `RESULT (${path}): ${result}` });
           }
           fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
+          
+          // Limit tool executions - if too many, warn and exit
+          if (toolMatches.length > 10) {
+            console.log(chalk.yellow('\n⚠️  Too many tool calls in one response! AI should analyze, not just read endlessly.'));
+            active = false;
+          }
         } else {
-          active = false;
+          // No tools found - check if malformed command
+          if (msg.includes('[TOOL:') && msg.includes('[/]')) {
+            console.log(chalk.red('\n❌ Malformed tool command detected! Expected format: [TOOL:TYPE]path[/TOOL]'));
+            messages.push({ 
+              role: 'user', 
+              content: 'ERROR: Your tool command is malformed. Use [TOOL:TYPE]path]content[/TOOL] or [TOOL:TYPE]path[/TOOL]' 
+            });
+          } else {
+            active = false;
+          }
         }
       }
       ask();
