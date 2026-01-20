@@ -474,7 +474,7 @@ Do NOT just display content. Actually WRITE files using the tool.`
             // Show the raw tool attempt for debugging
             const toolAttempt = msg.match(/\[TOOL:[^\]]*\][^\[]{0,100}/s);
             if (toolAttempt) {
-              console.log(chalk.yellow(`  Raw tool attempt (first 150 chars):`);
+              console.log(chalk.yellow(`  Raw tool attempt (first 150 chars):`));
               console.log(chalk.gray(`  "${toolAttempt[0].substring(0, 150)}..."`));
             }
           }
