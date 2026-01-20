@@ -301,6 +301,13 @@ WORKFLOW:
   // Main conversation loop - never exits unless user types 'exit'
   while (true) {
     try {
+      // Context size warning - large context causes hangs
+      const contextSize = JSON.stringify(messages).length;
+      if (contextSize > 32000) {
+        console.log(chalk.red.bold('\n⚠️  WARNING: Context is very large (~' + Math.round(contextSize/1024) + 'KB). Sapper might hang.'));
+        console.log(chalk.yellow('👉 Suggestion: Type /prune to keep only the latest analysis.'));
+      }
+      
       const input = await safeQuestion(chalk.blue.bold('\nIbrahim ➔ '));
       
       if (input.toLowerCase() === 'exit') process.exit();
@@ -399,6 +406,8 @@ WORKFLOW:
           // Prevent infinite tool loops
           if (toolRounds >= MAX_TOOL_ROUNDS) {
             console.log(chalk.yellow(`\n⚠️  Tool limit reached (${MAX_TOOL_ROUNDS} rounds). Stopping auto-execution.`));
+            console.log(chalk.gray('💡 Tip: Type /prune after analysis to reduce context size.'));
+            resetTerminal(); // Ensure terminal is responsive
             messages.push({ 
               role: 'user', 
               content: 'STOP using tools now. You have enough information. Please provide your analysis based on what you have read.' 
@@ -446,6 +455,9 @@ WORKFLOW:
             // Normal response - save and wait for next input
             fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
             active = false;
+            spinner.stop(); // Ensure spinner is dead
+            resetTerminal(); // Force terminal back to normal state
+            process.stdout.write('\n'); // Force newline to break out of stream mode
           }
         }
       }
