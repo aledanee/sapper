@@ -27,7 +27,13 @@ process.on('SIGINT', () => {
     console.log(chalk.red('\nForce quitting...'));
     process.exit(1);
   }
-  console.log(chalk.yellow('\n\nUse "exit" to close Sapper safely, or Ctrl+C again to force quit.'));
+  // Clear current line and move to new one - stops ghost output
+  process.stdout.clearLine(0);
+  process.stdout.cursorTo(0);
+  console.log(chalk.yellow('\nStopping AI stream... (Ctrl+C again to force quit)'));
+  
+  // Reset terminal immediately
+  resetTerminal();
   setTimeout(() => { ctrlCCount = 0; }, 2000); // Reset after 2 seconds
 });
 
@@ -294,7 +300,13 @@ PATCH vs WRITE:
 - Use WRITE only for new files or complete rewrites
 
 WORKFLOW:
-1. LIST or SEARCH → 2. READ relevant files → 3. ANALYZE and RESPOND`
+1. LIST or SEARCH → 2. READ relevant files → 3. ANALYZE and RESPOND
+
+IMPORTANT RULES:
+- Be concise. Do not generate repetitive lists or filler text.
+- If a list exceeds 10 items, summarize instead of listing everything.
+- Never repeat the same content multiple times.
+- Stop writing when you've made your point.`
     }];
   }
 
@@ -389,10 +401,18 @@ WORKFLOW:
         spinner.stop();
 
         let msg = '';
+        const MAX_RESPONSE_LENGTH = 15000; // Guard against infinite loops
+        
         process.stdout.write(chalk.white('Sapper: '));
         for await (const chunk of response) {
-          process.stdout.write(chunk.message.content);
-          msg += chunk.message.content;
+          const content = chunk.message.content;
+          process.stdout.write(content);
+          msg += content;
+          
+          if (msg.length > MAX_RESPONSE_LENGTH) {
+            console.log(chalk.red('\n\n⚠️ RESPONSE TOO LONG: Forcing stop to prevent infinite loop.'));
+            break;
+          }
         }
         console.log();
         messages.push({ role: 'assistant', content: msg });
