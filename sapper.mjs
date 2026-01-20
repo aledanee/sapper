@@ -182,11 +182,14 @@ WORKFLOW:
           role: 'system',
           content: messages[0].content // Keep system prompt
         }];
-        return ask();
+        return await ask();
       }
       
       messages.push({ role: 'user', content: input });
 
+      let toolRounds = 0; // Prevent infinite loops
+      const MAX_TOOL_ROUNDS = 5;
+      
       let active = true;
       while (active) {
         if (stepMode) await safeQuestion(chalk.gray('[STEP] Press Enter to let AI think...'));
@@ -198,7 +201,7 @@ WORKFLOW:
         } catch (ollamaError) {
           spinner.stop();
           console.error(chalk.red('\n❌ Ollama error:'), ollamaError.message);
-          return ask();
+          return await ask();
         }
         spinner.stop();
 
@@ -215,6 +218,18 @@ WORKFLOW:
         const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\](.+?)(?:\]([\s\S]*?))?\[\/TOOL\]/g)];
         
         if (toolMatches.length > 0) {
+          toolRounds++;
+          
+          // Prevent infinite tool loops
+          if (toolRounds >= MAX_TOOL_ROUNDS) {
+            console.log(chalk.yellow(`\n⚠️  Tool limit reached (${MAX_TOOL_ROUNDS} rounds). Stopping auto-execution.`));
+            messages.push({ 
+              role: 'user', 
+              content: 'STOP using tools now. You have enough information. Please provide your analysis based on what you have read.' 
+            });
+            continue; // Let AI respond without tools
+          }
+          
           for (const match of toolMatches) {
             const [_, type, path, content] = match;
             console.log(chalk.cyan(`\n[ACTION] ${type} -> ${path}`));
@@ -251,10 +266,10 @@ WORKFLOW:
     } catch (error) {
       console.error(chalk.red('\n❌ Error:'), error.message);
     }
-    // ALWAYS call ask() again - keep the conversation going
-    ask();
+    // ALWAYS call ask() again with await - keep the conversation going
+    await ask();
   };
-  ask();
+  await ask();
 }
 
 runSapper();
