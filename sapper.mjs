@@ -874,7 +874,13 @@ async function runSapper() {
             if (type.toLowerCase() === 'list') result = tools.list(path);
             else if (type.toLowerCase() === 'read') result = tools.read(path);
             else if (type.toLowerCase() === 'mkdir') result = tools.mkdir(path);
-            else if (type.toLowerCase() === 'write') result = await tools.write(path, content);
+            else if (type.toLowerCase() === 'write') {
+              if (!content || content.trim() === '') {
+                result = 'Error: WRITE requires content. Use [TOOL:WRITE]path]content here[/TOOL]';
+              } else {
+                result = await tools.write(path, content);
+              }
+            }
             else if (type.toLowerCase() === 'patch') {
               // PATCH format: [TOOL:PATCH]path]OLD_TEXT|||NEW_TEXT[/TOOL]
               const parts = content?.split('|||');
