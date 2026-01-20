@@ -234,24 +234,26 @@ async function runSapper() {
 
 **CRITICAL - Tool Format Rules:**
 - NEVER use JSON format
-- ONLY use this EXACT format for tools: [TOOL:TYPE:path]content[/TOOL]
-- For single-line content: [TOOL:TYPE:path:content] (legacy format still supported)
+- ALWAYS use this format: [TOOL:TYPE:path]content[/TOOL]
 - Types: SHELL, READ, WRITE, MKDIR, LIST, SEARCH
 
-**Examples:**
-[TOOL:SHELL:npm install][/TOOL]
-[TOOL:READ:./package.json][/TOOL]
-[TOOL:WRITE:./app.js]console.log('hello')[/TOOL]
-[TOOL:MKDIR:./src/components][/TOOL]
-[TOOL:LIST:./src][/TOOL]
-[TOOL:SEARCH:function myFunction][/TOOL]
+**Examples for ALL cases (short or long content):**
+[TOOL:SHELL]npm install[/TOOL]
+[TOOL:READ]./package.json[/TOOL]
+[TOOL:WRITE]./app.js]console.log('hello')[/TOOL]
+[TOOL:MKDIR]./src/components[/TOOL]
+[TOOL:LIST]./src[/TOOL]
+[TOOL:SEARCH]function myFunction[/TOOL]
 
-**For multi-line content (like markdown files):**
-[TOOL:WRITE:./file.md]
+**For files with brackets, arrays, or multi-line content:**
+[TOOL:WRITE]./file.md]
 Multi-line
 content here
 with - [ ] checkboxes
+and [arrays]
 [/TOOL]
+
+**IMPORTANT:** ALWAYS put path after colon, then close bracket, then content, then [/TOOL]
 
 **Shell Command Rules:**
 - For operations in a specific directory, chain with cd: cd /path/to/project && npm install
@@ -417,17 +419,8 @@ with - [ ] checkboxes
 
         const summaryMatch = msg.match(/\[SUMMARY:(.*?)\]/s);
         
-        // Support both formats:
-        // New: [TOOL:TYPE:path]content[/TOOL] (handles multi-line content with brackets)
-        // Old: [TOOL:TYPE:path:content] (for backward compatibility)
-        const newFormatMatches = [...msg.matchAll(/\[TOOL:(\w+):([^\]]+)\]([\s\S]*?)\[\/TOOL\]/g)];
-        const oldFormatMatches = [...msg.matchAll(/\[TOOL:(\w+):([^:\]]+):([^\]]+)\]/g)];
-        
-        // Normalize to unified format: [fullMatch, type, path, content]
-        const toolMatches = [
-          ...newFormatMatches.map(m => [m[0], m[1], m[2], m[3]]),
-          ...oldFormatMatches.map(m => [m[0], m[1], m[2], m[3]])
-        ];
+        // Primary format: [TOOL:TYPE:path]content[/TOOL]
+        const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\]([^\[]+?)\]([\s\S]*?)\[\/TOOL\]/g)];
 
         if (summaryMatch) {
           console.log(chalk.green.bold("\n✅ MISSION COMPLETE:"));
