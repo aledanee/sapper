@@ -528,7 +528,7 @@ Do NOT just display content. Actually WRITE files using the tool.`
         });
         
         // 5. Save to context file so it persists
-        fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
+        fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
         
         console.log(chalk.green(`✅ Pruned context. Sapper reminded to stay in Agent Mode.`));
         console.log(chalk.gray(`Context size: ${messages.length} messages\n`));
@@ -596,7 +596,7 @@ Do NOT just display content. Actually WRITE files using the tool.`
           content: `I've scanned the entire codebase. Here are all the files:\n${formattedScan}\n\nYou now have the full codebase context. Use this information to help me.`
         });
         
-        fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
+        fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
         console.log(chalk.gray('📝 Codebase added to context. AI now has full picture.\n'));
         continue;
       }
@@ -715,7 +715,7 @@ Do NOT just display content. Actually WRITE files using the tool.`
 
             messages.push({ role: 'user', content: `RESULT (${path}): ${result}` });
           }
-          fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
+          fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
           
           if (toolMatches.length > 30) {
             console.log(chalk.yellow('\n⚠️  Reading 30+ files! This might take time.'));
@@ -730,7 +730,7 @@ Do NOT just display content. Actually WRITE files using the tool.`
             });
           } else {
             // Normal response - save and wait for next input
-            fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
+            fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
             active = false;
             spinner.stop(); // Ensure spinner is dead
             resetTerminal(); // Force terminal back to normal state
