@@ -76,6 +76,28 @@ const tools = {
     try { return fs.readFileSync(path.trim(), 'utf8'); } 
     catch (error) { return `Error reading file: ${error.message}`; }
   },
+  patch: async (path, oldText, newText) => {
+    const trimmedPath = path.trim();
+    try {
+      const content = fs.readFileSync(trimmedPath, 'utf8');
+      if (!content.includes(oldText)) {
+        return `Error: Could not find the text to replace in ${trimmedPath}. Make sure oldText matches exactly (including whitespace).`;
+      }
+      const newContent = content.replace(oldText, newText);
+      
+      // Show diff preview
+      console.log(chalk.yellow.bold(`\n[PATCH] ${trimmedPath}`));
+      console.log(chalk.red('- ' + oldText.split('\n').join('\n- ')));
+      console.log(chalk.green('+ ' + newText.split('\n').join('\n+ ')));
+      
+      const confirm = await safeQuestion(chalk.yellow('Apply this patch? (y/n): '));
+      if (confirm.toLowerCase() === 'y') {
+        fs.writeFileSync(trimmedPath, newContent);
+        return `Successfully patched ${trimmedPath}`;
+      }
+      return 'Patch rejected by user.';
+    } catch (error) { return `Error patching file: ${error.message}`; }
+  },
   write: async (path, content) => {
     const trimmedPath = path.trim();
     console.log(chalk.yellow.bold(`\n[WRITE] Sapper wants to write to: `) + chalk.white(trimmedPath));
@@ -199,9 +221,13 @@ READING GUIDELINES:
 TOOL FORMAT (CRITICAL - FOLLOW EXACTLY):
 ✅ CORRECT: [TOOL:LIST].[/TOOL]
 ✅ CORRECT: [TOOL:READ]./file.js[/TOOL]
-✅ CORRECT: [TOOL:LIST]./src[/TOOL] then read all files found
+✅ CORRECT: [TOOL:WRITE]./file.js]full content here[/TOOL]
+✅ CORRECT: [TOOL:PATCH]./file.js]old code|||new code[/TOOL]
 ❌ WRONG: [TOOL:LIST].[/] - missing TOOL at end!
-❌ WRONG: [TOOL:LIST]/[/TOOL] - wrong directory!
+
+PATCH vs WRITE:
+- Use PATCH for small changes (1-10 lines): [TOOL:PATCH]path]old|||new[/TOOL]
+- Use WRITE only for new files or complete rewrites
 
 WORKFLOW:
 1. LIST directory → 2. READ files (as many as needed) → 3. ANALYZE and RESPOND`
@@ -225,6 +251,48 @@ WORKFLOW:
           role: 'system',
           content: messages[0].content // Keep system prompt
         }];
+        continue;
+      }
+      
+      // Handle prune command - summarize and clear old context
+      if (input.toLowerCase() === '/prune') {
+        if (messages.length <= 5) {
+          console.log(chalk.yellow('Context is already small, nothing to prune.'));
+          continue;
+        }
+        
+        // Keep system prompt + last 4 messages
+        const systemPrompt = messages[0];
+        const recentMessages = messages.slice(-4);
+        
+        // Count what we're removing
+        const removedCount = messages.length - 5;
+        
+        messages = [systemPrompt, ...recentMessages];
+        fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
+        console.log(chalk.green(`✅ Pruned ${removedCount} old messages. Kept system prompt + last 4 messages.`));
+        console.log(chalk.gray(`Context size: ${messages.length} messages\n`));
+        continue;
+      }
+      
+      // Handle help command
+      if (input.toLowerCase() === '/help') {
+        console.log(chalk.cyan('\n📚 SAPPER COMMANDS:'));
+        console.log(chalk.white('  /reset, /clear') + chalk.gray(' - Clear all context and start fresh'));
+        console.log(chalk.white('  /prune') + chalk.gray('         - Remove old messages, keep last 4'));
+        console.log(chalk.white('  /context') + chalk.gray('       - Show current context size'));
+        console.log(chalk.white('  /help') + chalk.gray('          - Show this help message'));
+        console.log(chalk.white('  exit') + chalk.gray('           - Exit Sapper\n'));
+        continue;
+      }
+      
+      // Handle context size command
+      if (input.toLowerCase() === '/context') {
+        const contextSize = JSON.stringify(messages).length;
+        console.log(chalk.cyan(`\n📊 Context: ${messages.length} messages, ~${Math.round(contextSize/1024)}KB`));
+        if (contextSize > 50000) {
+          console.log(chalk.yellow('⚠️  Context is large! Consider using /prune'));
+        }
         continue;
       }
       
@@ -283,6 +351,15 @@ WORKFLOW:
             else if (type.toLowerCase() === 'read') result = tools.read(path);
             else if (type.toLowerCase() === 'mkdir') result = tools.mkdir(path);
             else if (type.toLowerCase() === 'write') result = await tools.write(path, content);
+            else if (type.toLowerCase() === 'patch') {
+              // PATCH format: [TOOL:PATCH]path]OLD_TEXT|||NEW_TEXT[/TOOL]
+              const parts = content?.split('|||');
+              if (parts && parts.length === 2) {
+                result = await tools.patch(path, parts[0], parts[1]);
+              } else {
+                result = 'Error: PATCH requires format [TOOL:PATCH]path]OLD_TEXT|||NEW_TEXT[/TOOL]';
+              }
+            }
             else if (type.toLowerCase() === 'shell') result = await tools.shell(path);
 
             messages.push({ role: 'user', content: `RESULT (${path}): ${result}` });
