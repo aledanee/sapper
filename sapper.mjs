@@ -19,6 +19,18 @@ process.on('unhandledRejection', (reason) => {
   console.error(chalk.red('\n❌ Unhandled rejection:'), reason);
 });
 
+// Prevent Ctrl+C from killing the whole process
+let ctrlCCount = 0;
+process.on('SIGINT', () => {
+  ctrlCCount++;
+  if (ctrlCCount >= 2) {
+    console.log(chalk.red('\nForce quitting...'));
+    process.exit(1);
+  }
+  console.log(chalk.yellow('\n\nUse "exit" to close Sapper safely, or Ctrl+C again to force quit.'));
+  setTimeout(() => { ctrlCCount = 0; }, 2000); // Reset after 2 seconds
+});
+
 // Initialize versioning
 let CURRENT_VERSION = "1.1.0";
 try {
@@ -37,30 +49,26 @@ let rl = readline.createInterface({
   historySize: 100
 });
 
-async function safeQuestion(query) {
-  return new Promise((resolve, reject) => {
-    process.stdout.write(query);
-    rl.once('line', (answer) => { resolve(answer.trim()); });
-    rl.once('close', () => {
-      // Readline was closed - recreate it and try again
-      recreateReadline();
-      resolve(''); // Return empty string to continue the loop
-    });
-    rl.once('error', (err) => {
-      console.error(chalk.red('Readline error:'), err.message);
-      recreateReadline();
-      resolve('');
-    });
-  });
-}
-
 function recreateReadline() {
-  rl.close();
+  if (rl) rl.close();
   rl = readline.createInterface({ 
     input: process.stdin, 
     output: process.stdout,
     terminal: true,
     historySize: 100
+  });
+  // Force resume stdin to keep process alive
+  process.stdin.resume();
+}
+
+async function safeQuestion(query) {
+  // Ensure we are ready to receive input
+  if (rl.closed) recreateReadline();
+  
+  return new Promise((resolve) => {
+    rl.question(query, (answer) => {
+      resolve(answer ? answer.trim() : '');
+    });
   });
 }
 
@@ -128,8 +136,11 @@ const tools = {
           stdio: 'inherit', shell: useShell 
         });
         proc.on('close', (code) => {
-          recreateReadline();
-          resolve(`Command completed with code ${code}`);
+          // Delay slightly to let terminal settle
+          setTimeout(() => {
+            recreateReadline();
+            resolve(`Command completed with code ${code}`);
+          }, 100);
         });
       });
     }
@@ -427,5 +438,8 @@ WORKFLOW:
     }
   }
 }
+
+// Keep-alive interval - prevents Node from exiting when event loop is empty
+setInterval(() => {}, 1000);
 
 runSapper();
