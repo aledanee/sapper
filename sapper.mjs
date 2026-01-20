@@ -62,6 +62,79 @@ try {
 
 const spinner = ora();
 const CONTEXT_FILE = '.sapper_context.json';
+const EMBEDDINGS_FILE = '.sapper_embeddings.json';
+
+// ═══════════════════════════════════════════════════════════════
+// EMBEDDINGS & SEMANTIC SEARCH
+// ═══════════════════════════════════════════════════════════════
+
+// Load or create embeddings store
+function loadEmbeddings() {
+  try {
+    if (fs.existsSync(EMBEDDINGS_FILE)) {
+      return JSON.parse(fs.readFileSync(EMBEDDINGS_FILE, 'utf8'));
+    }
+  } catch (e) {}
+  return { chunks: [] }; // { chunks: [{ text, embedding, timestamp }] }
+}
+
+function saveEmbeddings(embeddings) {
+  fs.writeFileSync(EMBEDDINGS_FILE, JSON.stringify(embeddings, null, 2));
+}
+
+// Get embedding from Ollama (returns null silently if model not available)
+async function getEmbedding(text, model = 'nomic-embed-text') {
+  try {
+    const response = await ollama.embeddings({ model, prompt: text });
+    return response.embedding;
+  } catch (e) {
+    // Silently return null - caller handles missing embeddings
+    return null;
+  }
+}
+
+// Cosine similarity between two vectors
+function cosineSimilarity(a, b) {
+  if (!a || !b || a.length !== b.length) return 0;
+  let dotProduct = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// Find most relevant chunks for a query
+async function findRelevantContext(query, embeddings, topK = 3) {
+  const queryEmbedding = await getEmbedding(query);
+  if (!queryEmbedding || embeddings.chunks.length === 0) return [];
+  
+  const scored = embeddings.chunks.map(chunk => ({
+    ...chunk,
+    score: cosineSimilarity(queryEmbedding, chunk.embedding)
+  }));
+  
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, topK).filter(c => c.score > 0.5); // Only return if similarity > 0.5
+}
+
+// Add text to embeddings store
+async function addToEmbeddings(text, embeddings) {
+  const embedding = await getEmbedding(text);
+  if (embedding) {
+    embeddings.chunks.push({
+      text: text.substring(0, 2000), // Limit stored text
+      embedding,
+      timestamp: Date.now()
+    });
+    // Keep only last 100 chunks
+    if (embeddings.chunks.length > 100) {
+      embeddings.chunks = embeddings.chunks.slice(-100);
+    }
+    saveEmbeddings(embeddings);
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════
 // FANCY UI HELPERS
@@ -502,20 +575,49 @@ PATH RULES:
         continue;
       }
       
-      // Handle prune command - summarize and clear old context
+      // Handle prune command - AUTO-EMBED then clear old context
       if (input.toLowerCase() === '/prune') {
         if (messages.length <= 5) {
           console.log(chalk.yellow('Context is already small, nothing to prune.'));
           continue;
         }
         
-        // 1. Capture the ORIGINAL detailed system prompt from the very first message
+        // 1. AUTO-EMBED: Save conversation to memory BEFORE pruning (silently skip if no model)
+        const embeddings = loadEmbeddings();
+        
+        // Get messages that will be pruned (all except system and last 4)
+        const messagesToEmbed = messages.slice(1, -4)
+          .filter(m => m.role !== 'system')
+          .map(m => m.content.substring(0, 500))
+          .join('\n---\n');
+        
+        if (messagesToEmbed.length > 50) {
+          try {
+            const embedding = await getEmbedding(messagesToEmbed);
+            if (embedding) {
+              embeddings.chunks.push({
+                text: messagesToEmbed.substring(0, 2000),
+                embedding,
+                timestamp: Date.now()
+              });
+              if (embeddings.chunks.length > 100) {
+                embeddings.chunks = embeddings.chunks.slice(-100);
+              }
+              saveEmbeddings(embeddings);
+              console.log(chalk.green(`🧠 Saved to memory! (${embeddings.chunks.length} memories)`));
+            }
+          } catch (e) {
+            // Silently skip embedding if model not available - prune still works
+          }
+        }
+        
+        // 2. Capture the ORIGINAL detailed system prompt from the very first message
         const originalSystemPrompt = messages[0];
         
-        // 2. Capture the last 4 messages (the most recent conversation)
+        // 3. Capture the last 4 messages (the most recent conversation)
         const recentMessages = messages.slice(-4);
         
-        // 3. Rebuild the messages array starting with the ORIGINAL prompt
+        // 4. Rebuild the messages array starting with the ORIGINAL prompt
         messages = [originalSystemPrompt, ...recentMessages];
         
         // 4. Add reminder to stay in Agent Mode (not chatbot mode)
@@ -544,8 +646,9 @@ Do NOT just display content. Actually WRITE files using the tool.`
         console.log();
         const helpContent = 
           `${chalk.cyan('/scan')}          ${chalk.gray('│')} Scan codebase into context\n` +
+          `${chalk.cyan('/recall')}        ${chalk.gray('│')} Search memory for relevant context\n` +
           `${chalk.cyan('/reset /clear')}  ${chalk.gray('│')} Clear all context\n` +
-          `${chalk.cyan('/prune')}         ${chalk.gray('│')} Keep only last 4 messages\n` +
+          `${chalk.cyan('/prune')}         ${chalk.gray('│')} Save to memory + keep last 4 msgs\n` +
           `${chalk.cyan('/context')}       ${chalk.gray('│')} Show context size\n` +
           `${chalk.cyan('/debug')}         ${chalk.gray('│')} Toggle debug mode\n` +
           `${chalk.cyan('/help')}          ${chalk.gray('│')} Show this help\n` +
@@ -571,6 +674,51 @@ Do NOT just display content. Actually WRITE files using the tool.`
         console.log(chalk.magenta(`🔧 Debug mode: ${debugMode ? 'ON' : 'OFF'}`));
         if (debugMode) {
           console.log(chalk.gray('   Will show regex matching details after each AI response.'));
+        }
+        continue;
+      }
+      
+      // Handle recall command - search embeddings
+      if (input.toLowerCase().startsWith('/recall')) {
+        const query = input.slice(7).trim();
+        if (!query) {
+          console.log(chalk.yellow('Usage: /recall <search query>'));
+          continue;
+        }
+        
+        const embeddings = loadEmbeddings();
+        if (embeddings.chunks.length === 0) {
+          console.log(chalk.yellow('No memories yet. Use /prune to auto-save conversations.'));
+          continue;
+        }
+        
+        console.log(chalk.cyan(`\n🔍 Searching memory for: "${query}"...`));
+        const relevant = await findRelevantContext(query, embeddings, 3);
+        
+        if (relevant.length === 0) {
+          console.log(chalk.yellow('No relevant memories found (or embedding model not available).'));
+          console.log(chalk.gray('Tip: Run "ollama pull nomic-embed-text" for semantic search.'));
+        } else {
+          console.log(chalk.green(`Found ${relevant.length} relevant memories:\n`));
+          relevant.forEach((chunk, i) => {
+            console.log(box(
+              chalk.gray(chunk.text.substring(0, 300) + '...') + '\n' +
+              chalk.cyan(`Similarity: ${(chunk.score * 100).toFixed(1)}%`),
+              `Memory ${i + 1}`, 'magenta'
+            ));
+            console.log();
+          });
+          
+          // Optionally add to context
+          const addToContext = await safeQuestion(chalk.yellow('Add to current context? ') + chalk.gray('(y/n): '));
+          if (addToContext.toLowerCase() === 'y') {
+            const contextAddition = relevant.map(c => c.text).join('\n---\n');
+            messages.push({ 
+              role: 'user', 
+              content: `Here is relevant context from memory:\n${contextAddition}\n\nUse this information to help me.`
+            });
+            console.log(chalk.green('✅ Added to context!'));
+          }
         }
         continue;
       }
