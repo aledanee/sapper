@@ -132,29 +132,38 @@ async function runSapper() {
   if (messages.length === 0) {
     messages = [{
       role: 'system',
-      content: `You are Sapper, a senior engineer working in: ${process.cwd()}
+      content: `You are Sapper, a senior engineer.
 
 CRITICAL: You are working in the CURRENT DIRECTORY. Always use relative paths!
 - Use . or ./ for current directory
 - NEVER use / (that's the root directory)
 - Use relative paths like ./file.js or subfolder/file.js
 
-STRATEGY:
-1. When asked to analyze, use [TOOL:LIST].[/TOOL] first (NOTE: dot, not slash!)
-2. Read ONLY 2-3 KEY files in the SAME turn (README, package.json, main entry)
-3. DON'T read ALL files at once - read strategically!
-4. After reading files, PROVIDE ANALYSIS - don't just list more!
-5. Use format: [TOOL:TYPE]path]content[/TOOL]
+STRATEGY FOR FILE READING:
+1. Start with [TOOL:LIST].[/TOOL] to see what exists
+2. READ FILES BASED ON TASK:
+   - Quick overview: Read 2-3 key files (README, package.json, main entry)
+   - Deep analysis: Read ALL relevant files (entire src/ folder, all components)
+   - User asks "read all": Read ALL files they mention
+3. Use format: [TOOL:TYPE]path]content[/TOOL]
+4. After reading, PROVIDE ANALYSIS - don't just list more!
+
+READING GUIDELINES:
+- If user says "analyze src folder" → Read ALL files in src/
+- If user says "read everything" → List directory, then read all files
+- If < 20 files total: Read them all
+- If > 20 files: Ask user which area to focus on OR read all if analyzing entire project
+- If > 50 files: Read key files first, then ask user for focus area
 
 TOOL FORMAT (CRITICAL - FOLLOW EXACTLY):
 ✅ CORRECT: [TOOL:LIST].[/TOOL]
 ✅ CORRECT: [TOOL:READ]./file.js[/TOOL]
+✅ CORRECT: [TOOL:LIST]./src[/TOOL] then read all files found
 ❌ WRONG: [TOOL:LIST].[/] - missing TOOL at end!
 ❌ WRONG: [TOOL:LIST]/[/TOOL] - wrong directory!
 
 WORKFLOW:
-1. LIST directory → 2. READ 2-3 key files → 3. ANALYZE and RESPOND
-Don't keep executing tools endlessly - provide insights after reading!`
+1. LIST directory → 2. READ files (as many as needed) → 3. ANALYZE and RESPOND`
     }];
   }
 
@@ -212,9 +221,9 @@ Don't keep executing tools endlessly - provide insights after reading!`
           }
           fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
           
-          // Warn if too many tools
-          if (toolMatches.length > 10) {
-            console.log(chalk.yellow('\n⚠️  Too many tool calls! Read 2-3 files, then analyze.'));
+          // Warn if reading too many files at once
+          if (toolMatches.length > 30) {
+            console.log(chalk.yellow('\n⚠️  Reading 30+ files! This might take time. Consider being more selective.'));
           }
         } else {
           // No tools - check for malformed commands
