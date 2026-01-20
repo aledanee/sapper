@@ -206,6 +206,8 @@ Don't keep executing tools endlessly - provide insights after reading!`
               content: 'ERROR: Your tool command is malformed. Use [TOOL:TYPE]path]content[/TOOL] or [TOOL:TYPE]path[/TOOL]' 
             });
           } else {
+            // Normal response without tools - save context and wait for next input
+            fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
             active = false;
           }
         }
