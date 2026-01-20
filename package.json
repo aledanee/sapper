@@ -1,6 +1,6 @@
 {
   "name": "sapper-iq",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "description": "AI-powered development assistant that executes commands and builds projects",
   "main": "sapper.mjs",
   "bin": {
