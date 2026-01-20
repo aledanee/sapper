@@ -141,3 +141,8 @@ After publishing, users can install via:
 - `npm install -g git+https://github.com/aledanee/sapper.git` (from GitHub)
 
 Keep both npm and GitHub versions synchronized.
+
+
+
+
+git add . && git commit -m "Add specialized Node.js/PostgreSQL prompts with use cases" && npm version patch && npm publish
