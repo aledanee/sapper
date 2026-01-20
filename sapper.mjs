@@ -61,6 +61,7 @@ const spinner = ora();
 const CONTEXT_FILE = '.sapper_context.json';
 
 let stepMode = false;
+let debugMode = false; // Toggle with /debug command
 let rl = readline.createInterface({ 
   input: process.stdin, 
   output: process.stdout,
@@ -380,6 +381,7 @@ Do NOT just display content. Actually WRITE files using the tool.`
         console.log(chalk.white('  /reset, /clear') + chalk.gray(' - Clear all context and start fresh'));
         console.log(chalk.white('  /prune') + chalk.gray('         - Remove old messages, keep last 4'));
         console.log(chalk.white('  /context') + chalk.gray('       - Show current context size'));
+        console.log(chalk.white('  /debug') + chalk.gray('         - Toggle debug mode (shows regex analysis)'));
         console.log(chalk.white('  /help') + chalk.gray('          - Show this help message'));
         console.log(chalk.white('  exit') + chalk.gray('           - Exit Sapper\n'));
         continue;
@@ -391,6 +393,16 @@ Do NOT just display content. Actually WRITE files using the tool.`
         console.log(chalk.cyan(`\n📊 Context: ${messages.length} messages, ~${Math.round(contextSize/1024)}KB`));
         if (contextSize > 50000) {
           console.log(chalk.yellow('⚠️  Context is large! Consider using /prune'));
+        }
+        continue;
+      }
+      
+      // Handle debug mode toggle
+      if (input.toLowerCase() === '/debug') {
+        debugMode = !debugMode;
+        console.log(chalk.magenta(`🔧 Debug mode: ${debugMode ? 'ON' : 'OFF'}`));
+        if (debugMode) {
+          console.log(chalk.gray('   Will show regex matching details after each AI response.'));
         }
         continue;
       }
@@ -435,6 +447,39 @@ Do NOT just display content. Actually WRITE files using the tool.`
 
         // Fixed regex: .+? (non-greedy) stops correctly before [/TOOL]
         const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\](.+?)(?:\]([\s\S]*?))?\[\/TOOL\]/g)];
+        
+        // Debug mode: show what regex sees
+        if (debugMode) {
+          console.log(chalk.magenta('\n═══ DEBUG: REGEX ANALYSIS ═══'));
+          console.log(chalk.gray(`Response length: ${msg.length} chars`));
+          
+          // Check for tool-like patterns
+          const hasToolStart = msg.includes('[TOOL:');
+          const hasToolEnd = msg.includes('[/TOOL]');
+          const hasBrokenEnd = msg.includes('[/]') || msg.includes('[/WRITE]') || msg.includes('[/READ]');
+          
+          console.log(chalk.gray(`Contains [TOOL:: ${hasToolStart ? chalk.green('YES') : chalk.red('NO')}`));
+          console.log(chalk.gray(`Contains [/TOOL]: ${hasToolEnd ? chalk.green('YES') : chalk.red('NO')}`));
+          if (hasBrokenEnd) {
+            console.log(chalk.red(`⚠️  Found broken closing tag: [/] or [/WRITE] etc.`));
+          }
+          
+          console.log(chalk.gray(`Matches found: ${toolMatches.length}`));
+          
+          if (toolMatches.length > 0) {
+            toolMatches.forEach((m, i) => {
+              console.log(chalk.cyan(`  Match ${i+1}: type=${m[1]}, path=${m[2]?.substring(0,50)}...`));
+            });
+          } else if (hasToolStart) {
+            // Show the raw tool attempt for debugging
+            const toolAttempt = msg.match(/\[TOOL:[^\]]*\][^\[]{0,100}/s);
+            if (toolAttempt) {
+              console.log(chalk.yellow(`  Raw tool attempt (first 150 chars):`);
+              console.log(chalk.gray(`  "${toolAttempt[0].substring(0, 150)}..."`));
+            }
+          }
+          console.log(chalk.magenta('═══════════════════════════════\n'));
+        }
         
         if (toolMatches.length > 0) {
           toolRounds++;
