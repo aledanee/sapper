@@ -99,6 +99,104 @@ const IGNORE_DIRS = new Set([
   '.idea', '.vscode', 'vendor', 'target', '.gradle'
 ]);
 
+// File extensions to include when scanning codebase
+const CODE_EXTENSIONS = new Set([
+  '.js', '.ts', '.jsx', '.tsx', '.py', '.java', '.go', '.rs', '.rb', '.php',
+  '.c', '.cpp', '.h', '.hpp', '.cs', '.swift', '.kt', '.scala', '.vue', '.svelte',
+  '.css', '.scss', '.sass', '.less', '.html', '.htm', '.json', '.yaml', '.yml',
+  '.toml', '.xml', '.md', '.txt', '.sh', '.bash', '.zsh', '.sql', '.graphql',
+  '.env.example', '.gitignore', '.dockerignore', 'Dockerfile', 'Makefile',
+  '.prisma', '.proto'
+]);
+
+// Max file size to include (skip large files like bundled/minified)
+const MAX_FILE_SIZE = 100000; // 100KB per file
+const MAX_TOTAL_SCAN_SIZE = 1000000; // 1000KB total scan limit
+
+// Scan entire codebase and return summary
+function scanCodebase(dir = '.', depth = 0, maxDepth = 5) {
+  if (depth > maxDepth) return { files: [], totalSize: 0 };
+  
+  let files = [];
+  let totalSize = 0;
+  
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    
+    for (const entry of entries) {
+      const fullPath = dir === '.' ? entry.name : `${dir}/${entry.name}`;
+      
+      // Skip ignored directories
+      if (entry.isDirectory()) {
+        if (IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+        const subResult = scanCodebase(fullPath, depth + 1, maxDepth);
+        files = files.concat(subResult.files);
+        totalSize += subResult.totalSize;
+      } else {
+        // Check if file should be included
+        const ext = entry.name.includes('.') ? '.' + entry.name.split('.').pop() : entry.name;
+        const isCodeFile = CODE_EXTENSIONS.has(ext.toLowerCase()) || CODE_EXTENSIONS.has(entry.name);
+        
+        if (!isCodeFile) continue;
+        
+        try {
+          const stats = fs.statSync(fullPath);
+          if (stats.size > MAX_FILE_SIZE) {
+            files.push({ path: fullPath, size: stats.size, skipped: true, reason: 'too large' });
+            continue;
+          }
+          if (totalSize + stats.size > MAX_TOTAL_SCAN_SIZE) {
+            files.push({ path: fullPath, size: stats.size, skipped: true, reason: 'total limit reached' });
+            continue;
+          }
+          
+          const content = fs.readFileSync(fullPath, 'utf8');
+          files.push({ path: fullPath, size: stats.size, content });
+          totalSize += stats.size;
+        } catch (e) {
+          files.push({ path: fullPath, skipped: true, reason: e.message });
+        }
+      }
+    }
+  } catch (e) {
+    // Directory not readable
+  }
+  
+  return { files, totalSize };
+}
+
+// Format scan results for AI context
+function formatScanResults(scanResult) {
+  let output = `\n══════════════════════════════════════\n`;
+  output += `📁 CODEBASE SCAN (${scanResult.files.length} files, ~${Math.round(scanResult.totalSize/1024)}KB)\n`;
+  output += `══════════════════════════════════════\n\n`;
+  
+  // First list all files
+  output += `FILE TREE:\n`;
+  for (const file of scanResult.files) {
+    if (file.skipped) {
+      output += `  ⏭️  ${file.path} (skipped: ${file.reason})\n`;
+    } else {
+      output += `  📄 ${file.path} (${Math.round(file.size/1024)}KB)\n`;
+    }
+  }
+  
+  output += `\n══════════════════════════════════════\n`;
+  output += `FILE CONTENTS:\n`;
+  output += `══════════════════════════════════════\n\n`;
+  
+  // Then include contents
+  for (const file of scanResult.files) {
+    if (file.skipped) continue;
+    output += `┌─── ${file.path} ───\n`;
+    output += file.content;
+    if (!file.content.endsWith('\n')) output += '\n';
+    output += `└─── END ${file.path} ───\n\n`;
+  }
+  
+  return output;
+}
+
 const tools = {
   read: (path) => {
     try { return fs.readFileSync(path.trim(), 'utf8'); } 
@@ -379,6 +477,7 @@ Do NOT just display content. Actually WRITE files using the tool.`
       // Handle help command
       if (input.toLowerCase() === '/help') {
         console.log(chalk.cyan('\n📚 SAPPER COMMANDS:'));
+        console.log(chalk.white('  /scan') + chalk.gray('          - Scan entire codebase and add to context'));
         console.log(chalk.white('  /reset, /clear') + chalk.gray(' - Clear all context and start fresh'));
         console.log(chalk.white('  /prune') + chalk.gray('         - Remove old messages, keep last 4'));
         console.log(chalk.white('  /context') + chalk.gray('       - Show current context size'));
@@ -405,6 +504,36 @@ Do NOT just display content. Actually WRITE files using the tool.`
         if (debugMode) {
           console.log(chalk.gray('   Will show regex matching details after each AI response.'));
         }
+        continue;
+      }
+      
+      // Handle codebase scan command
+      if (input.toLowerCase() === '/scan') {
+        console.log(chalk.cyan('\n🔍 Scanning codebase...'));
+        const scanResult = scanCodebase('.');
+        
+        if (scanResult.files.length === 0) {
+          console.log(chalk.yellow('No code files found in current directory.'));
+          continue;
+        }
+        
+        const formattedScan = formatScanResults(scanResult);
+        const includedCount = scanResult.files.filter(f => !f.skipped).length;
+        const skippedCount = scanResult.files.filter(f => f.skipped).length;
+        
+        console.log(chalk.green(`✅ Scanned ${includedCount} files (~${Math.round(scanResult.totalSize/1024)}KB)`));
+        if (skippedCount > 0) {
+          console.log(chalk.yellow(`⏭️  Skipped ${skippedCount} files (too large or limit reached)`));
+        }
+        
+        // Add scan to context
+        messages.push({ 
+          role: 'user', 
+          content: `I've scanned the entire codebase. Here are all the files:\n${formattedScan}\n\nYou now have the full codebase context. Use this information to help me.`
+        });
+        
+        fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages));
+        console.log(chalk.gray('📝 Codebase added to context. AI now has full picture.\n'));
         continue;
       }
       
