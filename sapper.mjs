@@ -115,7 +115,13 @@ async function runSapper() {
   let messages = [];
   if (fs.existsSync(CONTEXT_FILE)) {
     const resume = await safeQuestion(chalk.green('Resume previous session? (y/n): '));
-    if (resume.toLowerCase() === 'y') messages = JSON.parse(fs.readFileSync(CONTEXT_FILE, 'utf8'));
+    if (resume.toLowerCase() === 'y') {
+      messages = JSON.parse(fs.readFileSync(CONTEXT_FILE, 'utf8'));
+    } else {
+      // User said no - delete the old context file
+      fs.unlinkSync(CONTEXT_FILE);
+      console.log(chalk.gray('Starting fresh session...\n'));
+    }
   }
 
   const localModels = await ollama.list();
