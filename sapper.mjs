@@ -541,8 +541,8 @@ async function runSapper() {
 - [TOOL:LIST]path[/TOOL] - List directory
 - [TOOL:READ]path[/TOOL] - Read file
 - [TOOL:SEARCH]pattern[/TOOL] - Search codebase
-- [TOOL:WRITE]path]content[/TOOL] - Create/overwrite file
-- [TOOL:PATCH]path]old|||new[/TOOL] - Edit file
+- [TOOL:WRITE]path:::content[/TOOL] - Create/overwrite file (use ::: between path and content)
+- [TOOL:PATCH]path:::old|||new[/TOOL] - Edit file
 - [TOOL:SHELL]command[/TOOL] - Run terminal command`
     }];
   }
@@ -630,8 +630,8 @@ async function runSapper() {
 - [TOOL:LIST]path[/TOOL] - List directory
 - [TOOL:READ]path[/TOOL] - Read file
 - [TOOL:SEARCH]pattern[/TOOL] - Search codebase
-- [TOOL:WRITE]path]content[/TOOL] - Create/overwrite file
-- [TOOL:PATCH]path]old|||new[/TOOL] - Edit file
+- [TOOL:WRITE]path:::content[/TOOL] - Create/overwrite file (use ::: between path and content)
+- [TOOL:PATCH]path:::old|||new[/TOOL] - Edit file
 - [TOOL:SHELL]command[/TOOL] - Run terminal command.`
         });
         
@@ -814,8 +814,8 @@ async function runSapper() {
         
         messages.push({ role: 'assistant', content: msg });
 
-        // Fixed regex: [^\]]* allows empty path (AI sometimes sends [TOOL:LIST][/TOOL])
-        const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\]([^\]]*)(?:\]([\s\S]*?))?\[\/TOOL\]/g)];
+        // Regex: supports both old format (path]content) and new format (path:::content)
+        const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\]([^:\]]*?)(?:(?:::|\])([\s\S]*?))?\[\/TOOL\]/g)];
         
         // Debug mode: show what regex sees
         if (debugMode) {
