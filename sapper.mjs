@@ -31,6 +31,19 @@ process.on('SIGINT', () => {
   setTimeout(() => { ctrlCCount = 0; }, 2000); // Reset after 2 seconds
 });
 
+// Reset terminal state - fixes "ghost input" after shell commands or AI streaming
+function resetTerminal() {
+  if (process.stdin.isTTY) {
+    try {
+      process.stdin.setRawMode(false); // Disable raw mode
+      process.stdin.pause();           // Pause the stream
+      process.stdin.resume();          // Resume to clear buffers
+    } catch (e) {
+      // Ignore errors if terminal is in weird state
+    }
+  }
+}
+
 // Initialize versioning
 let CURRENT_VERSION = "1.1.0";
 try {
@@ -62,7 +75,7 @@ function recreateReadline() {
 }
 
 async function safeQuestion(query) {
-  // Ensure we are ready to receive input
+  resetTerminal(); // Clear terminal state before asking
   if (rl.closed) recreateReadline();
   
   return new Promise((resolve) => {
@@ -136,11 +149,15 @@ const tools = {
           stdio: 'inherit', shell: useShell 
         });
         proc.on('close', (code) => {
+          // Crucial: give control back to Node
+          if (process.stdin.isTTY) {
+            try { process.stdin.setRawMode(false); } catch (e) {}
+          }
           // Delay slightly to let terminal settle
           setTimeout(() => {
             recreateReadline();
             resolve(`Command completed with code ${code}`);
-          }, 100);
+          }, 200);
         });
       });
     }
