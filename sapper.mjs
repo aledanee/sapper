@@ -11,6 +11,14 @@ import { dirname, join } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// Prevent process from exiting on unhandled errors
+process.on('uncaughtException', (err) => {
+  console.error(chalk.red('\n❌ Uncaught exception:'), err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error(chalk.red('\n❌ Unhandled rejection:'), reason);
+});
+
 // Initialize versioning
 let CURRENT_VERSION = "1.1.0";
 try {
@@ -30,9 +38,19 @@ let rl = readline.createInterface({
 });
 
 async function safeQuestion(query) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     process.stdout.write(query);
     rl.once('line', (answer) => { resolve(answer.trim()); });
+    rl.once('close', () => {
+      // Readline was closed - recreate it and try again
+      recreateReadline();
+      resolve(''); // Return empty string to continue the loop
+    });
+    rl.once('error', (err) => {
+      console.error(chalk.red('Readline error:'), err.message);
+      recreateReadline();
+      resolve('');
+    });
   });
 }
 
