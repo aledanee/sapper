@@ -11,6 +11,7 @@
     "start": "node sapper.mjs"
   },
   "dependencies": {
+    "acorn": "^8.15.0",
     "chalk": "^5.3.0",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",

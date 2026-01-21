@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { marked } from 'marked';
 import TerminalRenderer from 'marked-terminal';
+import * as acorn from 'acorn';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -232,6 +233,7 @@ async function buildWorkspaceGraph(showProgress = true) {
               modified: stats.mtime.toISOString(),
               imports: deps,
               exports: exports,
+              symbols: parseFileSymbols(content, fullPath), // AST-extracted symbols
               summary: summary || '(no summary)'
             };
             
@@ -308,6 +310,248 @@ function formatWorkspaceSummary(workspace) {
   }
   
   return output;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AST PARSING - Extract symbols (functions, classes, variables)
+// ═══════════════════════════════════════════════════════════════
+
+// Parse JavaScript/TypeScript file and extract symbols
+function parseFileSymbols(content, filePath) {
+  const symbols = [];
+  const ext = filePath.split('.').pop()?.toLowerCase();
+  
+  // Only parse JS/TS files with acorn
+  if (!['js', 'jsx', 'ts', 'tsx', 'mjs'].includes(ext)) {
+    // For other languages, use regex-based extraction
+    return extractSymbolsWithRegex(content, filePath);
+  }
+  
+  try {
+    // Parse with acorn (use loose parsing to handle more syntax)
+    const ast = acorn.parse(content, {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      locations: true,
+      allowHashBang: true,
+      allowAwaitOutsideFunction: true,
+      allowImportExportEverywhere: true,
+      // Be lenient with errors
+      onComment: () => {},
+    });
+    
+    // Walk the AST to extract symbols
+    function walk(node, parentName = null) {
+      if (!node || typeof node !== 'object') return;
+      
+      switch (node.type) {
+        case 'FunctionDeclaration':
+          if (node.id?.name) {
+            symbols.push({
+              type: 'function',
+              name: node.id.name,
+              line: node.loc?.start?.line || 0,
+              params: node.params?.map(p => p.name || p.left?.name || '?').join(', ') || '',
+              async: node.async || false,
+            });
+          }
+          break;
+          
+        case 'ClassDeclaration':
+          if (node.id?.name) {
+            symbols.push({
+              type: 'class',
+              name: node.id.name,
+              line: node.loc?.start?.line || 0,
+              extends: node.superClass?.name || null,
+            });
+            // Extract methods
+            if (node.body?.body) {
+              for (const member of node.body.body) {
+                if (member.type === 'MethodDefinition' && member.key?.name) {
+                  symbols.push({
+                    type: 'method',
+                    name: `${node.id.name}.${member.key.name}`,
+                    line: member.loc?.start?.line || 0,
+                    kind: member.kind, // 'constructor', 'method', 'get', 'set'
+                  });
+                }
+              }
+            }
+          }
+          break;
+          
+        case 'VariableDeclaration':
+          for (const decl of node.declarations || []) {
+            if (decl.id?.name) {
+              // Check if it's a function expression or arrow function
+              const init = decl.init;
+              if (init?.type === 'ArrowFunctionExpression' || init?.type === 'FunctionExpression') {
+                symbols.push({
+                  type: 'function',
+                  name: decl.id.name,
+                  line: node.loc?.start?.line || 0,
+                  params: init.params?.map(p => p.name || p.left?.name || '?').join(', ') || '',
+                  async: init.async || false,
+                  arrow: init.type === 'ArrowFunctionExpression',
+                });
+              } else {
+                symbols.push({
+                  type: 'variable',
+                  name: decl.id.name,
+                  line: node.loc?.start?.line || 0,
+                  kind: node.kind, // 'const', 'let', 'var'
+                });
+              }
+            }
+          }
+          break;
+          
+        case 'ExportNamedDeclaration':
+          if (node.declaration) {
+            walk(node.declaration, parentName);
+          }
+          break;
+          
+        case 'ExportDefaultDeclaration':
+          if (node.declaration) {
+            if (node.declaration.id?.name) {
+              symbols.push({
+                type: node.declaration.type === 'ClassDeclaration' ? 'class' : 'function',
+                name: node.declaration.id.name,
+                line: node.loc?.start?.line || 0,
+                exported: 'default',
+              });
+            }
+          }
+          break;
+      }
+      
+      // Recursively walk children
+      for (const key in node) {
+        if (key === 'loc' || key === 'range') continue;
+        const child = node[key];
+        if (Array.isArray(child)) {
+          child.forEach(c => walk(c, parentName));
+        } else if (child && typeof child === 'object') {
+          walk(child, parentName);
+        }
+      }
+    }
+    
+    walk(ast);
+    
+  } catch (e) {
+    // If AST parsing fails, fall back to regex
+    return extractSymbolsWithRegex(content, filePath);
+  }
+  
+  return symbols;
+}
+
+// Fallback: extract symbols using regex (for non-JS or when AST fails)
+function extractSymbolsWithRegex(content, filePath) {
+  const symbols = [];
+  const lines = content.split('\n');
+  const ext = filePath.split('.').pop()?.toLowerCase();
+  
+  // JavaScript/TypeScript patterns
+  if (['js', 'jsx', 'ts', 'tsx', 'mjs'].includes(ext)) {
+    const funcPattern = /(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(/g;
+    const classPattern = /(?:export\s+)?class\s+(\w+)(?:\s+extends\s+(\w+))?/g;
+    const arrowPattern = /(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>/g;
+    const methodPattern = /^\s*(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{/gm;
+    
+    let match;
+    while ((match = funcPattern.exec(content))) {
+      const line = content.substring(0, match.index).split('\n').length;
+      symbols.push({ type: 'function', name: match[1], line });
+    }
+    while ((match = classPattern.exec(content))) {
+      const line = content.substring(0, match.index).split('\n').length;
+      symbols.push({ type: 'class', name: match[1], line, extends: match[2] });
+    }
+    while ((match = arrowPattern.exec(content))) {
+      const line = content.substring(0, match.index).split('\n').length;
+      symbols.push({ type: 'function', name: match[1], line, arrow: true });
+    }
+  }
+  
+  // Python patterns
+  if (ext === 'py') {
+    const funcPattern = /^(?:async\s+)?def\s+(\w+)\s*\(/gm;
+    const classPattern = /^class\s+(\w+)(?:\s*\([^)]*\))?:/gm;
+    
+    let match;
+    while ((match = funcPattern.exec(content))) {
+      const line = content.substring(0, match.index).split('\n').length;
+      symbols.push({ type: 'function', name: match[1], line });
+    }
+    while ((match = classPattern.exec(content))) {
+      const line = content.substring(0, match.index).split('\n').length;
+      symbols.push({ type: 'class', name: match[1], line });
+    }
+  }
+  
+  // Java/C#/Go patterns
+  if (['java', 'cs', 'go'].includes(ext)) {
+    const funcPattern = /(?:public|private|protected|static|func)?\s*(?:\w+\s+)?(\w+)\s*\([^)]*\)\s*(?:throws\s+\w+\s*)?\{/g;
+    const classPattern = /(?:public\s+)?(?:class|struct|interface)\s+(\w+)/g;
+    
+    let match;
+    while ((match = funcPattern.exec(content))) {
+      const line = content.substring(0, match.index).split('\n').length;
+      if (!['if', 'for', 'while', 'switch', 'catch'].includes(match[1])) {
+        symbols.push({ type: 'function', name: match[1], line });
+      }
+    }
+    while ((match = classPattern.exec(content))) {
+      const line = content.substring(0, match.index).split('\n').length;
+      symbols.push({ type: 'class', name: match[1], line });
+    }
+  }
+  
+  return symbols;
+}
+
+// Search for symbol across workspace
+function searchSymbol(query, workspace) {
+  const results = [];
+  const queryLower = query.toLowerCase();
+  
+  for (const [filePath, fileInfo] of Object.entries(workspace.files)) {
+    if (!fileInfo.symbols) continue;
+    
+    for (const symbol of fileInfo.symbols) {
+      if (symbol.name.toLowerCase().includes(queryLower)) {
+        results.push({
+          ...symbol,
+          file: filePath,
+          score: symbol.name.toLowerCase() === queryLower ? 100 : 
+                 symbol.name.toLowerCase().startsWith(queryLower) ? 80 : 50
+        });
+      }
+    }
+  }
+  
+  // Sort by score (exact match first) then by name
+  results.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+  return results;
+}
+
+// Format symbol for display
+function formatSymbol(symbol) {
+  const icon = symbol.type === 'function' ? '𝑓' : 
+               symbol.type === 'class' ? '◆' :
+               symbol.type === 'method' ? '○' :
+               symbol.type === 'variable' ? '◇' : '•';
+  
+  let desc = `${icon} ${symbol.name}`;
+  if (symbol.params !== undefined) desc += `(${symbol.params})`;
+  if (symbol.async) desc = 'async ' + desc;
+  if (symbol.extends) desc += ` extends ${symbol.extends}`;
+  
+  return desc;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -911,13 +1155,15 @@ async function runSapper() {
   // Auto-load or build workspace graph
   let workspace = loadWorkspaceGraph();
   if (!workspace.indexed) {
-    console.log(chalk.cyan('📊 Building workspace index...'));
+    console.log(chalk.cyan('📊 Building workspace index with AST parsing...'));
     workspace = await buildWorkspaceGraph();
-    console.log(chalk.green(`✅ Indexed ${Object.keys(workspace.files).length} files\n`));
+    const totalSymbols = Object.values(workspace.files).reduce((sum, f) => sum + (f.symbols?.length || 0), 0);
+    console.log(chalk.green(`✅ Indexed ${Object.keys(workspace.files).length} files, ${totalSymbols} symbols\n`));
   } else {
     const fileCount = Object.keys(workspace.files).length;
+    const symbolCount = Object.values(workspace.files).reduce((sum, f) => sum + (f.symbols?.length || 0), 0);
     const indexAge = Math.round((Date.now() - new Date(workspace.indexed).getTime()) / 1000 / 60);
-    console.log(chalk.gray(`📊 Workspace: ${fileCount} files indexed (${indexAge}m ago)`));
+    console.log(chalk.gray(`📊 Workspace: ${fileCount} files, ${symbolCount} symbols (${indexAge}m ago)`));
     if (indexAge > 60) {
       console.log(chalk.yellow(`   Tip: Run /index to refresh`));
     }
@@ -1121,6 +1367,7 @@ TOOL SYNTAX:
           `${chalk.cyan('/scan')}          ${chalk.gray('│')} Scan codebase into context\n` +
           `${chalk.cyan('/index')}         ${chalk.gray('│')} Rebuild workspace graph\n` +
           `${chalk.cyan('/graph file')}    ${chalk.gray('│')} Show related files\n` +
+          `${chalk.cyan('/symbol name')}   ${chalk.gray('│')} Search functions/classes\n` +
           `${chalk.cyan('/auto')}          ${chalk.gray('│')} Toggle auto-attach related files\n` +
           `${chalk.cyan('/recall')}        ${chalk.gray('│')} Search memory for relevant context\n` +
           `${chalk.cyan('/reset /clear')}  ${chalk.gray('│')} Clear all context\n` +
@@ -1136,10 +1383,88 @@ TOOL SYNTAX:
       
       // Handle index command - rebuild workspace graph
       if (input.toLowerCase() === '/index') {
-        console.log(chalk.cyan('\n📊 Rebuilding workspace index...'));
+        console.log(chalk.cyan('\n📊 Rebuilding workspace index with AST parsing...'));
         workspace = await buildWorkspaceGraph();
+        const totalSymbols = Object.values(workspace.files).reduce((sum, f) => sum + (f.symbols?.length || 0), 0);
         console.log(chalk.green(`✅ Indexed ${Object.keys(workspace.files).length} files`));
-        console.log(chalk.gray(`   Graph: ${Object.values(workspace.graph).flat().length} dependencies tracked\n`));
+        console.log(chalk.gray(`   📦 ${totalSymbols} symbols (functions, classes, variables)`));
+        console.log(chalk.gray(`   🔗 ${Object.values(workspace.graph).flat().length} dependencies tracked\n`));
+        continue;
+      }
+      
+      // Handle symbol search command
+      if (input.toLowerCase().startsWith('/symbol')) {
+        const query = input.slice(7).trim();
+        if (!query) {
+          // Show all symbols summary
+          const allSymbols = [];
+          for (const [file, info] of Object.entries(workspace.files)) {
+            for (const sym of info.symbols || []) {
+              allSymbols.push({ ...sym, file });
+            }
+          }
+          
+          // Group by type
+          const functions = allSymbols.filter(s => s.type === 'function');
+          const classes = allSymbols.filter(s => s.type === 'class');
+          const methods = allSymbols.filter(s => s.type === 'method');
+          
+          console.log();
+          console.log(box(
+            `${chalk.cyan('Functions:')} ${functions.length}\n` +
+            `${chalk.cyan('Classes:')} ${classes.length}\n` +
+            `${chalk.cyan('Methods:')} ${methods.length}\n` +
+            chalk.gray('─'.repeat(30)) + '\n' +
+            chalk.gray('Usage: /symbol <name> to search'),
+            '📦 Symbol Index', 'cyan'
+          ));
+          continue;
+        }
+        
+        console.log(chalk.cyan(`\n🔍 Searching for: "${query}"...\n`));
+        const results = searchSymbol(query, workspace);
+        
+        if (results.length === 0) {
+          console.log(chalk.yellow(`No symbols found matching "${query}"`));
+          console.log(chalk.gray('Tip: Run /index to refresh symbol index'));
+          continue;
+        }
+        
+        console.log(chalk.green(`Found ${results.length} symbol${results.length !== 1 ? 's' : ''}:\n`));
+        
+        for (const sym of results.slice(0, 15)) {
+          const typeIcon = sym.type === 'function' ? chalk.yellow('𝑓') : 
+                          sym.type === 'class' ? chalk.blue('◆') :
+                          sym.type === 'method' ? chalk.cyan('○') : chalk.gray('◇');
+          const asyncTag = sym.async ? chalk.magenta('async ') : '';
+          const params = sym.params !== undefined ? chalk.gray(`(${sym.params})`) : '';
+          
+          console.log(`  ${typeIcon} ${asyncTag}${chalk.white.bold(sym.name)}${params}`);
+          console.log(`     ${chalk.gray(sym.file)}:${chalk.cyan(sym.line)}`);
+        }
+        
+        if (results.length > 15) {
+          console.log(chalk.gray(`\n   ... and ${results.length - 15} more`));
+        }
+        
+        // Offer to add file to context
+        if (results.length > 0) {
+          console.log();
+          const addToCtx = await safeQuestion(chalk.yellow('Add first match file to context? ') + chalk.gray('(y/n): '));
+          if (addToCtx.toLowerCase() === 'y') {
+            const targetFile = results[0].file;
+            try {
+              const content = fs.readFileSync(targetFile, 'utf8');
+              messages.push({
+                role: 'user',
+                content: `Here is ${targetFile} (contains ${results[0].type} "${results[0].name}" at line ${results[0].line}):\n\n${content}`
+              });
+              console.log(chalk.green(`✅ Added ${targetFile} to context`));
+            } catch (e) {
+              console.log(chalk.red(`Could not read ${targetFile}`));
+            }
+          }
+        }
         continue;
       }
       
