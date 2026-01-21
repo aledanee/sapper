@@ -498,9 +498,9 @@ async function runSapper() {
   
   // Quick tips box
   console.log(box(
-    `${chalk.yellow('💡')} Type ${chalk.cyan('/help')} for commands\n` +
+    `${chalk.yellow('💡')} Use ${chalk.cyan('@file')} to attach files (e.g., "fix @app.js")\n` +
     `${chalk.yellow('💡')} Type ${chalk.cyan('/scan')} to load entire codebase\n` +
-    `${chalk.yellow('💡')} Type ${chalk.cyan('exit')} to quit`,
+    `${chalk.yellow('💡')} Type ${chalk.cyan('/help')} for all commands`,
     'Quick Tips', 'gray'
   ));
   console.log();
@@ -681,6 +681,7 @@ TOOL SYNTAX:
       if (input.toLowerCase() === '/help') {
         console.log();
         const helpContent = 
+          `${chalk.cyan('@file')}          ${chalk.gray('│')} Attach file to prompt (e.g., @src/app.js)\n` +
           `${chalk.cyan('/scan')}          ${chalk.gray('│')} Scan codebase into context\n` +
           `${chalk.cyan('/recall')}        ${chalk.gray('│')} Search memory for relevant context\n` +
           `${chalk.cyan('/reset /clear')}  ${chalk.gray('│')} Clear all context\n` +
@@ -789,7 +790,51 @@ TOOL SYNTAX:
         continue;
       }
       
-      messages.push({ role: 'user', content: input });
+      // Process @file attachments in prompt (e.g., "analyze @package.json" or "fix @src/index.js")
+      let processedInput = input;
+      const fileAttachments = [];
+      const attachRegex = /@([\w.\/\-_]+)/g;
+      let attachMatch;
+      
+      while ((attachMatch = attachRegex.exec(input)) !== null) {
+        const filePath = attachMatch[1];
+        try {
+          if (fs.existsSync(filePath)) {
+            const stats = fs.statSync(filePath);
+            if (stats.isFile()) {
+              if (stats.size > MAX_FILE_SIZE) {
+                console.log(chalk.yellow(`⚠️  @${filePath} is too large (${Math.round(stats.size/1024)}KB), skipping`));
+              } else {
+                const content = fs.readFileSync(filePath, 'utf8');
+                fileAttachments.push({ path: filePath, content, size: stats.size });
+                console.log(chalk.green(`📎 Attached: ${filePath} (${Math.round(stats.size/1024)}KB)`));
+              }
+            }
+          } else {
+            // Not a file - might be an @mention for something else, ignore
+          }
+        } catch (e) {
+          console.log(chalk.yellow(`⚠️  Could not read @${filePath}: ${e.message}`));
+        }
+      }
+      
+      // Build the final message with attachments
+      if (fileAttachments.length > 0) {
+        let attachedContent = '\n\n══════════════════════════════════════\n';
+        attachedContent += `📎 ATTACHED FILES (${fileAttachments.length})\n`;
+        attachedContent += '══════════════════════════════════════\n\n';
+        
+        for (const file of fileAttachments) {
+          attachedContent += `┌─── ${file.path} ───\n`;
+          attachedContent += file.content;
+          if (!file.content.endsWith('\n')) attachedContent += '\n';
+          attachedContent += `└─── END ${file.path} ───\n\n`;
+        }
+        
+        processedInput = input + attachedContent;
+      }
+      
+      messages.push({ role: 'user', content: processedInput });
 
       let toolRounds = 0; // Prevent infinite loops
       const MAX_TOOL_ROUNDS = 20;
