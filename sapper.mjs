@@ -1122,6 +1122,19 @@ TOOL SYNTAX:
         // Regex: supports both old format (path]content) and new format (path:::content)
         const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\]([^:\]]*?)(?:(?:::|\])([\s\S]*?))?\[\/TOOL\]/g)];
         
+        // Check for unclosed tool calls (AI started a tool but didn't close it)
+        const hasUnclosedTool = msg.includes('[TOOL:') && !msg.includes('[/TOOL]');
+        if (hasUnclosedTool) {
+          console.log(chalk.yellow('\n⚠️  Unclosed tool detected! AI forgot [/TOOL] closing tag.'));
+          console.log(chalk.gray('   Asking AI to complete the tool call...\n'));
+          
+          messages.push({ 
+            role: 'user', 
+            content: 'ERROR: Your tool call is incomplete - you forgot to add [/TOOL] at the end. Please complete the tool call by providing the closing [/TOOL] tag. If you were writing a file, just output [/TOOL] to close it.'
+          });
+          continue; // Let AI respond with the closing tag
+        }
+        
         // Debug mode: show what regex sees
         if (debugMode) {
           console.log(chalk.magenta('\n═══ DEBUG: REGEX ANALYSIS ═══'));
