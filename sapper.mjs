@@ -1061,7 +1061,10 @@ TOOL SYNTAX:
         spinner.stop();
 
         let msg = '';
-        const MAX_RESPONSE_LENGTH = 29000; // Guard against infinite loops (increased for multi-file reads)
+        const MAX_RESPONSE_LENGTH = 100000; // 100KB - allow long code generation
+        let lastChunkTime = Date.now();
+        let repetitionCount = 0;
+        let lastContent = '';
         abortStream = false; // Reset abort flag before streaming
         
         console.log(chalk.magenta('┌─[') + chalk.white.bold('Sapper') + chalk.magenta(']'));
@@ -1077,9 +1080,27 @@ TOOL SYNTAX:
           process.stdout.write(content);
           msg += content;
           
+          // Smart loop detection: check for repetitive content patterns
+          if (msg.length > 10000) {
+            const recentContent = msg.slice(-500);
+            const previousContent = msg.slice(-1000, -500);
+            
+            // If last 500 chars are very similar to previous 500, might be looping
+            if (recentContent === previousContent) {
+              repetitionCount++;
+              if (repetitionCount > 3) {
+                console.log(chalk.red('\n\n⚠️ REPETITIVE OUTPUT DETECTED: Stopping to prevent loop.'));
+                break;
+              }
+            } else {
+              repetitionCount = 0;
+            }
+          }
+          
+          // Hard limit as final safety net
           if (msg.length > MAX_RESPONSE_LENGTH) {
-            console.log(chalk.red('\n\n⚠️ RESPONSE TOO LONG: Forcing stop to prevent infinite loop.'));
-            break;
+            console.log(chalk.yellow('\n\n⚠️ Response very long (100KB+). Continuing... (Ctrl+C to stop)'));
+            // Don't break - just warn. User can Ctrl+C if needed
           }
         }
         console.log();
