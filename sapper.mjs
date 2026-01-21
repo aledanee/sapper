@@ -1103,19 +1103,7 @@ TOOL SYNTAX:
             // Don't break - just warn. User can Ctrl+C if needed
           }
         }
-        console.log();
-        
-        // If response has markdown, show rendered version
-        const hasMarkdown = /\*\*|__|`|^#|^[-*] /m.test(msg);
-        if (hasMarkdown && !msg.includes('[TOOL:')) {
-          console.log(chalk.gray('─'.repeat(40)));
-          const rendered = renderMarkdown(msg);
-          const lines = rendered.split('\n');
-          for (const line of lines) {
-            console.log(chalk.magenta('│ ') + line);
-          }
-          console.log();
-        }
+        console.log(chalk.magenta('└─────────────────────────────────────'));
         
         messages.push({ role: 'assistant', content: msg });
 
