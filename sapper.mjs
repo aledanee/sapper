@@ -316,6 +316,99 @@ function scanCodebase(dir = '.', depth = 0, maxDepth = 5) {
   return { files, totalSize };
 }
 
+// Scan directory for files (for @ file picker)
+function getFilesForPicker(dir = '.', prefix = '', maxFiles = 50) {
+  let files = [];
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (files.length >= maxFiles) break;
+      if (IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+      
+      const fullPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      
+      if (entry.isDirectory()) {
+        files.push({ path: fullPath + '/', isDir: true });
+        // Recurse one level for common structures
+        const subFiles = getFilesForPicker(`${dir}/${entry.name}`, fullPath, 20);
+        files = files.concat(subFiles.slice(0, 15)); // Limit subdirectory files
+      } else {
+        const ext = entry.name.includes('.') ? '.' + entry.name.split('.').pop() : '';
+        if (CODE_EXTENSIONS.has(ext.toLowerCase()) || CODE_EXTENSIONS.has(entry.name)) {
+          try {
+            const stats = fs.statSync(`${dir}/${entry.name}`);
+            files.push({ path: fullPath, isDir: false, size: stats.size });
+          } catch (e) {
+            files.push({ path: fullPath, isDir: false, size: 0 });
+          }
+        }
+      }
+    }
+  } catch (e) {}
+  return files.slice(0, maxFiles);
+}
+
+// Interactive file picker
+async function pickFiles() {
+  const files = getFilesForPicker('.', '', 50).filter(f => !f.isDir);
+  
+  if (files.length === 0) {
+    console.log(chalk.yellow('No code files found in current directory.'));
+    return [];
+  }
+  
+  console.log();
+  console.log(box(
+    `Select files by number (e.g., ${chalk.cyan('1 3 5')} or ${chalk.cyan('1-5')} or ${chalk.cyan('all')})\n` +
+    `Press ${chalk.cyan('Enter')} with no input to cancel`,
+    '📎 File Picker', 'cyan'
+  ));
+  console.log();
+  
+  // Display files in columns
+  files.forEach((file, i) => {
+    const num = chalk.cyan.bold(`[${(i + 1).toString().padStart(2)}]`);
+    const size = file.size ? chalk.gray(`(${Math.round(file.size/1024)}KB)`) : '';
+    console.log(`  ${num} ${chalk.white(file.path)} ${size}`);
+  });
+  
+  console.log();
+  const selection = await safeQuestion(chalk.cyan('Select files: '));
+  
+  if (!selection.trim()) {
+    console.log(chalk.gray('Cancelled.'));
+    return [];
+  }
+  
+  // Parse selection
+  const selectedFiles = [];
+  const parts = selection.toLowerCase().split(/[\s,]+/);
+  
+  for (const part of parts) {
+    if (part === 'all') {
+      return files.map(f => f.path);
+    }
+    
+    // Handle ranges like "1-5"
+    const rangeMatch = part.match(/^(\d+)-(\d+)$/);
+    if (rangeMatch) {
+      const start = parseInt(rangeMatch[1]);
+      const end = parseInt(rangeMatch[2]);
+      for (let i = start; i <= end && i <= files.length; i++) {
+        if (i >= 1) selectedFiles.push(files[i - 1].path);
+      }
+    } else {
+      // Single number
+      const num = parseInt(part);
+      if (num >= 1 && num <= files.length) {
+        selectedFiles.push(files[num - 1].path);
+      }
+    }
+  }
+  
+  return [...new Set(selectedFiles)]; // Remove duplicates
+}
+
 // Format scan results for AI context
 function formatScanResults(scanResult) {
   let output = `\n══════════════════════════════════════\n`;
@@ -681,7 +774,8 @@ TOOL SYNTAX:
       if (input.toLowerCase() === '/help') {
         console.log();
         const helpContent = 
-          `${chalk.cyan('@file')}          ${chalk.gray('│')} Attach file to prompt (e.g., @src/app.js)\n` +
+          `${chalk.cyan('@')} or ${chalk.cyan('/attach')}  ${chalk.gray('│')} Pick files to attach (interactive)\n` +
+          `${chalk.cyan('@file')}          ${chalk.gray('│')} Attach file inline (e.g., @src/app.js)\n` +
           `${chalk.cyan('/scan')}          ${chalk.gray('│')} Scan codebase into context\n` +
           `${chalk.cyan('/recall')}        ${chalk.gray('│')} Search memory for relevant context\n` +
           `${chalk.cyan('/reset /clear')}  ${chalk.gray('│')} Clear all context\n` +
@@ -790,7 +884,56 @@ TOOL SYNTAX:
         continue;
       }
       
-      // Process @file attachments in prompt (e.g., "analyze @package.json" or "fix @src/index.js")
+      // Handle @ alone or /attach command - interactive file picker
+      if (input.trim() === '@' || input.toLowerCase() === '/attach') {
+        const selectedFiles = await pickFiles();
+        
+        if (selectedFiles.length === 0) continue;
+        
+        // Read and attach selected files
+        const fileAttachments = [];
+        for (const filePath of selectedFiles) {
+          try {
+            const stats = fs.statSync(filePath);
+            if (stats.size > MAX_FILE_SIZE) {
+              console.log(chalk.yellow(`⚠️  ${filePath} is too large, skipping`));
+              continue;
+            }
+            const content = fs.readFileSync(filePath, 'utf8');
+            fileAttachments.push({ path: filePath, content, size: stats.size });
+            console.log(chalk.green(`📎 Attached: ${filePath}`));
+          } catch (e) {
+            console.log(chalk.yellow(`⚠️  Could not read ${filePath}`));
+          }
+        }
+        
+        if (fileAttachments.length === 0) continue;
+        
+        // Ask for the prompt to go with these files
+        console.log();
+        const prompt = await safeQuestion(chalk.cyan('Your prompt for these files: '));
+        
+        if (!prompt.trim()) {
+          console.log(chalk.gray('Cancelled.'));
+          continue;
+        }
+        
+        // Build message with attachments
+        let attachedContent = '\n\n══════════════════════════════════════\n';
+        attachedContent += `📎 ATTACHED FILES (${fileAttachments.length})\n`;
+        attachedContent += '══════════════════════════════════════\n\n';
+        
+        for (const file of fileAttachments) {
+          attachedContent += `┌─── ${file.path} ───\n`;
+          attachedContent += file.content;
+          if (!file.content.endsWith('\n')) attachedContent += '\n';
+          attachedContent += `└─── END ${file.path} ───\n\n`;
+        }
+        
+        messages.push({ role: 'user', content: prompt + attachedContent });
+        // Continue to AI response (don't use 'continue' here)
+      } else {
+        // Process @file attachments in prompt (e.g., "analyze @package.json" or "fix @src/index.js")
       let processedInput = input;
       const fileAttachments = [];
       const attachRegex = /@([\w.\/\-_]+)/g;
@@ -835,6 +978,7 @@ TOOL SYNTAX:
       }
       
       messages.push({ role: 'user', content: processedInput });
+      } // End of else block for non-@ input
 
       let toolRounds = 0; // Prevent infinite loops
       const MAX_TOOL_ROUNDS = 20;
