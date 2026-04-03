@@ -73,6 +73,8 @@ const CONTEXT_FILE = `${SAPPER_DIR}/context.json`;
 const EMBEDDINGS_FILE = `${SAPPER_DIR}/embeddings.json`;
 const WORKSPACE_FILE = `${SAPPER_DIR}/workspace.json`;
 const CONFIG_FILE = `${SAPPER_DIR}/config.json`;
+const AGENTS_DIR = `${SAPPER_DIR}/agents`;
+const SKILLS_DIR = `${SAPPER_DIR}/skills`;
 
 // Ensure .sapper directory exists
 function ensureSapperDir() {
@@ -80,6 +82,137 @@ function ensureSapperDir() {
     fs.mkdirSync(SAPPER_DIR, { recursive: true });
   }
 }
+
+// Ensure agents and skills directories exist
+function ensureAgentsDirs() {
+  ensureSapperDir();
+  if (!fs.existsSync(AGENTS_DIR)) {
+    fs.mkdirSync(AGENTS_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(SKILLS_DIR)) {
+    fs.mkdirSync(SKILLS_DIR, { recursive: true });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AGENTS & SKILLS SYSTEM
+// ═══════════════════════════════════════════════════════════════
+
+// Load all agents from .sapper/agents/*.md
+function loadAgents() {
+  ensureAgentsDirs();
+  const agents = {};
+  try {
+    const files = fs.readdirSync(AGENTS_DIR);
+    for (const file of files) {
+      if (file.endsWith('.md')) {
+        const name = file.replace('.md', '').toLowerCase();
+        const content = fs.readFileSync(join(AGENTS_DIR, file), 'utf8');
+        // Extract first line as description (# Title)
+        const firstLine = content.split('\n')[0].replace(/^#\s*/, '').trim();
+        agents[name] = { name, file, content, description: firstLine };
+      }
+    }
+  } catch (e) {}
+  return agents;
+}
+
+// Load all skills from .sapper/skills/*.md
+function loadSkills() {
+  ensureAgentsDirs();
+  const skills = {};
+  try {
+    const files = fs.readdirSync(SKILLS_DIR);
+    for (const file of files) {
+      if (file.endsWith('.md')) {
+        const name = file.replace('.md', '').toLowerCase();
+        const content = fs.readFileSync(join(SKILLS_DIR, file), 'utf8');
+        const firstLine = content.split('\n')[0].replace(/^#\s*/, '').trim();
+        skills[name] = { name, file, content, description: firstLine };
+      }
+    }
+  } catch (e) {}
+  return skills;
+}
+
+// Create default example agent on first run
+function createDefaultAgentsAndSkills() {
+  ensureAgentsDirs();
+  
+  const defaultAgents = {
+    'sapper-it': `# Sapper IT - Coding Agent\n\nYou are Sapper IT, an expert full-stack coding agent working within Sapper.\nYour expertise includes:\n- Full-stack web development (frontend + backend)\n- System architecture and design patterns\n- Debugging, refactoring, and code review\n- DevOps, CI/CD, and deployment\n- Database design and optimization\n- API development (REST, GraphQL)\n- Performance optimization and security best practices\n\nWhen the user asks for help, dive into the codebase using Sapper's tools. Read files, understand the structure, then make precise changes.\n\nBe technical, thorough, and code-first. Always verify your changes work by running tests or builds.`
+  };
+  
+  const defaultSkills = {};
+  
+  let created = 0;
+  for (const [name, content] of Object.entries(defaultAgents)) {
+    const filePath = join(AGENTS_DIR, `${name}.md`);
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, content);
+      created++;
+    }
+  }
+  for (const [name, content] of Object.entries(defaultSkills)) {
+    const filePath = join(SKILLS_DIR, `${name}.md`);
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, content);
+      created++;
+    }
+  }
+  return created;
+}
+
+// Build the system prompt with optional agent and skills
+function buildSystemPrompt(agentContent = null, skillContents = []) {
+  let prompt = `You are Sapper, an intelligent AI assistant with access to the local filesystem and shell.
+You can help with ANY task - coding, writing, research, planning, analysis, and more.
+Adapt your personality and expertise based on the active agent role and loaded skills.
+
+RULES:
+1. EXPLORE FIRST: Use LIST and READ to understand files before making changes.
+2. THINK IN STEPS: Explain what you found and what you plan to do before acting.
+3. BE PRECISE: When using PATCH, ensure the 'oldText' matches exactly.
+4. VERIFY: After making changes, verify they work (run tests, check output, etc).
+5. NO HALLUCINATIONS: If a file doesn't exist, don't guess its content. List the directory instead.
+
+TOOL SYNTAX (use these to interact with files and system):
+- [TOOL:LIST]dir[/TOOL] - List directory contents
+- [TOOL:READ]file_path[/TOOL] - Read file contents
+- [TOOL:SEARCH]pattern[/TOOL] - Search files for pattern
+- [TOOL:WRITE]path:::content[/TOOL] - Create/overwrite file
+- [TOOL:PATCH]path:::old|||new[/TOOL] - Edit existing file
+- [TOOL:SHELL]command[/TOOL] - Run shell command
+
+CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are for your internal use only - the user should not see tool commands. Just use them silently and show the results. Do NOT include tool syntax in examples, explanations, or code blocks.
+
+IMPORTANT CONTEXT:
+- The current working directory is the user's project folder.
+- Sapper has a built-in agent/skill system. Agents are managed via /agents, /agent create, /newagent commands - NOT by you creating files manually.
+- Do NOT try to build agent frameworks, projects, or directory structures when the user mentions agents. The agent system is already built into Sapper.
+- When the user asks you to do something, work within their current project directory.
+- Use "." for the current directory when listing, not "/" or "agent/".
+
+When no agent is active, you are a general-purpose assistant. When an agent role is loaded, fully adopt that role.`;
+
+  if (agentContent) {
+    prompt += `\n\n═══ ACTIVE AGENT ROLE ═══\n${agentContent}\n═══ END AGENT ROLE ═══\n\nIMPORTANT: You are now operating as the agent described above. Adopt its persona, expertise, and communication style while still having access to all Sapper tools.`;
+  }
+
+  if (skillContents.length > 0) {
+    prompt += `\n\n═══ LOADED SKILLS ═══`;
+    for (const skill of skillContents) {
+      prompt += `\n${skill}\n---`;
+    }
+    prompt += `\n═══ END SKILLS ═══\n\nUse the knowledge from the loaded skills above when relevant to the user's request.`;
+  }
+
+  return prompt;
+}
+
+// Track active agent
+let currentAgent = null; // null = default Sapper, or agent name string
+let loadedSkills = []; // array of skill names currently loaded
 
 // Load config (settings like autoAttach)
 function loadConfig() {
@@ -1144,6 +1277,7 @@ async function runSapper() {
   console.log(box(
     `${chalk.yellow('💡')} Use ${chalk.cyan('@file')} to attach files (e.g., "fix @app.js")\n` +
     `${chalk.yellow('💡')} Type ${chalk.cyan('/scan')} to load entire codebase\n` +
+    `${chalk.yellow('💡')} Type ${chalk.cyan('/agents')} to see agents, ${chalk.cyan('/agentname')} to switch\n` +
     `${chalk.yellow('💡')} Type ${chalk.cyan('/help')} for all commands`,
     'Quick Tips', 'gray'
   ));
@@ -1171,7 +1305,22 @@ async function runSapper() {
   
   // Show memory status
   console.log(chalk.gray(`📁 Memory: .sapper/ folder`));
-  console.log(chalk.gray(`🔗 Auto-attach: ${sapperConfig.autoAttach ? 'ON' : 'OFF'} (toggle with /auto)\n`));
+  console.log(chalk.gray(`🔗 Auto-attach: ${sapperConfig.autoAttach ? 'ON' : 'OFF'} (toggle with /auto)`));
+  
+  // Initialize agents and skills
+  const newlyCreated = createDefaultAgentsAndSkills();
+  const agents = loadAgents();
+  const skills = loadSkills();
+  const agentCount = Object.keys(agents).length;
+  const skillCount = Object.keys(skills).length;
+  console.log(chalk.gray(`🤖 Agents: ${agentCount} available`) + chalk.gray(` │ `) + chalk.gray(`📘 Skills: ${skillCount} available`));
+  if (newlyCreated > 0) {
+    console.log(chalk.green(`   ✨ Created ${newlyCreated} default agents/skills in .sapper/`));
+  }
+  if (agentCount > 0) {
+    console.log(chalk.gray(`   Agents: ${Object.keys(agents).map(a => '/' + a).join(', ')}`));
+  }
+  console.log();
   
   let messages = [];
   if (fs.existsSync(CONTEXT_FILE)) {
@@ -1232,23 +1381,7 @@ async function runSapper() {
   if (messages.length === 0) {
     messages = [{
       role: 'system',
-      content: `You are Sapper, a high-level Autonomous Software Engineer.
-Your goal is to solve the user's request by interacting with the filesystem and shell.
-
-RULES:
-1. EXPLORE FIRST: Use LIST and READ to understand the codebase before making changes.
-2. THINK IN STEPS: Explain what you found and what you plan to do before executing tools.
-3. BE PRECISE: When using PATCH, ensure the 'oldText' matches exactly.
-4. VERIFY: After writing code, use the SHELL tool to run tests or linting.
-5. NO HALLUCINATIONS: If a file doesn't exist, don't guess its content. List the directory instead.
-
-TOOL SYNTAX:
-- [TOOL:LIST]dir[/TOOL] - List directory contents
-- [TOOL:READ]file_path[/TOOL] - Read file contents
-- [TOOL:SEARCH]pattern[/TOOL] - Search codebase for pattern
-- [TOOL:WRITE]path:::content[/TOOL] - Create/overwrite file
-- [TOOL:PATCH]path:::old|||new[/TOOL] - Edit existing file
-- [TOOL:SHELL]command[/TOOL] - Run shell command`
+      content: buildSystemPrompt()
     }];
   }
 
@@ -1266,7 +1399,16 @@ TOOL SYNTAX:
         ));
       }
       
-      const input = await safeQuestion(chalk.cyan('\n┌─[') + chalk.white.bold('You') + chalk.cyan(']\n└─➤ '));
+      // Build prompt label with active agent/skills
+      let promptLabel = chalk.white.bold('You');
+      if (currentAgent) {
+        promptLabel += chalk.gray(' → ') + chalk.magenta.bold(currentAgent);
+      }
+      if (loadedSkills.length > 0) {
+        promptLabel += chalk.gray(' [') + chalk.blue(loadedSkills.join(', ')) + chalk.gray(']');
+      }
+      
+      const input = await safeQuestion(chalk.cyan('\n┌─[') + promptLabel + chalk.cyan(']\n└─➤ '));
       
       if (input.toLowerCase() === 'exit') process.exit();
       
@@ -1276,9 +1418,11 @@ TOOL SYNTAX:
           fs.unlinkSync(CONTEXT_FILE);
           console.log(chalk.green('✅ Context cleared! Starting fresh...\n'));
         }
+        currentAgent = null;
+        loadedSkills = [];
         messages = [{
           role: 'system',
-          content: messages[0].content // Keep system prompt
+          content: buildSystemPrompt() // Reset to default prompt
         }];
         continue;
       }
@@ -1328,16 +1472,16 @@ TOOL SYNTAX:
         // 4. Rebuild the messages array starting with the ORIGINAL prompt
         messages = [originalSystemPrompt, ...recentMessages];
         
-        // 4. Add reminder to stay in Agent Mode (not chatbot mode)
+        // 4. Add reminder to stay in tool-using mode
         messages.push({ 
           role: 'system', 
-          content: `CONTEXT PRUNED. REMINDER: You are Sapper, an Autonomous Software Engineer.
+          content: `CONTEXT PRUNED. REMINDER: You are Sapper, an AI assistant with filesystem and shell access.
 
 RULES:
 1. EXPLORE FIRST: Use LIST and READ before making changes.
-2. THINK IN STEPS: Explain your plan before executing tools.
+2. THINK IN STEPS: Explain your plan before acting.
 3. BE PRECISE: When using PATCH, ensure 'oldText' matches exactly.
-4. VERIFY: Run tests or linting after writing code.
+4. VERIFY: Verify changes work after making them.
 5. NO HALLUCINATIONS: Don't guess file contents.
 
 TOOL SYNTAX:
@@ -1346,7 +1490,9 @@ TOOL SYNTAX:
 - [TOOL:SEARCH]pattern[/TOOL]
 - [TOOL:WRITE]path:::content[/TOOL]
 - [TOOL:PATCH]path:::old|||new[/TOOL]
-- [TOOL:SHELL]command[/TOOL]`
+- [TOOL:SHELL]command[/TOOL]
+
+CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are for your internal use only. Just use them silently and show the results.`
         });
         
         // 5. Save to context file so it persists
@@ -1375,7 +1521,17 @@ TOOL SYNTAX:
           `${chalk.cyan('/context')}       ${chalk.gray('│')} Show context size\n` +
           `${chalk.cyan('/debug')}         ${chalk.gray('│')} Toggle debug mode\n` +
           `${chalk.cyan('/help')}          ${chalk.gray('│')} Show this help\n` +
-          `${chalk.cyan('exit')}           ${chalk.gray('│')} Quit Sapper`;
+          `${chalk.cyan('exit')}           ${chalk.gray('│')} Quit Sapper\n` +
+          `\n` +
+          chalk.bold.white('🤖 Agents & Skills:\n') +
+          `${chalk.cyan('/agents')}        ${chalk.gray('│')} List available agents\n` +
+          `${chalk.cyan('/skills')}        ${chalk.gray('│')} List available skills\n` +
+          `${chalk.cyan('/agentname')}     ${chalk.gray('│')} Switch to agent (e.g., /salesmanager)\n` +
+          `${chalk.cyan('/default')}       ${chalk.gray('│')} Switch back to default Sapper\n` +
+          `${chalk.cyan('/use skill')}     ${chalk.gray('│')} Load a skill (e.g., /use react)\n` +
+          `${chalk.cyan('/unload skill')}  ${chalk.gray('│')} Unload a skill\n` +
+          `${chalk.cyan('/newagent')}      ${chalk.gray('│')} Create a new agent\n` +
+          `${chalk.cyan('/newskill')}      ${chalk.gray('│')} Create a new skill`;
         console.log(box(helpContent, '📚 Commands', 'cyan'));
         console.log();
         continue;
@@ -1563,6 +1719,259 @@ TOOL SYNTAX:
         continue;
       }
       
+      // ═══════════════════════════════════════════════════════════
+      // AGENT & SKILL COMMANDS
+      // ═══════════════════════════════════════════════════════════
+      
+      // Handle /agents command - list available agents or create one
+      if (input.toLowerCase() === '/agents' || input.toLowerCase() === '/agent') {
+        const currentAgents = loadAgents();
+        const agentNames = Object.keys(currentAgents);
+        if (agentNames.length === 0) {
+          console.log(chalk.yellow('\nNo agents found. Create one with /newagent or /agents create <name> <description>'));
+        } else {
+          console.log();
+          let agentList = '';
+          for (const [name, agent] of Object.entries(currentAgents)) {
+            const active = currentAgent === name ? chalk.green(' ◀ ACTIVE') : '';
+            agentList += `${chalk.cyan('/' + name)} ${chalk.gray('─')} ${chalk.white(agent.description)}${active}\n`;
+          }
+          agentList += `\n${chalk.gray('Usage:')} ${chalk.cyan('/agentname prompt')} to switch & chat`;
+          agentList += `\n${chalk.gray('Create:')} ${chalk.cyan('/agents create <name> <description>')}`;
+          console.log(box(agentList.trim(), '🤖 Available Agents', 'cyan'));
+        }
+        console.log();
+        continue;
+      }
+      
+      // Handle /agents create <name> <description> - quick agent creation
+      if (input.toLowerCase().startsWith('/agents create ')) {
+        const rest = input.slice('/agents create '.length).trim();
+        const parts = rest.split(/\s+/);
+        const agentName = (parts[0] || '').toLowerCase().replace(/[^a-z0-9_-]/g, '');
+        const description = parts.slice(1).join(' ').trim();
+        
+        if (!agentName) {
+          console.log(chalk.yellow('\nUsage: /agents create <name> <description>'));
+          console.log(chalk.gray('Example: /agents create salesmanager handles sales strategies and customer relations'));
+          continue;
+        }
+        
+        ensureAgentsDirs();
+        const agentFile = join(AGENTS_DIR, `${agentName}.md`);
+        if (fs.existsSync(agentFile)) {
+          console.log(chalk.yellow(`\nAgent "${agentName}" already exists. Edit it at: ${agentFile}`));
+          continue;
+        }
+        
+        const agentTitle = agentName.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const agentMd = `# ${agentTitle}\n\nYou are a ${agentTitle} AI assistant working within Sapper.\n${description ? `Your role: ${description}\n` : ''}\nAdapt your responses to match this role. Use Sapper's tools (file read/write, shell commands, search) when needed to assist the user.\n`;
+        
+        fs.writeFileSync(agentFile, agentMd);
+        console.log(chalk.green(`\n✅ Agent "${agentName}" created!`));
+        console.log(chalk.gray(`   File: ${agentFile}`));
+        console.log(chalk.cyan(`   Use it: /${agentName} <your prompt>`));
+        continue;
+      }
+      
+      // Handle /skills command - list available skills
+      if (input.toLowerCase() === '/skills') {
+        const currentSkills = loadSkills();
+        const skillNames = Object.keys(currentSkills);
+        if (skillNames.length === 0) {
+          console.log(chalk.yellow('\nNo skills found. Create one with /newskill'));
+        } else {
+          console.log();
+          let skillList = '';
+          for (const [name, skill] of Object.entries(currentSkills)) {
+            const loaded = loadedSkills.includes(name) ? chalk.green(' ◀ LOADED') : '';
+            skillList += `${chalk.cyan(name)} ${chalk.gray('─')} ${chalk.white(skill.description)}${loaded}\n`;
+          }
+          skillList += `\n${chalk.gray('Usage:')} ${chalk.cyan('/use skillname')} to load a skill`;
+          console.log(box(skillList.trim(), '📘 Available Skills', 'cyan'));
+        }
+        console.log();
+        continue;
+      }
+      
+      // Handle /default command - switch back to default Sapper
+      if (input.toLowerCase() === '/default') {
+        currentAgent = null;
+        // Rebuild system prompt without agent
+        const skillContents = loadedSkills.map(s => {
+          const allSkills = loadSkills();
+          return allSkills[s]?.content || '';
+        }).filter(Boolean);
+        messages[0] = { role: 'system', content: buildSystemPrompt(null, skillContents) };
+        console.log(chalk.green('\n✅ Switched back to default Sapper mode'));
+        continue;
+      }
+      
+      // Handle /use command - load a skill
+      if (input.toLowerCase().startsWith('/use ')) {
+        const skillName = input.slice(5).trim().toLowerCase();
+        const currentSkills = loadSkills();
+        
+        if (!currentSkills[skillName]) {
+          console.log(chalk.yellow(`\n❌ Skill "${skillName}" not found.`));
+          console.log(chalk.gray(`Available: ${Object.keys(currentSkills).join(', ') || 'none (create with /newskill)'}`));
+          continue;
+        }
+        
+        if (loadedSkills.includes(skillName)) {
+          console.log(chalk.yellow(`\nSkill "${skillName}" is already loaded.`));
+          continue;
+        }
+        
+        loadedSkills.push(skillName);
+        
+        // Rebuild system prompt with current agent + all loaded skills
+        const agentContent = currentAgent ? currentSkills[currentAgent]?.content || loadAgents()[currentAgent]?.content : null;
+        const skillContents = loadedSkills.map(s => currentSkills[s]?.content || '').filter(Boolean);
+        messages[0] = { role: 'system', content: buildSystemPrompt(agentContent, skillContents) };
+        
+        console.log(chalk.green(`\n✅ Skill "${skillName}" loaded!`));
+        console.log(chalk.gray(`   Active skills: ${loadedSkills.join(', ')}`));
+        continue;
+      }
+      
+      // Handle /unload command - unload a skill
+      if (input.toLowerCase().startsWith('/unload ')) {
+        const skillName = input.slice(8).trim().toLowerCase();
+        
+        if (!loadedSkills.includes(skillName)) {
+          console.log(chalk.yellow(`\nSkill "${skillName}" is not loaded.`));
+          console.log(chalk.gray(`Loaded skills: ${loadedSkills.join(', ') || 'none'}`));
+          continue;
+        }
+        
+        loadedSkills = loadedSkills.filter(s => s !== skillName);
+        
+        // Rebuild system prompt
+        const allSkills = loadSkills();
+        const agentContent = currentAgent ? loadAgents()[currentAgent]?.content : null;
+        const skillContents = loadedSkills.map(s => allSkills[s]?.content || '').filter(Boolean);
+        messages[0] = { role: 'system', content: buildSystemPrompt(agentContent, skillContents) };
+        
+        console.log(chalk.green(`\n✅ Skill "${skillName}" unloaded.`));
+        if (loadedSkills.length > 0) {
+          console.log(chalk.gray(`   Remaining skills: ${loadedSkills.join(', ')}`));
+        }
+        continue;
+      }
+      
+      // Handle /newagent command - create a new agent
+      if (input.toLowerCase() === '/newagent') {
+        console.log();
+        console.log(box(
+          `Create a custom agent with its own persona and expertise.\n` +
+          `The agent file will be saved in ${chalk.cyan('.sapper/agents/')}`,
+          '🤖 New Agent', 'cyan'
+        ));
+        
+        const agentName = await safeQuestion(chalk.cyan('\nAgent name (lowercase, no spaces): '));
+        if (!agentName.trim() || !/^[a-z0-9_-]+$/.test(agentName.trim())) {
+          console.log(chalk.yellow('Invalid name. Use lowercase letters, numbers, hyphens, underscores only.'));
+          continue;
+        }
+        
+        const agentFile = join(AGENTS_DIR, `${agentName.trim()}.md`);
+        if (fs.existsSync(agentFile)) {
+          console.log(chalk.yellow(`Agent "${agentName}" already exists. Edit it at: ${agentFile}`));
+          continue;
+        }
+        
+        const agentTitle = await safeQuestion(chalk.cyan('Agent title/role: '));
+        const agentExpertise = await safeQuestion(chalk.cyan('Areas of expertise (comma-separated): '));
+        const agentStyle = await safeQuestion(chalk.cyan('Communication style (e.g., professional, casual, technical): '));
+        
+        const expertiseList = agentExpertise.split(',').map(e => `- ${e.trim()}`).join('\\n');
+        const agentMd = `# ${agentTitle.trim() || agentName}\n\nYou are a ${agentTitle.trim() || agentName} AI assistant working within Sapper.\nYour expertise includes:\n${expertiseList}\n\nCommunication style: ${agentStyle.trim() || 'professional and helpful'}.\n\nWhen the user asks for help, leverage your expertise and Sapper's tools (file read/write, shell commands, search) to provide comprehensive assistance.\n`;
+        
+        fs.writeFileSync(agentFile, agentMd);
+        console.log(chalk.green(`\n✅ Agent "${agentName}" created!`));
+        console.log(chalk.gray(`   File: ${agentFile}`));
+        console.log(chalk.cyan(`   Use it: /${agentName} <your prompt>`));
+        continue;
+      }
+      
+      // Handle /newskill command - create a new skill
+      if (input.toLowerCase() === '/newskill') {
+        console.log();
+        console.log(box(
+          `Create a custom skill with domain knowledge.\n` +
+          `The skill file will be saved in ${chalk.cyan('.sapper/skills/')}`,
+          '📘 New Skill', 'cyan'
+        ));
+        
+        const skillName = await safeQuestion(chalk.cyan('\nSkill name (lowercase, no spaces): '));
+        if (!skillName.trim() || !/^[a-z0-9_-]+$/.test(skillName.trim())) {
+          console.log(chalk.yellow('Invalid name. Use lowercase letters, numbers, hyphens, underscores only.'));
+          continue;
+        }
+        
+        const skillFile = join(SKILLS_DIR, `${skillName.trim()}.md`);
+        if (fs.existsSync(skillFile)) {
+          console.log(chalk.yellow(`Skill "${skillName}" already exists. Edit it at: ${skillFile}`));
+          continue;
+        }
+        
+        const skillTitle = await safeQuestion(chalk.cyan('Skill title: '));
+        const skillDesc = await safeQuestion(chalk.cyan('Describe the skill knowledge (or press Enter for template): '));
+        
+        const skillMd = skillDesc.trim() 
+          ? `# ${skillTitle.trim() || skillName}\n\n${skillDesc.trim()}\n`
+          : `# ${skillTitle.trim() || skillName}\n\nBest practices and knowledge for ${skillTitle.trim() || skillName}:\n- [Add your knowledge points here]\n- [Add patterns and conventions]\n- [Add common solutions]\n\nProject structure recommendations:\n- [Describe recommended structure]\n`;
+        
+        fs.writeFileSync(skillFile, skillMd);
+        console.log(chalk.green(`\n✅ Skill "${skillName}" created!`));
+        console.log(chalk.gray(`   File: ${skillFile}`));
+        console.log(chalk.cyan(`   Load it: /use ${skillName}`));
+        continue;
+      }
+      
+      // Handle /agentname - detect if input matches an agent name
+      let agentHandled = false;
+      {
+        const currentAgents = loadAgents();
+        const inputLower = input.toLowerCase();
+        
+        // Check if input starts with /agentname (e.g., /salesmanager how do I sell?)
+        if (inputLower.startsWith('/') && !inputLower.startsWith('//')) {
+          const firstSpace = input.indexOf(' ');
+          const cmdPart = firstSpace > 0 ? inputLower.slice(1, firstSpace) : inputLower.slice(1);
+          
+          if (currentAgents[cmdPart]) {
+            const agent = currentAgents[cmdPart];
+            const prompt = firstSpace > 0 ? input.slice(firstSpace + 1).trim() : '';
+            
+            // Switch to this agent
+            currentAgent = cmdPart;
+            
+            // Rebuild system prompt with agent + any loaded skills
+            const skillContents = loadedSkills.map(s => {
+              const allSkills = loadSkills();
+              return allSkills[s]?.content || '';
+            }).filter(Boolean);
+            messages[0] = { role: 'system', content: buildSystemPrompt(agent.content, skillContents) };
+            
+            console.log();
+            console.log(statusBadge(`AGENT: ${agent.description}`, 'action'));
+            console.log(chalk.green(`Switched to /${cmdPart} agent`));
+            
+            if (!prompt) {
+              console.log(chalk.gray(`Type your prompt to chat with this agent.`));
+              continue; // Just switched, no prompt to send
+            }
+            
+            // Has a prompt - inject it as user message and let AI respond
+            messages.push({ role: 'user', content: prompt });
+            agentHandled = true;
+            // Don't continue - fall through to the AI response loop below
+          }
+        }
+      }
+      
       // Handle recall command - search embeddings
       if (input.toLowerCase().startsWith('/recall')) {
         const query = input.slice(7).trim();
@@ -1639,6 +2048,8 @@ TOOL SYNTAX:
         continue;
       }
       
+      // Skip input processing if agent already handled it
+      if (!agentHandled) {
       // Handle @ alone or /attach command - interactive file picker
       if (input.trim() === '@' || input.toLowerCase() === '/attach') {
         const selectedFiles = await pickFiles();
@@ -1751,9 +2162,12 @@ TOOL SYNTAX:
       
       messages.push({ role: 'user', content: processedInput });
       } // End of else block for non-@ input
+      } // End of if (!agentHandled)
 
       let toolRounds = 0; // Prevent infinite loops
       const MAX_TOOL_ROUNDS = 20;
+      let unclosedRetries = 0; // Prevent infinite unclosed tool retry loops
+      const MAX_UNCLOSED_RETRIES = 2;
       
       let active = true;
       while (active) {
@@ -1818,20 +2232,27 @@ TOOL SYNTAX:
         
         messages.push({ role: 'assistant', content: msg });
 
+        // Strip markdown code blocks before tool parsing to avoid executing tool examples
+        const msgForToolParsing = msg.replace(/```[\s\S]*?```/g, '');
+
         // Regex: supports both old format (path]content) and new format (path:::content)
-        const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\]([^:\]]*?)(?:(?:::|\])([\s\S]*?))?\[\/TOOL\]/g)];
+        const toolMatches = [...msgForToolParsing.matchAll(/\[TOOL:(\w+)\]([^:\]]*?)(?:(?:::|\])([\s\S]*?))?\[\/TOOL\]/g)];
         
         // Check for unclosed tool calls (AI started a tool but didn't close it)
-        const hasUnclosedTool = msg.includes('[TOOL:') && !msg.includes('[/TOOL]');
-        if (hasUnclosedTool) {
+        const hasUnclosedTool = msgForToolParsing.includes('[TOOL:') && !msgForToolParsing.includes('[/TOOL]');
+        if (hasUnclosedTool && unclosedRetries < MAX_UNCLOSED_RETRIES) {
+          unclosedRetries++;
           console.log(chalk.yellow('\n⚠️  Unclosed tool detected! AI forgot [/TOOL] closing tag.'));
-          console.log(chalk.gray('   Asking AI to complete the tool call...\n'));
+          console.log(chalk.gray(`   Asking AI to complete the tool call... (attempt ${unclosedRetries}/${MAX_UNCLOSED_RETRIES})\n`));
           
           messages.push({ 
             role: 'user', 
             content: 'ERROR: Your tool call is incomplete - you forgot to add [/TOOL] at the end. Please complete the tool call by providing the closing [/TOOL] tag. If you were writing a file, just output [/TOOL] to close it.'
           });
           continue; // Let AI respond with the closing tag
+        } else if (hasUnclosedTool) {
+          // Max retries reached - treat as normal response and move on
+          console.log(chalk.yellow('\n⚠️  Unclosed tool detected but max retries reached. Skipping tool execution.'));
         }
         
         // Debug mode: show what regex sees

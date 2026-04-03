@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { marked } from 'marked';
 import TerminalRenderer from 'marked-terminal';
+import * as acorn from 'acorn';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -63,8 +64,495 @@ try {
 } catch (e) {}
 
 const spinner = ora();
-const CONTEXT_FILE = '.sapper_context.json';
-const EMBEDDINGS_FILE = '.sapper_embeddings.json';
+
+// ═══════════════════════════════════════════════════════════════
+// SAPPER MEMORY FOLDER - All persistent data in one place
+// ═══════════════════════════════════════════════════════════════
+const SAPPER_DIR = '.sapper';
+const CONTEXT_FILE = `${SAPPER_DIR}/context.json`;
+const EMBEDDINGS_FILE = `${SAPPER_DIR}/embeddings.json`;
+const WORKSPACE_FILE = `${SAPPER_DIR}/workspace.json`;
+const CONFIG_FILE = `${SAPPER_DIR}/config.json`;
+
+// Ensure .sapper directory exists
+function ensureSapperDir() {
+  if (!fs.existsSync(SAPPER_DIR)) {
+    fs.mkdirSync(SAPPER_DIR, { recursive: true });
+  }
+}
+
+// Load config (settings like autoAttach)
+function loadConfig() {
+  try {
+    ensureSapperDir();
+    if (fs.existsSync(CONFIG_FILE)) {
+      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    }
+  } catch (e) {}
+  return { autoAttach: true }; // Default: auto-attach related files is ON
+}
+
+function saveConfig(config) {
+  ensureSapperDir();
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+}
+
+// Global config
+let sapperConfig = loadConfig();
+
+// ═══════════════════════════════════════════════════════════════
+// WORKSPACE GRAPH - Track file relationships and summaries
+// ═══════════════════════════════════════════════════════════════
+
+function loadWorkspaceGraph() {
+  try {
+    ensureSapperDir();
+    if (fs.existsSync(WORKSPACE_FILE)) {
+      return JSON.parse(fs.readFileSync(WORKSPACE_FILE, 'utf8'));
+    }
+  } catch (e) {}
+  return { indexed: null, files: {}, graph: {} };
+}
+
+function saveWorkspaceGraph(workspace) {
+  ensureSapperDir();
+  fs.writeFileSync(WORKSPACE_FILE, JSON.stringify(workspace, null, 2));
+}
+
+// Extract imports/requires from file content
+function extractDependencies(content, filePath) {
+  const deps = new Set();
+  const ext = filePath.split('.').pop()?.toLowerCase();
+  
+  // JavaScript/TypeScript imports
+  if (['js', 'jsx', 'ts', 'tsx', 'mjs'].includes(ext)) {
+    // import ... from '...'
+    const importMatches = content.matchAll(/import\s+.*?\s+from\s+['"]([^'"]+)['"]/g);
+    for (const m of importMatches) deps.add(m[1]);
+    
+    // require('...')
+    const requireMatches = content.matchAll(/require\s*\(\s*['"]([^'"]+)['"]\s*\)/g);
+    for (const m of requireMatches) deps.add(m[1]);
+    
+    // dynamic import('...')
+    const dynImportMatches = content.matchAll(/import\s*\(\s*['"]([^'"]+)['"]\s*\)/g);
+    for (const m of dynImportMatches) deps.add(m[1]);
+  }
+  
+  // Python imports
+  if (ext === 'py') {
+    const fromImports = content.matchAll(/from\s+([.\w]+)\s+import/g);
+    for (const m of fromImports) deps.add(m[1]);
+    
+    const imports = content.matchAll(/^import\s+([.\w]+)/gm);
+    for (const m of imports) deps.add(m[1]);
+  }
+  
+  // Filter to only local imports (starting with . or no package scope)
+  return Array.from(deps).filter(d => d.startsWith('.') || d.startsWith('/'));
+}
+
+// Extract exports from file
+function extractExports(content, filePath) {
+  const exports = new Set();
+  const ext = filePath.split('.').pop()?.toLowerCase();
+  
+  if (['js', 'jsx', 'ts', 'tsx', 'mjs'].includes(ext)) {
+    // export function/class/const name
+    const namedExports = content.matchAll(/export\s+(?:function|class|const|let|var|async function)\s+(\w+)/g);
+    for (const m of namedExports) exports.add(m[1]);
+    
+    // export { name }
+    const bracketExports = content.matchAll(/export\s*\{([^}]+)\}/g);
+    for (const m of bracketExports) {
+      m[1].split(',').forEach(e => {
+        const name = e.trim().split(/\s+as\s+/)[0].trim();
+        if (name) exports.add(name);
+      });
+    }
+    
+    // export default
+    if (content.includes('export default')) exports.add('default');
+  }
+  
+  return Array.from(exports);
+}
+
+// Resolve relative import to actual file path
+function resolveImportPath(importPath, fromFile) {
+  if (!importPath.startsWith('.')) return null;
+  
+  const fromDir = dirname(fromFile);
+  let resolved = join(fromDir, importPath).replace(/\\/g, '/');
+  
+  // Try common extensions
+  const extensions = ['', '.js', '.ts', '.jsx', '.tsx', '.mjs', '/index.js', '/index.ts'];
+  for (const ext of extensions) {
+    const fullPath = resolved + ext;
+    if (fs.existsSync(fullPath)) {
+      return fullPath.replace(/^\.\//, '');
+    }
+  }
+  return null;
+}
+
+// Build workspace graph from codebase
+async function buildWorkspaceGraph(showProgress = true) {
+  const workspace = { indexed: new Date().toISOString(), files: {}, graph: {} };
+  
+  function scanDir(dir, depth = 0) {
+    if (depth > 5) return;
+    
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      
+      for (const entry of entries) {
+        const fullPath = dir === '.' ? entry.name : `${dir}/${entry.name}`;
+        
+        if (entry.isDirectory()) {
+          if (IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+          scanDir(fullPath, depth + 1);
+        } else {
+          const ext = entry.name.includes('.') ? '.' + entry.name.split('.').pop() : '';
+          if (!CODE_EXTENSIONS.has(ext.toLowerCase())) continue;
+          
+          try {
+            const stats = fs.statSync(fullPath);
+            if (stats.size > MAX_FILE_SIZE) continue;
+            
+            const content = fs.readFileSync(fullPath, 'utf8');
+            const deps = extractDependencies(content, fullPath);
+            const exports = extractExports(content, fullPath);
+            
+            // Generate brief summary (first meaningful lines)
+            const lines = content.split('\n').filter(l => l.trim() && !l.trim().startsWith('//') && !l.trim().startsWith('#'));
+            const summary = lines.slice(0, 3).join(' ').substring(0, 150);
+            
+            workspace.files[fullPath] = {
+              size: stats.size,
+              modified: stats.mtime.toISOString(),
+              imports: deps,
+              exports: exports,
+              symbols: parseFileSymbols(content, fullPath), // AST-extracted symbols
+              summary: summary || '(no summary)'
+            };
+            
+            // Build dependency graph
+            workspace.graph[fullPath] = [];
+            for (const dep of deps) {
+              const resolved = resolveImportPath(dep, fullPath);
+              if (resolved) {
+                workspace.graph[fullPath].push(resolved);
+              }
+            }
+          } catch (e) {}
+        }
+      }
+    } catch (e) {}
+  }
+  
+  scanDir('.');
+  saveWorkspaceGraph(workspace);
+  return workspace;
+}
+
+// Get related files for a given file (imports + files that import it)
+function getRelatedFiles(filePath, workspace, depth = 1) {
+  const related = new Set();
+  
+  // Direct imports
+  const imports = workspace.graph[filePath] || [];
+  imports.forEach(f => related.add(f));
+  
+  // Files that import this file (reverse lookup)
+  for (const [file, deps] of Object.entries(workspace.graph)) {
+    if (deps.includes(filePath)) {
+      related.add(file);
+    }
+  }
+  
+  // Second level if depth > 1
+  if (depth > 1) {
+    const firstLevel = Array.from(related);
+    for (const f of firstLevel) {
+      const secondImports = workspace.graph[f] || [];
+      secondImports.forEach(sf => related.add(sf));
+    }
+  }
+  
+  related.delete(filePath); // Don't include self
+  return Array.from(related);
+}
+
+// Format workspace summary for AI context
+function formatWorkspaceSummary(workspace) {
+  const fileCount = Object.keys(workspace.files).length;
+  let output = `\n📊 WORKSPACE INDEX (${fileCount} files)\n`;
+  output += '═'.repeat(40) + '\n\n';
+  
+  // Group files by directory
+  const byDir = {};
+  for (const [path, info] of Object.entries(workspace.files)) {
+    const dir = dirname(path) || '.';
+    if (!byDir[dir]) byDir[dir] = [];
+    byDir[dir].push({ path, ...info });
+  }
+  
+  for (const [dir, files] of Object.entries(byDir)) {
+    output += `📁 ${dir}/\n`;
+    for (const f of files.slice(0, 10)) { // Limit per directory
+      const name = f.path.split('/').pop();
+      const exportList = f.exports?.length ? ` [${f.exports.slice(0, 3).join(', ')}${f.exports.length > 3 ? '...' : ''}]` : '';
+      output += `   📄 ${name}${exportList}\n`;
+    }
+    if (files.length > 10) output += `   ... and ${files.length - 10} more\n`;
+    output += '\n';
+  }
+  
+  return output;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AST PARSING - Extract symbols (functions, classes, variables)
+// ═══════════════════════════════════════════════════════════════
+
+// Parse JavaScript/TypeScript file and extract symbols
+function parseFileSymbols(content, filePath) {
+  const symbols = [];
+  const ext = filePath.split('.').pop()?.toLowerCase();
+  
+  // Only parse JS/TS files with acorn
+  if (!['js', 'jsx', 'ts', 'tsx', 'mjs'].includes(ext)) {
+    // For other languages, use regex-based extraction
+    return extractSymbolsWithRegex(content, filePath);
+  }
+  
+  try {
+    // Parse with acorn (use loose parsing to handle more syntax)
+    const ast = acorn.parse(content, {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      locations: true,
+      allowHashBang: true,
+      allowAwaitOutsideFunction: true,
+      allowImportExportEverywhere: true,
+      // Be lenient with errors
+      onComment: () => {},
+    });
+    
+    // Walk the AST to extract symbols
+    function walk(node, parentName = null) {
+      if (!node || typeof node !== 'object') return;
+      
+      switch (node.type) {
+        case 'FunctionDeclaration':
+          if (node.id?.name) {
+            symbols.push({
+              type: 'function',
+              name: node.id.name,
+              line: node.loc?.start?.line || 0,
+              params: node.params?.map(p => p.name || p.left?.name || '?').join(', ') || '',
+              async: node.async || false,
+            });
+          }
+          break;
+          
+        case 'ClassDeclaration':
+          if (node.id?.name) {
+            symbols.push({
+              type: 'class',
+              name: node.id.name,
+              line: node.loc?.start?.line || 0,
+              extends: node.superClass?.name || null,
+            });
+            // Extract methods
+            if (node.body?.body) {
+              for (const member of node.body.body) {
+                if (member.type === 'MethodDefinition' && member.key?.name) {
+                  symbols.push({
+                    type: 'method',
+                    name: `${node.id.name}.${member.key.name}`,
+                    line: member.loc?.start?.line || 0,
+                    kind: member.kind, // 'constructor', 'method', 'get', 'set'
+                  });
+                }
+              }
+            }
+          }
+          break;
+          
+        case 'VariableDeclaration':
+          for (const decl of node.declarations || []) {
+            if (decl.id?.name) {
+              // Check if it's a function expression or arrow function
+              const init = decl.init;
+              if (init?.type === 'ArrowFunctionExpression' || init?.type === 'FunctionExpression') {
+                symbols.push({
+                  type: 'function',
+                  name: decl.id.name,
+                  line: node.loc?.start?.line || 0,
+                  params: init.params?.map(p => p.name || p.left?.name || '?').join(', ') || '',
+                  async: init.async || false,
+                  arrow: init.type === 'ArrowFunctionExpression',
+                });
+              } else {
+                symbols.push({
+                  type: 'variable',
+                  name: decl.id.name,
+                  line: node.loc?.start?.line || 0,
+                  kind: node.kind, // 'const', 'let', 'var'
+                });
+              }
+            }
+          }
+          break;
+          
+        case 'ExportNamedDeclaration':
+          if (node.declaration) {
+            walk(node.declaration, parentName);
+          }
+          break;
+          
+        case 'ExportDefaultDeclaration':
+          if (node.declaration) {
+            if (node.declaration.id?.name) {
+              symbols.push({
+                type: node.declaration.type === 'ClassDeclaration' ? 'class' : 'function',
+                name: node.declaration.id.name,
+                line: node.loc?.start?.line || 0,
+                exported: 'default',
+              });
+            }
+          }
+          break;
+      }
+      
+      // Recursively walk children
+      for (const key in node) {
+        if (key === 'loc' || key === 'range') continue;
+        const child = node[key];
+        if (Array.isArray(child)) {
+          child.forEach(c => walk(c, parentName));
+        } else if (child && typeof child === 'object') {
+          walk(child, parentName);
+        }
+      }
+    }
+    
+    walk(ast);
+    
+  } catch (e) {
+    // If AST parsing fails, fall back to regex
+    return extractSymbolsWithRegex(content, filePath);
+  }
+  
+  return symbols;
+}
+
+// Fallback: extract symbols using regex (for non-JS or when AST fails)
+function extractSymbolsWithRegex(content, filePath) {
+  const symbols = [];
+  const lines = content.split('\n');
+  const ext = filePath.split('.').pop()?.toLowerCase();
+  
+  // JavaScript/TypeScript patterns
+  if (['js', 'jsx', 'ts', 'tsx', 'mjs'].includes(ext)) {
+    const funcPattern = /(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(/g;
+    const classPattern = /(?:export\s+)?class\s+(\w+)(?:\s+extends\s+(\w+))?/g;
+    const arrowPattern = /(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>/g;
+    const methodPattern = /^\s*(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{/gm;
+    
+    let match;
+    while ((match = funcPattern.exec(content))) {
+      const line = content.substring(0, match.index).split('\n').length;
+      symbols.push({ type: 'function', name: match[1], line });
+    }
+    while ((match = classPattern.exec(content))) {
+      const line = content.substring(0, match.index).split('\n').length;
+      symbols.push({ type: 'class', name: match[1], line, extends: match[2] });
+    }
+    while ((match = arrowPattern.exec(content))) {
+      const line = content.substring(0, match.index).split('\n').length;
+      symbols.push({ type: 'function', name: match[1], line, arrow: true });
+    }
+  }
+  
+  // Python patterns
+  if (ext === 'py') {
+    const funcPattern = /^(?:async\s+)?def\s+(\w+)\s*\(/gm;
+    const classPattern = /^class\s+(\w+)(?:\s*\([^)]*\))?:/gm;
+    
+    let match;
+    while ((match = funcPattern.exec(content))) {
+      const line = content.substring(0, match.index).split('\n').length;
+      symbols.push({ type: 'function', name: match[1], line });
+    }
+    while ((match = classPattern.exec(content))) {
+      const line = content.substring(0, match.index).split('\n').length;
+      symbols.push({ type: 'class', name: match[1], line });
+    }
+  }
+  
+  // Java/C#/Go patterns
+  if (['java', 'cs', 'go'].includes(ext)) {
+    const funcPattern = /(?:public|private|protected|static|func)?\s*(?:\w+\s+)?(\w+)\s*\([^)]*\)\s*(?:throws\s+\w+\s*)?\{/g;
+    const classPattern = /(?:public\s+)?(?:class|struct|interface)\s+(\w+)/g;
+    
+    let match;
+    while ((match = funcPattern.exec(content))) {
+      const line = content.substring(0, match.index).split('\n').length;
+      if (!['if', 'for', 'while', 'switch', 'catch'].includes(match[1])) {
+        symbols.push({ type: 'function', name: match[1], line });
+      }
+    }
+    while ((match = classPattern.exec(content))) {
+      const line = content.substring(0, match.index).split('\n').length;
+      symbols.push({ type: 'class', name: match[1], line });
+    }
+  }
+  
+  return symbols;
+}
+
+// Search for symbol across workspace
+function searchSymbol(query, workspace) {
+  const results = [];
+  const queryLower = query.toLowerCase();
+  
+  for (const [filePath, fileInfo] of Object.entries(workspace.files)) {
+    if (!fileInfo.symbols) continue;
+    
+    for (const symbol of fileInfo.symbols) {
+      if (symbol.name.toLowerCase().includes(queryLower)) {
+        results.push({
+          ...symbol,
+          file: filePath,
+          score: symbol.name.toLowerCase() === queryLower ? 100 : 
+                 symbol.name.toLowerCase().startsWith(queryLower) ? 80 : 50
+        });
+      }
+    }
+  }
+  
+  // Sort by score (exact match first) then by name
+  results.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+  return results;
+}
+
+// Format symbol for display
+function formatSymbol(symbol) {
+  const icon = symbol.type === 'function' ? '𝑓' : 
+               symbol.type === 'class' ? '◆' :
+               symbol.type === 'method' ? '○' :
+               symbol.type === 'variable' ? '◇' : '•';
+  
+  let desc = `${icon} ${symbol.name}`;
+  if (symbol.params !== undefined) desc += `(${symbol.params})`;
+  if (symbol.async) desc = 'async ' + desc;
+  if (symbol.extends) desc += ` extends ${symbol.extends}`;
+  
+  return desc;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // EMBEDDINGS & SEMANTIC SEARCH
@@ -73,6 +561,7 @@ const EMBEDDINGS_FILE = '.sapper_embeddings.json';
 // Load or create embeddings store
 function loadEmbeddings() {
   try {
+    ensureSapperDir();
     if (fs.existsSync(EMBEDDINGS_FILE)) {
       return JSON.parse(fs.readFileSync(EMBEDDINGS_FILE, 'utf8'));
     }
@@ -81,6 +570,7 @@ function loadEmbeddings() {
 }
 
 function saveEmbeddings(embeddings) {
+  ensureSapperDir();
   fs.writeFileSync(EMBEDDINGS_FILE, JSON.stringify(embeddings, null, 2));
 }
 
@@ -662,6 +1152,27 @@ async function runSapper() {
   // Check for updates
   await checkForUpdates();
   
+  // Auto-load or build workspace graph
+  let workspace = loadWorkspaceGraph();
+  if (!workspace.indexed) {
+    console.log(chalk.cyan('📊 Building workspace index with AST parsing...'));
+    workspace = await buildWorkspaceGraph();
+    const totalSymbols = Object.values(workspace.files).reduce((sum, f) => sum + (f.symbols?.length || 0), 0);
+    console.log(chalk.green(`✅ Indexed ${Object.keys(workspace.files).length} files, ${totalSymbols} symbols\n`));
+  } else {
+    const fileCount = Object.keys(workspace.files).length;
+    const symbolCount = Object.values(workspace.files).reduce((sum, f) => sum + (f.symbols?.length || 0), 0);
+    const indexAge = Math.round((Date.now() - new Date(workspace.indexed).getTime()) / 1000 / 60);
+    console.log(chalk.gray(`📊 Workspace: ${fileCount} files, ${symbolCount} symbols (${indexAge}m ago)`));
+    if (indexAge > 60) {
+      console.log(chalk.yellow(`   Tip: Run /index to refresh`));
+    }
+  }
+  
+  // Show memory status
+  console.log(chalk.gray(`📁 Memory: .sapper/ folder`));
+  console.log(chalk.gray(`🔗 Auto-attach: ${sapperConfig.autoAttach ? 'ON' : 'OFF'} (toggle with /auto)\n`));
+  
   let messages = [];
   if (fs.existsSync(CONTEXT_FILE)) {
     console.log();
@@ -673,6 +1184,21 @@ async function runSapper() {
     } else {
       fs.unlinkSync(CONTEXT_FILE);
       console.log(chalk.gray('  ✓ Starting fresh...\n'));
+    }
+  }
+  
+  // Migrate old files to new .sapper/ folder
+  const oldFiles = ['.sapper_context.json', '.sapper_embeddings.json', '.sapper_workspace.json'];
+  for (const oldFile of oldFiles) {
+    if (fs.existsSync(oldFile)) {
+      ensureSapperDir();
+      const newFile = `${SAPPER_DIR}/${oldFile.replace('.sapper_', '').replace('_', '.')}`;
+      if (!fs.existsSync(newFile)) {
+        fs.renameSync(oldFile, newFile);
+        console.log(chalk.gray(`📦 Migrated ${oldFile} → ${newFile}`));
+      } else {
+        fs.unlinkSync(oldFile);
+      }
     }
   }
 
@@ -824,6 +1350,7 @@ TOOL SYNTAX:
         });
         
         // 5. Save to context file so it persists
+        ensureSapperDir();
         fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
         
         console.log(chalk.green(`✅ Pruned context. Sapper reminded to stay in Agent Mode.`));
@@ -838,6 +1365,10 @@ TOOL SYNTAX:
           `${chalk.cyan('@')} or ${chalk.cyan('/attach')}  ${chalk.gray('│')} Pick files to attach (interactive)\n` +
           `${chalk.cyan('@file')}          ${chalk.gray('│')} Attach file inline (e.g., @src/app.js)\n` +
           `${chalk.cyan('/scan')}          ${chalk.gray('│')} Scan codebase into context\n` +
+          `${chalk.cyan('/index')}         ${chalk.gray('│')} Rebuild workspace graph\n` +
+          `${chalk.cyan('/graph file')}    ${chalk.gray('│')} Show related files\n` +
+          `${chalk.cyan('/symbol name')}   ${chalk.gray('│')} Search functions/classes\n` +
+          `${chalk.cyan('/auto')}          ${chalk.gray('│')} Toggle auto-attach related files\n` +
           `${chalk.cyan('/recall')}        ${chalk.gray('│')} Search memory for relevant context\n` +
           `${chalk.cyan('/reset /clear')}  ${chalk.gray('│')} Clear all context\n` +
           `${chalk.cyan('/prune')}         ${chalk.gray('│')} Save to memory + keep last 4 msgs\n` +
@@ -847,6 +1378,168 @@ TOOL SYNTAX:
           `${chalk.cyan('exit')}           ${chalk.gray('│')} Quit Sapper`;
         console.log(box(helpContent, '📚 Commands', 'cyan'));
         console.log();
+        continue;
+      }
+      
+      // Handle index command - rebuild workspace graph
+      if (input.toLowerCase() === '/index') {
+        console.log(chalk.cyan('\n📊 Rebuilding workspace index with AST parsing...'));
+        workspace = await buildWorkspaceGraph();
+        const totalSymbols = Object.values(workspace.files).reduce((sum, f) => sum + (f.symbols?.length || 0), 0);
+        console.log(chalk.green(`✅ Indexed ${Object.keys(workspace.files).length} files`));
+        console.log(chalk.gray(`   📦 ${totalSymbols} symbols (functions, classes, variables)`));
+        console.log(chalk.gray(`   🔗 ${Object.values(workspace.graph).flat().length} dependencies tracked\n`));
+        continue;
+      }
+      
+      // Handle symbol search command
+      if (input.toLowerCase().startsWith('/symbol')) {
+        const query = input.slice(7).trim();
+        if (!query) {
+          // Show all symbols summary
+          const allSymbols = [];
+          for (const [file, info] of Object.entries(workspace.files)) {
+            for (const sym of info.symbols || []) {
+              allSymbols.push({ ...sym, file });
+            }
+          }
+          
+          // Group by type
+          const functions = allSymbols.filter(s => s.type === 'function');
+          const classes = allSymbols.filter(s => s.type === 'class');
+          const methods = allSymbols.filter(s => s.type === 'method');
+          
+          console.log();
+          console.log(box(
+            `${chalk.cyan('Functions:')} ${functions.length}\n` +
+            `${chalk.cyan('Classes:')} ${classes.length}\n` +
+            `${chalk.cyan('Methods:')} ${methods.length}\n` +
+            chalk.gray('─'.repeat(30)) + '\n' +
+            chalk.gray('Usage: /symbol <name> to search'),
+            '📦 Symbol Index', 'cyan'
+          ));
+          continue;
+        }
+        
+        console.log(chalk.cyan(`\n🔍 Searching for: "${query}"...\n`));
+        const results = searchSymbol(query, workspace);
+        
+        if (results.length === 0) {
+          console.log(chalk.yellow(`No symbols found matching "${query}"`));
+          console.log(chalk.gray('Tip: Run /index to refresh symbol index'));
+          continue;
+        }
+        
+        console.log(chalk.green(`Found ${results.length} symbol${results.length !== 1 ? 's' : ''}:\n`));
+        
+        for (const sym of results.slice(0, 15)) {
+          const typeIcon = sym.type === 'function' ? chalk.yellow('𝑓') : 
+                          sym.type === 'class' ? chalk.blue('◆') :
+                          sym.type === 'method' ? chalk.cyan('○') : chalk.gray('◇');
+          const asyncTag = sym.async ? chalk.magenta('async ') : '';
+          const params = sym.params !== undefined ? chalk.gray(`(${sym.params})`) : '';
+          
+          console.log(`  ${typeIcon} ${asyncTag}${chalk.white.bold(sym.name)}${params}`);
+          console.log(`     ${chalk.gray(sym.file)}:${chalk.cyan(sym.line)}`);
+        }
+        
+        if (results.length > 15) {
+          console.log(chalk.gray(`\n   ... and ${results.length - 15} more`));
+        }
+        
+        // Offer to add file to context
+        if (results.length > 0) {
+          console.log();
+          const addToCtx = await safeQuestion(chalk.yellow('Add first match file to context? ') + chalk.gray('(y/n): '));
+          if (addToCtx.toLowerCase() === 'y') {
+            const targetFile = results[0].file;
+            try {
+              const content = fs.readFileSync(targetFile, 'utf8');
+              messages.push({
+                role: 'user',
+                content: `Here is ${targetFile} (contains ${results[0].type} "${results[0].name}" at line ${results[0].line}):\n\n${content}`
+              });
+              console.log(chalk.green(`✅ Added ${targetFile} to context`));
+            } catch (e) {
+              console.log(chalk.red(`Could not read ${targetFile}`));
+            }
+          }
+        }
+        continue;
+      }
+      
+      // Handle graph command - show related files
+      if (input.toLowerCase().startsWith('/graph')) {
+        const targetFile = input.slice(6).trim();
+        if (!targetFile) {
+          // Show workspace overview
+          console.log(formatWorkspaceSummary(workspace));
+          continue;
+        }
+        
+        // Find file (support partial match)
+        const matchingFile = Object.keys(workspace.files).find(f => 
+          f === targetFile || f.endsWith('/' + targetFile) || f.endsWith(targetFile)
+        );
+        
+        if (!matchingFile) {
+          console.log(chalk.yellow(`File not found in index: ${targetFile}`));
+          console.log(chalk.gray('Tip: Run /index to refresh workspace graph'));
+          continue;
+        }
+        
+        const fileInfo = workspace.files[matchingFile];
+        const related = getRelatedFiles(matchingFile, workspace);
+        
+        console.log();
+        console.log(box(
+          `${chalk.white('File:')} ${chalk.cyan(matchingFile)}\n` +
+          `${chalk.white('Size:')} ${Math.round(fileInfo.size/1024)}KB\n` +
+          `${chalk.white('Exports:')} ${fileInfo.exports?.join(', ') || 'none'}\n` +
+          `${chalk.white('Imports:')} ${fileInfo.imports?.join(', ') || 'none'}\n` +
+          chalk.gray('─'.repeat(40)) + '\n' +
+          `${chalk.white('Related files:')}\n` +
+          (related.length > 0 
+            ? related.map(r => `  📄 ${r}`).join('\n')
+            : chalk.gray('  (no related files found)')),
+          '🔗 File Graph', 'cyan'
+        ));
+        console.log();
+        
+        // Offer to add to context
+        if (related.length > 0) {
+          const addRelated = await safeQuestion(chalk.yellow('Add this file + related to context? ') + chalk.gray('(y/n): '));
+          if (addRelated.toLowerCase() === 'y') {
+            let contextContent = `\n📄 ${matchingFile}:\n`;
+            contextContent += fs.readFileSync(matchingFile, 'utf8');
+            
+            for (const relFile of related.slice(0, 5)) { // Limit to 5 related
+              try {
+                contextContent += `\n\n📄 ${relFile} (related):\n`;
+                contextContent += fs.readFileSync(relFile, 'utf8');
+              } catch (e) {}
+            }
+            
+            messages.push({ 
+              role: 'user', 
+              content: `Here is ${matchingFile} and its related files:\n${contextContent}\n\nUse this context to help me.`
+            });
+            console.log(chalk.green(`✅ Added ${matchingFile} + ${Math.min(related.length, 5)} related files to context`));
+          }
+        }
+        continue;
+      }
+      
+      // Handle auto-attach toggle
+      if (input.toLowerCase() === '/auto') {
+        sapperConfig.autoAttach = !sapperConfig.autoAttach;
+        saveConfig(sapperConfig);
+        console.log(chalk.cyan(`\n🔗 Auto-attach related files: ${sapperConfig.autoAttach ? chalk.green('ON') : chalk.red('OFF')}`));
+        if (sapperConfig.autoAttach) {
+          console.log(chalk.gray('   When you @file, related imports will be auto-included.'));
+        } else {
+          console.log(chalk.gray('   Only explicitly mentioned files will be attached.'));
+        }
         continue;
       }
       
@@ -940,6 +1633,7 @@ TOOL SYNTAX:
           content: `I've scanned the entire codebase. Here are all the files:\n${formattedScan}\n\nYou now have the full codebase context. Use this information to help me.`
         });
         
+        ensureSapperDir();
         fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
         console.log(chalk.gray('📝 Codebase added to context. AI now has full picture.\n'));
         continue;
@@ -1012,6 +1706,23 @@ TOOL SYNTAX:
                 const content = fs.readFileSync(filePath, 'utf8');
                 fileAttachments.push({ path: filePath, content, size: stats.size });
                 console.log(chalk.green(`📎 Attached: ${filePath} (${Math.round(stats.size/1024)}KB)`));
+                
+                // Auto-include related files from workspace graph (up to 3) - if enabled
+                if (sapperConfig.autoAttach) {
+                const related = getRelatedFiles(filePath, workspace, 1);
+                for (const relFile of related.slice(0, 3)) {
+                  try {
+                    if (!fileAttachments.some(f => f.path === relFile)) {
+                      const relStats = fs.statSync(relFile);
+                      if (relStats.size <= MAX_FILE_SIZE) {
+                        const relContent = fs.readFileSync(relFile, 'utf8');
+                        fileAttachments.push({ path: relFile, content: relContent, size: relStats.size, related: true });
+                        console.log(chalk.gray(`   ↳ +${relFile} (related)`));
+                      }
+                    }
+                  } catch (e) {}
+                }
+                } // end if autoAttach
               }
             }
           } else {
@@ -1061,7 +1772,10 @@ TOOL SYNTAX:
         spinner.stop();
 
         let msg = '';
-        const MAX_RESPONSE_LENGTH = 29000; // Guard against infinite loops (increased for multi-file reads)
+        const MAX_RESPONSE_LENGTH = 100000; // 100KB - allow long code generation
+        let lastChunkTime = Date.now();
+        let repetitionCount = 0;
+        let lastContent = '';
         abortStream = false; // Reset abort flag before streaming
         
         console.log(chalk.magenta('┌─[') + chalk.white.bold('Sapper') + chalk.magenta(']'));
@@ -1077,29 +1791,48 @@ TOOL SYNTAX:
           process.stdout.write(content);
           msg += content;
           
+          // Smart loop detection: check for repetitive content patterns
+          if (msg.length > 10000) {
+            const recentContent = msg.slice(-500);
+            const previousContent = msg.slice(-1000, -500);
+            
+            // If last 500 chars are very similar to previous 500, might be looping
+            if (recentContent === previousContent) {
+              repetitionCount++;
+              if (repetitionCount > 3) {
+                console.log(chalk.red('\n\n⚠️ REPETITIVE OUTPUT DETECTED: Stopping to prevent loop.'));
+                break;
+              }
+            } else {
+              repetitionCount = 0;
+            }
+          }
+          
+          // Hard limit as final safety net
           if (msg.length > MAX_RESPONSE_LENGTH) {
-            console.log(chalk.red('\n\n⚠️ RESPONSE TOO LONG: Forcing stop to prevent infinite loop.'));
-            break;
+            console.log(chalk.yellow('\n\n⚠️ Response very long (100KB+). Continuing... (Ctrl+C to stop)'));
+            // Don't break - just warn. User can Ctrl+C if needed
           }
         }
-        console.log();
-        
-        // If response has markdown, show rendered version
-        const hasMarkdown = /\*\*|__|`|^#|^[-*] /m.test(msg);
-        if (hasMarkdown && !msg.includes('[TOOL:')) {
-          console.log(chalk.gray('─'.repeat(40)));
-          const rendered = renderMarkdown(msg);
-          const lines = rendered.split('\n');
-          for (const line of lines) {
-            console.log(chalk.magenta('│ ') + line);
-          }
-          console.log();
-        }
+        console.log(chalk.magenta('└─────────────────────────────────────'));
         
         messages.push({ role: 'assistant', content: msg });
 
         // Regex: supports both old format (path]content) and new format (path:::content)
         const toolMatches = [...msg.matchAll(/\[TOOL:(\w+)\]([^:\]]*?)(?:(?:::|\])([\s\S]*?))?\[\/TOOL\]/g)];
+        
+        // Check for unclosed tool calls (AI started a tool but didn't close it)
+        const hasUnclosedTool = msg.includes('[TOOL:') && !msg.includes('[/TOOL]');
+        if (hasUnclosedTool) {
+          console.log(chalk.yellow('\n⚠️  Unclosed tool detected! AI forgot [/TOOL] closing tag.'));
+          console.log(chalk.gray('   Asking AI to complete the tool call...\n'));
+          
+          messages.push({ 
+            role: 'user', 
+            content: 'ERROR: Your tool call is incomplete - you forgot to add [/TOOL] at the end. Please complete the tool call by providing the closing [/TOOL] tag. If you were writing a file, just output [/TOOL] to close it.'
+          });
+          continue; // Let AI respond with the closing tag
+        }
         
         // Debug mode: show what regex sees
         if (debugMode) {
@@ -1179,6 +1912,7 @@ TOOL SYNTAX:
 
             messages.push({ role: 'user', content: `RESULT (${path}): ${result}` });
           }
+          ensureSapperDir();
           fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
           
           if (toolMatches.length > 30) {
@@ -1194,6 +1928,7 @@ TOOL SYNTAX:
             });
           } else {
             // Normal response - save and wait for next input
+            ensureSapperDir();
             fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
             active = false;
             spinner.stop(); // Ensure spinner is dead
