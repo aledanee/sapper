@@ -75,6 +75,223 @@ const WORKSPACE_FILE = `${SAPPER_DIR}/workspace.json`;
 const CONFIG_FILE = `${SAPPER_DIR}/config.json`;
 const AGENTS_DIR = `${SAPPER_DIR}/agents`;
 const SKILLS_DIR = `${SAPPER_DIR}/skills`;
+const LOGS_DIR = `${SAPPER_DIR}/logs`;
+
+// ═══════════════════════════════════════════════════════════════
+// COMPREHENSIVE ACTIVITY LOGGER
+// ═══════════════════════════════════════════════════════════════
+const sessionId = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+const sessionLogFile = () => `${LOGS_DIR}/session-${sessionId}.md`;
+const activityLog = []; // In-memory log for current session
+
+function ensureLogsDir() {
+  ensureSapperDir();
+  if (!fs.existsSync(LOGS_DIR)) {
+    fs.mkdirSync(LOGS_DIR, { recursive: true });
+  }
+}
+
+// Log entry types: user, ai, tool, system, error, file, shell, summary
+function logEntry(type, data) {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    elapsed: activityLog.length > 0
+      ? Date.now() - new Date(activityLog[0].timestamp).getTime()
+      : 0,
+    type,
+    ...data
+  };
+  activityLog.push(entry);
+  appendLogToFile(entry);
+  return entry;
+}
+
+function formatElapsed(ms) {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  const mins = Math.floor(ms / 60000);
+  const secs = Math.floor((ms % 60000) / 1000);
+  return `${mins}m ${secs}s`;
+}
+
+function appendLogToFile(entry) {
+  try {
+    ensureLogsDir();
+    const file = sessionLogFile();
+    const existed = fs.existsSync(file);
+
+    let line = '';
+    if (!existed) {
+      line += `# Sapper Session Log\n`;
+      line += `**Started:** ${new Date(entry.timestamp).toLocaleString()}\n`;
+      line += `**Working Directory:** \`${process.cwd()}\`\n\n`;
+      line += `---\n\n`;
+    }
+
+    const time = new Date(entry.timestamp).toLocaleTimeString();
+    const elapsed = formatElapsed(entry.elapsed);
+
+    switch (entry.type) {
+      case 'session_start':
+        line += `## 🚀 Session Started\n`;
+        line += `- **Model:** \`${entry.model}\`\n`;
+        line += `- **Resumed:** ${entry.resumed ? 'Yes' : 'No'}\n`;
+        line += `- **Context Messages:** ${entry.contextSize}\n\n`;
+        break;
+      case 'user':
+        line += `### 💬 User Input \`${time}\` _(+${elapsed})_\n`;
+        line += `\`\`\`\n${entry.message?.substring(0, 500)}${entry.message?.length > 500 ? '\n...' : ''}\n\`\`\`\n`;
+        if (entry.attachments?.length > 0) {
+          line += `📎 **Attached:** ${entry.attachments.join(', ')}\n`;
+        }
+        line += '\n';
+        break;
+      case 'ai':
+        line += `### 🤖 AI Response \`${time}\` _(+${elapsed})_\n`;
+        line += `- **Tokens:** ~${entry.charCount} chars\n`;
+        line += `- **Duration:** ${formatElapsed(entry.duration)}\n`;
+        line += `- **Tools Used:** ${entry.toolCount || 0}\n`;
+        if (entry.interrupted) line += `- ⚠️ **Interrupted**\n`;
+        if (entry.repetitionStopped) line += `- ⚠️ **Stopped: repetitive output**\n`;
+        line += `\n<details><summary>Response preview</summary>\n\n`;
+        line += `${entry.preview?.substring(0, 800)}${entry.preview?.length > 800 ? '\n...' : ''}\n`;
+        line += `\n</details>\n\n`;
+        break;
+      case 'tool':
+        const statusIcon = entry.success ? '✅' : '❌';
+        line += `#### 🔧 Tool: \`${entry.toolType}\` ${statusIcon} \`${time}\`\n`;
+        line += `- **Target:** \`${entry.path}\`\n`;
+        line += `- **Duration:** ${formatElapsed(entry.duration)}\n`;
+        if (entry.resultSize) line += `- **Result Size:** ${entry.resultSize} chars\n`;
+        if (entry.error) line += `- **Error:** ${entry.error}\n`;
+        if (entry.userApproved !== undefined) line += `- **User Approved:** ${entry.userApproved ? 'Yes' : 'No'}\n`;
+        line += '\n';
+        break;
+      case 'shell':
+        line += `#### 🖥️ Shell Command \`${time}\`\n`;
+        line += `\`\`\`bash\n${entry.command}\n\`\`\`\n`;
+        line += `- **Exit Code:** ${entry.exitCode ?? 'N/A'}\n`;
+        line += `- **Duration:** ${formatElapsed(entry.duration)}\n`;
+        if (entry.userApproved !== undefined) line += `- **User Approved:** ${entry.userApproved ? 'Yes' : 'No'}\n`;
+        line += '\n';
+        break;
+      case 'file':
+        const fileIcon = entry.action === 'read' ? '📖' : entry.action === 'write' ? '✏️' : entry.action === 'patch' ? '🔧' : '📁';
+        line += `#### ${fileIcon} File: \`${entry.action}\` \`${time}\`\n`;
+        line += `- **Path:** \`${entry.path}\`\n`;
+        if (entry.size) line += `- **Size:** ${entry.size} bytes\n`;
+        if (entry.userApproved !== undefined) line += `- **User Approved:** ${entry.userApproved ? 'Yes' : 'No'}\n`;
+        line += '\n';
+        break;
+      case 'system':
+        line += `> ℹ️ **${entry.event}** \`${time}\` — ${entry.detail || ''}\n\n`;
+        break;
+      case 'error':
+        line += `> ❌ **Error** \`${time}\` — \`${entry.message}\`\n\n`;
+        break;
+      case 'summary':
+        line += `### 🧠 Context Summarized \`${time}\`\n`;
+        line += `- **Before:** ${entry.before}\n`;
+        line += `- **After:** ${entry.after}\n\n`;
+        break;
+      default:
+        line += `> ${entry.type}: ${JSON.stringify(entry)}\n\n`;
+    }
+
+    fs.appendFileSync(file, line);
+  } catch (e) {
+    // Silent fail - logging should never break the app
+  }
+}
+
+// Render the in-memory activity log to terminal with beautiful formatting
+function renderActivityLog(count = 30) {
+  const entries = activityLog.slice(-count);
+  if (entries.length === 0) return chalk.yellow('No activity recorded yet.');
+
+  const width = Math.min(process.stdout.columns || 80, 90);
+  let output = '';
+
+  // Header
+  output += chalk.cyan.bold('\n╔' + '═'.repeat(width - 2) + '╗\n');
+  output += chalk.cyan.bold('║') + chalk.white.bold('  📋 SAPPER ACTIVITY LOG').padEnd(width - 2) + chalk.cyan.bold('║\n');
+  output += chalk.cyan.bold('║') + chalk.gray(`  Session: ${sessionId} | ${activityLog.length} events`).padEnd(width - 2) + chalk.cyan.bold('║\n');
+  output += chalk.cyan.bold('╠' + '═'.repeat(width - 2) + '╣\n');
+
+  for (const entry of entries) {
+    const time = new Date(entry.timestamp).toLocaleTimeString();
+    const elapsed = formatElapsed(entry.elapsed);
+    const timeStr = chalk.gray(`${time} +${elapsed}`);
+
+    switch (entry.type) {
+      case 'session_start':
+        output += chalk.cyan.bold('║') + ` 🚀 ${chalk.green.bold('SESSION START')} ${timeStr}`.padEnd(width + 30) + '\n';
+        output += chalk.cyan.bold('║') + `    Model: ${chalk.cyan(entry.model)} | Context: ${entry.contextSize} msgs`.padEnd(width + 20) + '\n';
+        break;
+      case 'user':
+        output += chalk.cyan.bold('║') + ` 💬 ${chalk.blue.bold('USER')} ${timeStr}`.padEnd(width + 30) + '\n';
+        const preview = entry.message?.substring(0, 60)?.replace(/\n/g, ' ');
+        output += chalk.cyan.bold('║') + `    ${chalk.white(preview)}${entry.message?.length > 60 ? chalk.gray('...') : ''}`.padEnd(width + 20) + '\n';
+        if (entry.attachments?.length > 0) {
+          output += chalk.cyan.bold('║') + `    📎 ${chalk.yellow(entry.attachments.join(', '))}`.padEnd(width + 20) + '\n';
+        }
+        break;
+      case 'ai':
+        const aiStatus = entry.interrupted ? chalk.yellow('⚠️ INTERRUPTED') : entry.repetitionStopped ? chalk.red('⚠️ LOOP') : chalk.green(`~${entry.charCount} chars`);
+        output += chalk.cyan.bold('║') + ` 🤖 ${chalk.magenta.bold('AI')} ${timeStr} ${aiStatus}`.padEnd(width + 50) + '\n';
+        output += chalk.cyan.bold('║') + `    ⏱ ${chalk.gray(formatElapsed(entry.duration))} | 🔧 ${entry.toolCount || 0} tools`.padEnd(width + 20) + '\n';
+        break;
+      case 'tool':
+        const icon = entry.success ? chalk.green('✓') : chalk.red('✗');
+        output += chalk.cyan.bold('║') + `   ${icon} ${chalk.yellow.bold(entry.toolType)} → ${chalk.white(entry.path?.substring(0, 40))} ${timeStr}`.padEnd(width + 40) + '\n';
+        if (entry.error) {
+          output += chalk.cyan.bold('║') + `     ${chalk.red(entry.error.substring(0, 60))}`.padEnd(width + 20) + '\n';
+        }
+        break;
+      case 'shell':
+        output += chalk.cyan.bold('║') + ` 🖥️  ${chalk.red.bold('SHELL')} ${timeStr}`.padEnd(width + 30) + '\n';
+        output += chalk.cyan.bold('║') + `    ${chalk.cyan('$ ' + entry.command?.substring(0, 55))}${entry.command?.length > 55 ? chalk.gray('...') : ''}`.padEnd(width + 20) + '\n';
+        output += chalk.cyan.bold('║') + `    Exit: ${entry.exitCode === 0 ? chalk.green(entry.exitCode) : chalk.red(entry.exitCode ?? '?')} | ⏱ ${chalk.gray(formatElapsed(entry.duration))}`.padEnd(width + 20) + '\n';
+        break;
+      case 'file':
+        const fIcon = { read: '📖', write: '✏️', patch: '🔧', list: '📂', mkdir: '📁' }[entry.action] || '📄';
+        output += chalk.cyan.bold('║') + `   ${fIcon} ${chalk.cyan(entry.action?.toUpperCase())} ${chalk.white(entry.path?.substring(0, 45))} ${timeStr}`.padEnd(width + 40) + '\n';
+        break;
+      case 'system':
+        output += chalk.cyan.bold('║') + ` ℹ️  ${chalk.gray(entry.event + (entry.detail ? ': ' + entry.detail.substring(0, 50) : ''))} ${timeStr}`.padEnd(width + 30) + '\n';
+        break;
+      case 'error':
+        output += chalk.cyan.bold('║') + ` ❌ ${chalk.red.bold('ERROR')} ${chalk.red(entry.message?.substring(0, 50))} ${timeStr}`.padEnd(width + 40) + '\n';
+        break;
+      case 'summary':
+        output += chalk.cyan.bold('║') + ` 🧠 ${chalk.cyan.bold('SUMMARIZED')} ${entry.before} → ${entry.after} ${timeStr}`.padEnd(width + 30) + '\n';
+        break;
+    }
+    output += chalk.cyan.bold('║') + chalk.gray('─'.repeat(width - 2)).padEnd(width - 1) + '\n';
+  }
+
+  // Footer
+  output += chalk.cyan.bold('╠' + '═'.repeat(width - 2) + '╣\n');
+  const stats = getSessionStats();
+  output += chalk.cyan.bold('║') + `  📊 ${chalk.white(`Messages: ${stats.userMessages}↑ ${stats.aiMessages}↓`)} | ${chalk.yellow(`Tools: ${stats.toolCalls}`)} | ${chalk.red(`Shells: ${stats.shellCalls}`)} | ${chalk.cyan(`Errors: ${stats.errors}`)}`.padEnd(width + 50) + '\n';
+  output += chalk.cyan.bold('║') + `  📁 Log: ${chalk.gray(sessionLogFile())}`.padEnd(width + 20) + '\n';
+  output += chalk.cyan.bold('╚' + '═'.repeat(width - 2) + '╝\n');
+
+  return output;
+}
+
+function getSessionStats() {
+  return {
+    userMessages: activityLog.filter(e => e.type === 'user').length,
+    aiMessages: activityLog.filter(e => e.type === 'ai').length,
+    toolCalls: activityLog.filter(e => e.type === 'tool').length,
+    shellCalls: activityLog.filter(e => e.type === 'shell').length,
+    errors: activityLog.filter(e => e.type === 'error').length,
+    totalDuration: activityLog.length > 0
+      ? Date.now() - new Date(activityLog[0].timestamp).getTime()
+      : 0,
+  };
+}
 
 // Ensure .sapper directory exists
 function ensureSapperDir() {
@@ -95,10 +312,86 @@ function ensureAgentsDirs() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// AGENTS & SKILLS SYSTEM
+// AGENTS & SKILLS SYSTEM (with YAML frontmatter support)
 // ═══════════════════════════════════════════════════════════════
 
-// Load all agents from .sapper/agents/*.md
+// Parse YAML-like frontmatter from markdown files
+// Supports: --- key: value --- blocks at the top of .md files
+// Returns { meta: {}, body: string }
+function parseFrontmatter(rawContent) {
+  const content = rawContent.trim();
+  if (!content.startsWith('---')) {
+    // No frontmatter — legacy format, extract title from first # heading
+    const firstLine = content.split('\n')[0].replace(/^#\s*/, '').trim();
+    return {
+      meta: { name: firstLine, description: firstLine },
+      body: content
+    };
+  }
+
+  // Find closing ---
+  const endIndex = content.indexOf('---', 3);
+  if (endIndex === -1) {
+    // Malformed — treat entire content as body
+    const firstLine = content.split('\n')[0].replace(/^#\s*/, '').replace(/^---\s*/, '').trim();
+    return { meta: { name: firstLine }, body: content };
+  }
+
+  const frontmatterBlock = content.substring(3, endIndex).trim();
+  const body = content.substring(endIndex + 3).trim();
+
+  const meta = {};
+  for (const line of frontmatterBlock.split('\n')) {
+    const colonIdx = line.indexOf(':');
+    if (colonIdx === -1) continue;
+    const key = line.substring(0, colonIdx).trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+    let value = line.substring(colonIdx + 1).trim();
+
+    // Strip surrounding quotes
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+
+    // Parse arrays: [item1, item2]
+    if (value.startsWith('[') && value.endsWith(']')) {
+      value = value.slice(1, -1).split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+    }
+
+    meta[key] = value;
+  }
+
+  // Ensure name fallback from body's first heading
+  if (!meta.name) {
+    const heading = body.match(/^#\s+(.+)/m);
+    meta.name = heading ? heading[1].trim() : 'Unnamed';
+  }
+
+  return { meta, body };
+}
+
+// Map tool shorthand names from frontmatter to actual TOOL: names
+const TOOL_NAME_MAP = {
+  'read': 'READ',
+  'write': 'WRITE',
+  'edit': 'PATCH',
+  'patch': 'PATCH',
+  'list': 'LIST',
+  'search': 'SEARCH',
+  'shell': 'SHELL',
+  'mkdir': 'MKDIR',
+  'todo': 'LIST',   // alias — list tasks
+};
+
+function normalizeToolList(toolsValue) {
+  if (!toolsValue) return null; // null = all tools allowed
+  if (typeof toolsValue === 'string') {
+    toolsValue = toolsValue.split(',').map(s => s.trim());
+  }
+  if (!Array.isArray(toolsValue)) return null;
+  return toolsValue.map(t => TOOL_NAME_MAP[t.toLowerCase()] || t.toUpperCase()).filter(Boolean);
+}
+
+// Load all agents from .sapper/agents/*.md (with frontmatter support)
 function loadAgents() {
   ensureAgentsDirs();
   const agents = {};
@@ -107,17 +400,24 @@ function loadAgents() {
     for (const file of files) {
       if (file.endsWith('.md')) {
         const name = file.replace('.md', '').toLowerCase();
-        const content = fs.readFileSync(join(AGENTS_DIR, file), 'utf8');
-        // Extract first line as description (# Title)
-        const firstLine = content.split('\n')[0].replace(/^#\s*/, '').trim();
-        agents[name] = { name, file, content, description: firstLine };
+        const rawContent = fs.readFileSync(join(AGENTS_DIR, file), 'utf8');
+        const { meta, body } = parseFrontmatter(rawContent);
+        agents[name] = {
+          name: meta.name || name,
+          file,
+          content: body,                              // body without frontmatter → injected into system prompt
+          description: meta.description || meta.name || name,
+          tools: normalizeToolList(meta.tools),        // null = all, or ['READ','WRITE',...]
+          argumentHint: meta['argument-hint'] || null,
+          meta,                                        // full parsed metadata
+        };
       }
     }
   } catch (e) {}
   return agents;
 }
 
-// Load all skills from .sapper/skills/*.md
+// Load all skills from .sapper/skills/*.md (with frontmatter support)
 function loadSkills() {
   ensureAgentsDirs();
   const skills = {};
@@ -126,9 +426,16 @@ function loadSkills() {
     for (const file of files) {
       if (file.endsWith('.md')) {
         const name = file.replace('.md', '').toLowerCase();
-        const content = fs.readFileSync(join(SKILLS_DIR, file), 'utf8');
-        const firstLine = content.split('\n')[0].replace(/^#\s*/, '').trim();
-        skills[name] = { name, file, content, description: firstLine };
+        const rawContent = fs.readFileSync(join(SKILLS_DIR, file), 'utf8');
+        const { meta, body } = parseFrontmatter(rawContent);
+        skills[name] = {
+          name: meta.name || name,
+          file,
+          content: body,
+          description: meta.description || meta.name || name,
+          argumentHint: meta['argument-hint'] || null,
+          meta,
+        };
       }
     }
   } catch (e) {}
@@ -140,10 +447,195 @@ function createDefaultAgentsAndSkills() {
   ensureAgentsDirs();
   
   const defaultAgents = {
-    'sapper-it': `# Sapper IT - Coding Agent\n\nYou are Sapper IT, an expert full-stack coding agent working within Sapper.\nYour expertise includes:\n- Full-stack web development (frontend + backend)\n- System architecture and design patterns\n- Debugging, refactoring, and code review\n- DevOps, CI/CD, and deployment\n- Database design and optimization\n- API development (REST, GraphQL)\n- Performance optimization and security best practices\n\nWhen the user asks for help, dive into the codebase using Sapper's tools. Read files, understand the structure, then make precise changes.\n\nBe technical, thorough, and code-first. Always verify your changes work by running tests or builds.`
+    'sapper-it': `---
+name: "Sapper IT"
+description: "Expert full-stack coding agent — handles web dev, architecture, debugging, DevOps, databases, APIs, and performance. Use for any coding task."
+tools: [read, edit, write, list, search, shell]
+---
+
+# Sapper IT - Coding Agent
+
+You are Sapper IT, an expert full-stack coding agent working within Sapper.
+
+## Your Expertise
+- Full-stack web development (frontend + backend)
+- System architecture and design patterns
+- Debugging, refactoring, and code review
+- DevOps, CI/CD, and deployment
+- Database design and optimization
+- API development (REST, GraphQL)
+- Performance optimization and security best practices
+
+## Behavior
+When the user asks for help, dive into the codebase using Sapper's tools. Read files, understand the structure, then make precise changes.
+
+Be technical, thorough, and code-first. Always verify your changes work by running tests or builds.`,
+
+    'writer': `---
+name: "Technical Writer"
+description: "Documentation and writing agent — READMEs, API docs, tutorials, guides, and code comments. Use for any writing or documentation task."
+tools: [read, edit, write, list, search]
+---
+
+# Technical Writer
+
+You are an expert technical writer within Sapper.
+
+## Your Expertise
+- API documentation and developer guides
+- README files and onboarding docs
+- Architecture decision records (ADRs)
+- Code comments, JSDoc/TSDoc annotations
+- Tutorials, how-to guides, and changelogs
+- Clear, structured, audience-aware writing
+
+## Behavior
+- Always READ the code first to understand what it does before writing docs
+- Use examples and code snippets in documentation
+- Keep language simple and scannable
+- Match the project's existing documentation style
+- Prefer concise bullet points over long paragraphs
+
+## Workflow
+1. LIST the project to understand structure
+2. READ key files (README, package.json, main entry points)
+3. Identify what needs documenting
+4. WRITE or PATCH documentation files
+5. Cross-reference with existing docs for consistency`,
+
+    'reviewer': `---
+name: "Code Reviewer"
+description: "Code review agent — analyzes code for bugs, security issues, performance, and best practices. Read-only: won't modify files."
+tools: [read, list, search]
+---
+
+# Code Reviewer
+
+You are a senior code reviewer within Sapper.
+
+## Your Expertise
+- Bug detection and logic errors
+- Security vulnerability scanning (OWASP Top 10)
+- Performance bottleneck identification
+- Code style and best practices
+- Architecture and design pattern review
+- Dependency and import analysis
+
+## Behavior
+- You are READ-ONLY — analyze and report, never modify files
+- Be specific: reference exact file paths and line numbers
+- Categorize issues by severity: 🔴 Critical, 🟡 Warning, 🟢 Suggestion
+- Provide the fix alongside the problem
+- Check for: unused variables, error handling gaps, race conditions, SQL injection, XSS, hardcoded secrets
+
+## Review Format
+For each issue found:
+\`\`\`
+🔴/🟡/🟢 [Category] — file:line
+  Problem: What's wrong
+  Fix: How to fix it
+\`\`\``
   };
   
-  const defaultSkills = {};
+  const defaultSkills = {
+    'git-workflow': `---
+name: git-workflow
+description: "Git best practices — branching, commits, PRs, rebasing, conflict resolution. Use when working with version control."
+argument-hint: "Describe the git operation (e.g., 'create feature branch', 'squash commits')"
+---
+
+# Git Workflow
+
+Best practices for Git version control.
+
+## Commit Messages
+- Format: \`type(scope): description\`
+- Types: feat, fix, docs, style, refactor, test, chore, perf
+- Keep subject line under 72 characters
+- Use imperative mood: "add feature" not "added feature"
+- Examples:
+  - \`feat(auth): add JWT token refresh\`
+  - \`fix(api): handle null response from payment service\`
+  - \`docs(readme): add deployment instructions\`
+
+## Branching Strategy
+- \`main\` — production-ready code
+- \`develop\` — integration branch
+- \`feature/name\` — new features
+- \`fix/name\` — bug fixes
+- \`hotfix/name\` — urgent production fixes
+
+## Common Operations
+| Task | Command |
+|------|---------|
+| New feature branch | \`git checkout -b feature/name develop\` |
+| Stage specific files | \`git add file1 file2\` |
+| Interactive rebase | \`git rebase -i HEAD~N\` |
+| Squash last N commits | \`git rebase -i HEAD~N\` then change pick to squash |
+| Undo last commit (keep changes) | \`git reset --soft HEAD~1\` |
+| Stash with message | \`git stash push -m "description"\` |
+| Cherry-pick a commit | \`git cherry-pick <hash>\` |
+
+## PR Checklist
+- [ ] Branch is up to date with target branch
+- [ ] Tests pass
+- [ ] No console.log / debug statements
+- [ ] Commit messages follow convention
+- [ ] Documentation updated if needed`,
+
+    'node-project': `---
+name: node-project
+description: "Node.js project conventions — package.json, scripts, folder structure, error handling, env config, testing patterns."
+argument-hint: "Describe what you need (e.g., 'setup express project', 'add testing')"
+---
+
+# Node.js Project Conventions
+
+## Project Structure
+\`\`\`
+project/
+├── src/
+│   ├── index.js          # Entry point
+│   ├── routes/            # Route handlers
+│   ├── controllers/       # Business logic
+│   ├── models/            # Data models
+│   ├── middleware/         # Express middleware
+│   ├── services/          # External service integrations
+│   └── utils/             # Helper functions
+├── tests/
+│   ├── unit/
+│   └── integration/
+├── config/
+│   └── index.js           # Environment-based config
+├── .env.example
+├── .gitignore
+├── package.json
+└── README.md
+\`\`\`
+
+## Package.json Scripts
+\`\`\`json
+{
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "test": "jest --coverage",
+    "test:watch": "jest --watch",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix"
+  }
+}
+\`\`\`
+
+## Best Practices
+- Use \`const\` by default, \`let\` when needed, never \`var\`
+- Always handle async errors with try/catch or .catch()
+- Use environment variables via dotenv, never hardcode secrets
+- Validate input at API boundaries (use zod, joi, or express-validator)
+- Use structured logging (pino or winston), not console.log in production
+- Prefer async/await over callbacks and .then() chains
+- Exit gracefully: handle SIGTERM and SIGINT`
+  };
   
   let created = 0;
   for (const [name, content] of Object.entries(defaultAgents)) {
@@ -164,27 +656,59 @@ function createDefaultAgentsAndSkills() {
 }
 
 // Build the system prompt with optional agent and skills
+// Global flag — set after model selection, read in buildSystemPrompt
+let _useNativeToolsFlag = false;
+
 function buildSystemPrompt(agentContent = null, skillContents = []) {
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
   let prompt = `You are Sapper, an intelligent AI assistant with access to the local filesystem and shell.
 You can help with ANY task - coding, writing, research, planning, analysis, and more.
 Adapt your personality and expertise based on the active agent role and loaded skills.
 
+CURRENT DATE AND TIME: ${dateStr}, ${timeStr}
+
 RULES:
-1. EXPLORE FIRST: Use LIST and READ to understand files before making changes.
+1. EXPLORE FIRST: Use list and read to understand files before making changes.
 2. THINK IN STEPS: Explain what you found and what you plan to do before acting.
-3. BE PRECISE: When using PATCH, ensure the 'oldText' matches exactly.
+3. BE PRECISE: When using patch, ensure the 'old_text' matches exactly.
 4. VERIFY: After making changes, verify they work (run tests, check output, etc).
-5. NO HALLUCINATIONS: If a file doesn't exist, don't guess its content. List the directory instead.
+5. NO HALLUCINATIONS: If a file doesn't exist, don't guess its content. List the directory instead.`;
+
+  if (_useNativeToolsFlag) {
+    prompt += `
+
+TOOLS:
+You have function-calling tools available. Call them directly — do NOT use [TOOL:...] text markers.
+Available tools: list_directory, read_file, search_files, write_file, patch_file, create_directory, run_shell.
+
+PATCH TIPS:
+- For patch_file, set old_text to "LINE:<number>" to replace a specific line by number (most reliable).
+- Always read_file first to see exact content before using patch_file.
+- If a patch fails, do NOT retry with slight variations. Switch to LINE:number mode or use write_file instead.`;
+  } else {
+    prompt += `
 
 TOOL SYNTAX (use these to interact with files and system):
 - [TOOL:LIST]dir[/TOOL] - List directory contents
 - [TOOL:READ]file_path[/TOOL] - Read file contents
 - [TOOL:SEARCH]pattern[/TOOL] - Search files for pattern
 - [TOOL:WRITE]path:::content[/TOOL] - Create/overwrite file
-- [TOOL:PATCH]path:::old|||new[/TOOL] - Edit existing file
+- [TOOL:PATCH]path:::old|||new[/TOOL] - Edit existing file (exact match, trimmed, or fuzzy)
+- [TOOL:PATCH]path:::LINE:number|||new text[/TOOL] - Replace a specific line by number (PREFERRED — more reliable)
 - [TOOL:SHELL]command[/TOOL] - Run shell command
 
-CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are for your internal use only - the user should not see tool commands. Just use them silently and show the results. Do NOT include tool syntax in examples, explanations, or code blocks.
+PATCH TIPS:
+- PREFER the LINE:number mode when you know which line to change. It is much more reliable than text matching.
+- Always READ the file first to see exact content before using PATCH.
+- If a PATCH fails, do NOT retry with slight variations. Switch to LINE:number mode or use WRITE instead.
+
+You MUST use the [TOOL:...][/TOOL] syntax above to perform actions. This is how you interact with the filesystem and shell - there is no other way. When you want to read a file, output [TOOL:READ]path[/TOOL] in your response. When you want to list a directory, output [TOOL:LIST].[/TOOL]. Always actually use the tools - do not just describe what you would do.
+Do NOT show tool syntax as examples or documentation to the user. Only use them to perform real actions.`;
+  }
+
+  prompt += `
 
 IMPORTANT CONTEXT:
 - The current working directory is the user's project folder.
@@ -196,7 +720,15 @@ IMPORTANT CONTEXT:
 When no agent is active, you are a general-purpose assistant. When an agent role is loaded, fully adopt that role.`;
 
   if (agentContent) {
-    prompt += `\n\n═══ ACTIVE AGENT ROLE ═══\n${agentContent}\n═══ END AGENT ROLE ═══\n\nIMPORTANT: You are now operating as the agent described above. Adopt its persona, expertise, and communication style while still having access to all Sapper tools.`;
+    prompt += `\n\n═══ ACTIVE AGENT ROLE ═══\n${agentContent}\n═══ END AGENT ROLE ═══\n\nIMPORTANT: You are now operating as the agent described above. Adopt its persona, expertise, and communication style while still having access to Sapper tools.`;
+    
+    // If the active agent has tool restrictions, inform the AI
+    if (currentAgentTools && currentAgentTools.length > 0) {
+      const allTools = ['READ', 'WRITE', 'PATCH', 'LIST', 'SEARCH', 'SHELL', 'MKDIR'];
+      const forbidden = allTools.filter(t => !currentAgentTools.includes(t));
+      prompt += `\n\nTOOL RESTRICTION: This agent can ONLY use these tools: ${currentAgentTools.join(', ')}.
+FORBIDDEN TOOLS (DO NOT USE): ${forbidden.join(', ')}. You MUST NOT attempt to use forbidden tools. If you need a forbidden tool, tell the user you cannot perform that action with your current role.`;
+    }
   }
 
   if (skillContents.length > 0) {
@@ -212,6 +744,7 @@ When no agent is active, you are a general-purpose assistant. When an agent role
 
 // Track active agent
 let currentAgent = null; // null = default Sapper, or agent name string
+let currentAgentTools = null; // null = all tools allowed, or array of allowed tool names
 let loadedSkills = []; // array of skill names currently loaded
 
 // Load config (settings like autoAttach)
@@ -762,6 +1295,176 @@ async function addToEmbeddings(text, embeddings) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// SMART CONTEXT SUMMARIZATION
+// ═══════════════════════════════════════════════════════════════
+
+async function autoSummarizeContext(messages, model) {
+  const contextSize = JSON.stringify(messages).length;
+  if (contextSize <= 32000 || messages.length <= 5) return messages;
+
+  console.log();
+  console.log(box(
+    `Context is ${chalk.red.bold(Math.round(contextSize / 1024) + 'KB')} (${messages.length} messages)\n` +
+    `${chalk.cyan('Auto-summarizing via AI to keep things fast...')}`,
+    '🧠 Smart Summary', 'cyan'
+  ));
+
+  const summarySpinner = ora('Summarizing conversation...').start();
+
+  // Separate: system prompt, messages to summarize, recent messages to keep
+  const systemPrompt = messages[0];
+  const recentCount = 4;
+  let recentMessages = messages.slice(-recentCount);
+  let oldMessages = messages.slice(1, -recentCount);
+
+  // Smart selection: ensure we keep at least one tool-usage example in recent messages
+  // This prevents the AI from "forgetting" how to use tools after summarization
+  const hasToolExample = recentMessages.some(m => 
+    m.role === 'assistant' && m.content.includes('[TOOL:') && m.content.includes('[/TOOL]')
+  );
+  if (!hasToolExample) {
+    // Search backwards for the most recent assistant message that used tools
+    for (let i = messages.length - recentCount - 1; i >= 1; i--) {
+      if (messages[i].role === 'assistant' && messages[i].content.includes('[TOOL:') && messages[i].content.includes('[/TOOL]')) {
+        // Include this tool-usage message and the user message before it + tool result after it
+        const toolExampleMessages = [];
+        if (i > 0 && messages[i - 1].role === 'user') toolExampleMessages.push(messages[i - 1]);
+        toolExampleMessages.push(messages[i]);
+        if (i + 1 < messages.length - recentCount && messages[i + 1].role === 'user' && messages[i + 1].content.startsWith('RESULT')) {
+          toolExampleMessages.push(messages[i + 1]);
+        }
+        // Remove these from oldMessages and prepend to recentMessages
+        const toolExampleIndices = new Set();
+        for (let j = Math.max(1, i - 1); j <= Math.min(i + 1, messages.length - recentCount - 1); j++) {
+          if (toolExampleMessages.includes(messages[j])) toolExampleIndices.add(j);
+        }
+        oldMessages = messages.slice(1, -recentCount).filter((_, idx) => !toolExampleIndices.has(idx + 1));
+        recentMessages = [...toolExampleMessages, ...recentMessages];
+        break;
+      }
+    }
+  }
+
+  if (oldMessages.length < 2) {
+    summarySpinner.stop();
+    return messages; // Nothing meaningful to summarize
+  }
+
+  // Build a condensed version of old messages for the summary request
+  const conversationText = oldMessages
+    .filter(m => m.role !== 'system')
+    .map(m => {
+      const role = m.role === 'user' ? 'User' : 'Assistant';
+      // Truncate very long messages (file contents, scan results, etc.)
+      const text = m.content.length > 1500
+        ? m.content.substring(0, 1500) + '\n... [truncated]'
+        : m.content;
+      return `${role}: ${text}`;
+    })
+    .join('\n\n');
+
+  try {
+    const summaryResponse = await ollama.chat({
+      model,
+      messages: [
+        {
+          role: 'system',
+          content: `You are a conversation summarizer for an AI coding agent called Sapper. Produce a concise but thorough summary of the conversation below. Include:
+- Key topics discussed and decisions made
+- Files that were read, created, or modified (with paths)
+- Important code changes or bugs found
+- Any pending tasks or open questions
+- Technical details that would be needed to continue the conversation
+- Which tools were used (LIST, READ, WRITE, PATCH, SHELL, SEARCH) and on what files
+- The active agent role (if any) and loaded skills
+- Any tool usage patterns or workflows that were established
+
+CRITICAL: The AI assistant uses tools with syntax like [TOOL:READ]path[/TOOL]. Make sure to note which tools were used so the assistant remembers to keep using them after this summary.
+
+Output ONLY the summary, no preamble. Keep it under 800 words. Use bullet points.`
+        },
+        {
+          role: 'user',
+          content: `Summarize this conversation:\n\n${conversationText}`
+        }
+      ],
+      stream: false
+    });
+
+    const summary = summaryResponse.message.content;
+
+    // Save old messages to embeddings before discarding
+    const embeddings = loadEmbeddings();
+    const textToEmbed = oldMessages
+      .filter(m => m.role !== 'system')
+      .map(m => m.content.substring(0, 500))
+      .join('\n---\n');
+
+    if (textToEmbed.length > 50) {
+      try {
+        const embedding = await getEmbedding(textToEmbed);
+        if (embedding) {
+          embeddings.chunks.push({
+            text: textToEmbed.substring(0, 2000),
+            embedding,
+            timestamp: Date.now()
+          });
+          if (embeddings.chunks.length > 100) {
+            embeddings.chunks = embeddings.chunks.slice(-100);
+          }
+          saveEmbeddings(embeddings);
+        }
+      } catch (e) {
+        // Silently skip embedding if model not available
+      }
+    }
+
+    // Build agent role reminder if an agent is active
+    const agentReminder = currentAgent ? `\nNote: You are currently operating as the "${currentAgent}" agent. Stay in character.` : '';
+    const skillReminder = loadedSkills.length > 0 ? `\nLoaded skills: ${loadedSkills.join(', ')}. Apply this knowledge when relevant.` : '';
+
+    // Rebuild messages: system prompt + summary + tool reinforcement + recent messages
+    const newMessages = [
+      systemPrompt,
+      {
+        role: 'user',
+        content: `[CONVERSATION SUMMARY - auto-generated]\n${summary}\n[END SUMMARY]\n\nUse this summary as context for our ongoing conversation. Continue using your tools (LIST, READ, WRITE, PATCH, SHELL, SEARCH) as needed.${agentReminder}${skillReminder}`
+      },
+      {
+        role: 'assistant',
+        content: _useNativeToolsFlag
+          ? `Understood. I have the conversation summary and will continue helping you. I'll use my tools (list_directory, read_file, write_file, patch_file, search_files, run_shell) as needed.\n\nWhat would you like me to do next?`
+          : `Understood. I have the conversation summary and will continue helping you. I'll keep using my tools to explore files, make changes, and run commands as needed:\n- [TOOL:LIST] to browse directories\n- [TOOL:READ] to read files\n- [TOOL:WRITE] to create/overwrite files\n- [TOOL:PATCH] to edit existing files\n- [TOOL:SEARCH] to find patterns\n- [TOOL:SHELL] to run commands\n\nWhat would you like me to do next?`
+      },
+      ...recentMessages
+    ];
+
+    // Save immediately
+    ensureSapperDir();
+    fs.writeFileSync(CONTEXT_FILE, JSON.stringify(newMessages, null, 2));
+
+    const newSize = JSON.stringify(newMessages).length;
+    summarySpinner.stop();
+    console.log(chalk.green(`✅ Summarized! ${chalk.gray(`${Math.round(contextSize / 1024)}KB → ${Math.round(newSize / 1024)}KB`)} (${messages.length} → ${newMessages.length} messages)`));
+    if (embeddings.chunks.length > 0) {
+      console.log(chalk.gray(`   🧠 Old context saved to memory (${embeddings.chunks.length} memories)`));
+    }
+    logEntry('summary', {
+      before: `${Math.round(contextSize / 1024)}KB / ${messages.length} msgs`,
+      after: `${Math.round(newSize / 1024)}KB / ${newMessages.length} msgs`
+    });
+    console.log();
+
+    return newMessages;
+  } catch (e) {
+    summarySpinner.stop();
+    console.log(chalk.yellow(`⚠️  Auto-summary failed: ${e.message}`));
+    console.log(chalk.gray('   Tip: Use /prune to manually reduce context.\n'));
+    return messages; // Return unchanged on failure
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // FANCY UI HELPERS
 // ═══════════════════════════════════════════════════════════════
 
@@ -1134,18 +1837,96 @@ const tools = {
     const trimmedPath = path.trim();
     try {
       const content = fs.readFileSync(trimmedPath, 'utf8');
-      if (!content.includes(oldText)) {
-        return `Error: Could not find the text to replace in ${trimmedPath}. Make sure oldText matches exactly (including whitespace).`;
+
+      // --- Line-number mode: LINE:15|||new text ---
+      const lineMatch = oldText.match(/^LINE:(\d+)$/);
+      if (lineMatch) {
+        const lineNum = parseInt(lineMatch[1], 10);
+        const lines = content.split('\n');
+        if (lineNum < 1 || lineNum > lines.length) {
+          return `Error: Line ${lineNum} out of range (file has ${lines.length} lines) in ${trimmedPath}`;
+        }
+        const oldLine = lines[lineNum - 1];
+        lines[lineNum - 1] = newText;
+        const newContent = lines.join('\n');
+        console.log();
+        const diffContent =
+          `${chalk.white('File:')} ${chalk.cyan(trimmedPath)} ${chalk.gray(`(line ${lineNum})`)}\n` +
+          chalk.gray('─'.repeat(40)) + '\n' +
+          chalk.red('- ' + oldLine) + '\n' +
+          chalk.green('+ ' + newText);
+        console.log(box(diffContent, '🔧 Patch (line mode)', 'yellow'));
+        const confirm = await safeQuestion(chalk.yellow('\n↪ Apply patch? ') + chalk.gray('(y/n): '));
+        if (confirm.toLowerCase() === 'y') {
+          fs.writeFileSync(trimmedPath, newContent);
+          return `Successfully patched line ${lineNum} of ${trimmedPath}`;
+        }
+        return 'Patch rejected by user.';
       }
-      const newContent = content.replace(oldText, newText);
+
+      // --- Exact match (try as-is first, then trimmed) ---
+      let matchedOld = oldText;
+      let newContent;
+      if (content.includes(oldText)) {
+        newContent = content.replace(oldText, newText);
+      } else if (content.includes(oldText.trim())) {
+        // Trimmed fallback — match what's actually in the file
+        matchedOld = oldText.trim();
+        newContent = content.replace(matchedOld, newText.trim());
+        console.log(chalk.gray('  ℹ️  Matched after trimming whitespace'));
+      } else {
+        // --- Fuzzy fallback: normalize whitespace + strip emoji ---
+        const normalize = (s) => s.replace(/[\u{1F000}-\u{1FFFF}]/gu, '').replace(/\s+/g, ' ').trim();
+        const normalizedOld = normalize(oldText);
+        const lines = content.split('\n');
+        let bestMatch = null;
+        let bestScore = 0;
+        // Sliding window search over lines
+        const oldLines = oldText.trim().split('\n');
+        for (let i = 0; i <= lines.length - oldLines.length; i++) {
+          const window = lines.slice(i, i + oldLines.length).join('\n');
+          const normalizedWindow = normalize(window);
+          if (normalizedWindow === normalizedOld) {
+            bestMatch = { start: i, count: oldLines.length, text: window };
+            bestScore = 1;
+            break;
+          }
+          // Simple similarity: shared words ratio
+          const oldWords = new Set(normalizedOld.split(' '));
+          const winWords = new Set(normalizedWindow.split(' '));
+          const shared = [...oldWords].filter(w => winWords.has(w)).length;
+          const score = shared / Math.max(oldWords.size, winWords.size);
+          if (score > bestScore && score >= 0.7) {
+            bestScore = score;
+            bestMatch = { start: i, count: oldLines.length, text: window };
+          }
+        }
+
+        if (bestMatch && bestScore >= 0.7) {
+          matchedOld = bestMatch.text;
+          newContent = content.replace(matchedOld, newText.trim());
+          console.log(chalk.gray(`  ℹ️  Fuzzy match (${(bestScore * 100).toFixed(0)}% similarity) at line ${bestMatch.start + 1}`));
+        } else {
+          // Show nearby lines to help AI on next attempt
+          const keyword = oldText.split('\n')[0].trim().substring(0, 40);
+          const nearby = lines.map((l, i) => ({ line: i + 1, text: l }))
+            .filter(l => l.text.includes(keyword.substring(0, 15)))
+            .slice(0, 3)
+            .map(l => `  Line ${l.line}: ${l.text.substring(0, 80)}`)
+            .join('\n');
+          return `Error: Could not find the text to replace in ${trimmedPath}.\n` +
+            (nearby ? `Nearby matches:\n${nearby}\n` : '') +
+            `Tip: Use LINE:number mode instead, e.g. [TOOL:PATCH]${trimmedPath}:::LINE:42|||replacement text[/TOOL]`;
+        }
+      }
       
       // Show diff preview
       console.log();
       const diffContent = 
         `${chalk.white('File:')} ${chalk.cyan(trimmedPath)}\n` +
         chalk.gray('─'.repeat(40)) + '\n' +
-        chalk.red('- ' + oldText.split('\n').join('\n- ')) + '\n' +
-        chalk.green('+ ' + newText.split('\n').join('\n+ '));
+        chalk.red('- ' + matchedOld.split('\n').join('\n- ')) + '\n' +
+        chalk.green('+ ' + (newContent === content.replace(matchedOld, newText.trim()) ? newText.trim() : newText).split('\n').join('\n+ '));
       console.log(box(diffContent, '🔧 Patch', 'yellow'));
       
       const confirm = await safeQuestion(chalk.yellow('\n↪ Apply patch? ') + chalk.gray('(y/n): '));
@@ -1190,10 +1971,21 @@ const tools = {
     const confirm = await safeQuestion(chalk.red('\n↪ Execute? ') + chalk.gray('(y/n): '));
     if (confirm.toLowerCase() === 'y') {
       return new Promise((resolve) => {
-        const useShell = cmd.includes('&&') || cmd.includes('|') || cmd.includes('cd ');
+        const useShell = cmd.includes('&&') || cmd.includes('|') || cmd.includes('cd ') || cmd.includes('>') || cmd.includes('<');
         console.log(chalk.cyan(`\n[RUNNING] ${cmd}\n`));
-        const proc = spawn(useShell ? 'sh' : cmd.split(' ')[0], useShell ? ['-c', cmd] : cmd.split(' ').slice(1), { 
-          stdio: 'inherit', shell: useShell 
+        const proc = spawn('sh', ['-c', cmd], { 
+          cwd: process.cwd()
+        });
+        let output = '';
+        proc.stdout.on('data', (data) => { 
+          const text = data.toString();
+          output += text;
+          process.stdout.write(text); // Still show to user in real-time
+        });
+        proc.stderr.on('data', (data) => { 
+          const text = data.toString();
+          output += text;
+          process.stderr.write(text); // Still show errors to user
         });
         proc.on('close', (code) => {
           // Crucial: give control back to Node
@@ -1203,7 +1995,13 @@ const tools = {
           // Delay slightly to let terminal settle
           setTimeout(() => {
             recreateReadline();
-            resolve(`Command completed with code ${code}`);
+            // Return actual output to AI, truncated if too long
+            const maxOutput = 10000;
+            let result = output.trim();
+            if (result.length > maxOutput) {
+              result = result.substring(0, maxOutput) + '\n... (output truncated)';
+            }
+            resolve(result || `Command completed with exit code ${code}`);
           }, 200);
         });
       });
@@ -1378,6 +2176,126 @@ async function runSapper() {
   const choice = await safeQuestion(chalk.cyan('\n⚡ Select model: '));
   const selectedModel = localModels.models[parseInt(choice) - 1]?.name || localModels.models[0].name;
 
+  // ─── Detect native tool-calling support ───────────────────────────
+  let useNativeTools = false;
+  try {
+    const modelInfo = await ollama.show({ model: selectedModel });
+    if (modelInfo.capabilities && modelInfo.capabilities.includes('tools')) {
+      useNativeTools = true;
+      console.log(chalk.green('  ✓ ') + chalk.gray('Native tool calling: ') + chalk.green('enabled'));
+    } else {
+      console.log(chalk.yellow('  ℹ ') + chalk.gray('Native tool calling: ') + chalk.yellow('unavailable — using text markers'));
+    }
+  } catch (e) {
+    console.log(chalk.gray('  ℹ Tool detection skipped — using text markers'));
+  }
+  _useNativeToolsFlag = useNativeTools; // Set global for buildSystemPrompt
+
+  // Native Ollama tool definitions (used when useNativeTools=true)
+  const nativeToolDefs = [
+    {
+      type: 'function',
+      function: {
+        name: 'list_directory',
+        description: 'List the contents of a directory. Use "." for current directory.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Directory path to list' }
+          },
+          required: ['path']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'read_file',
+        description: 'Read the full contents of a file',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path to read' }
+          },
+          required: ['path']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'search_files',
+        description: 'Search for a pattern across project files',
+        parameters: {
+          type: 'object',
+          properties: {
+            pattern: { type: 'string', description: 'Search pattern (text or regex)' }
+          },
+          required: ['pattern']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'write_file',
+        description: 'Create or overwrite a file with new content',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path to write' },
+            content: { type: 'string', description: 'Content to write to the file' }
+          },
+          required: ['path', 'content']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'patch_file',
+        description: 'Edit an existing file by replacing old text with new text. Prefer line_number mode.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path to patch' },
+            old_text: { type: 'string', description: 'Exact text to find and replace, or LINE:<number> for line-number mode' },
+            new_text: { type: 'string', description: 'Replacement text' }
+          },
+          required: ['path', 'old_text', 'new_text']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'create_directory',
+        description: 'Create a directory (recursive)',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Directory path to create' }
+          },
+          required: ['path']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'run_shell',
+        description: 'Execute a shell command in the project directory',
+        parameters: {
+          type: 'object',
+          properties: {
+            command: { type: 'string', description: 'Shell command to execute' }
+          },
+          required: ['command']
+        }
+      }
+    }
+  ];
+
   if (messages.length === 0) {
     messages = [{
       role: 'system',
@@ -1385,18 +2303,20 @@ async function runSapper() {
     }];
   }
 
+  // Log session start
+  logEntry('session_start', {
+    model: selectedModel,
+    resumed: messages.length > 1,
+    contextSize: messages.length
+  });
+
   // Main conversation loop - never exits unless user types 'exit'
   while (true) {
     try {
-      // Context size warning - large context causes hangs
+      // Context size check - auto-summarize when too large
       const contextSize = JSON.stringify(messages).length;
       if (contextSize > 32000) {
-        console.log();
-        console.log(box(
-          `Context is ${chalk.red.bold(Math.round(contextSize/1024) + 'KB')} - this may cause slowdowns!\n` +
-          `${chalk.yellow('Tip:')} Type ${chalk.cyan('/prune')} to reduce context size`,
-          '⚠️  Warning', 'yellow'
-        ));
+        messages = await autoSummarizeContext(messages, selectedModel);
       }
       
       // Build prompt label with active agent/skills
@@ -1410,7 +2330,20 @@ async function runSapper() {
       
       const input = await safeQuestion(chalk.cyan('\n┌─[') + promptLabel + chalk.cyan(']\n└─➤ '));
       
-      if (input.toLowerCase() === 'exit') process.exit();
+      if (input.toLowerCase() === 'exit') {
+        const stats = getSessionStats();
+        logEntry('system', { event: 'Session End', detail: `Duration: ${formatElapsed(stats.totalDuration)}, ${stats.userMessages} messages, ${stats.toolCalls} tools` });
+        console.log();
+        console.log(box(
+          `${chalk.white('Duration:')}   ${chalk.cyan(formatElapsed(stats.totalDuration))}\n` +
+          `${chalk.white('Messages:')}   ${chalk.blue(stats.userMessages + '↑')} ${chalk.magenta(stats.aiMessages + '↓')}\n` +
+          `${chalk.white('Tools:')}      ${chalk.yellow(stats.toolCalls)} | ${chalk.white('Shells:')} ${chalk.red(stats.shellCalls)}\n` +
+          `${chalk.white('Log saved:')} ${chalk.gray(sessionLogFile())}`,
+          '👋 Session Summary', 'cyan'
+        ));
+        console.log();
+        process.exit();
+      }
       
       // Handle reset command
       if (input.toLowerCase() === '/reset' || input.toLowerCase() === '/clear') {
@@ -1419,88 +2352,24 @@ async function runSapper() {
           console.log(chalk.green('✅ Context cleared! Starting fresh...\n'));
         }
         currentAgent = null;
+        currentAgentTools = null;
         loadedSkills = [];
         messages = [{
           role: 'system',
           content: buildSystemPrompt() // Reset to default prompt
         }];
+        logEntry('system', { event: 'Context Reset', detail: 'All context cleared, starting fresh' });
         continue;
       }
       
-      // Handle prune command - AUTO-EMBED then clear old context
+      // Handle prune command - smart AI summary then clear old context
       if (input.toLowerCase() === '/prune') {
         if (messages.length <= 5) {
           console.log(chalk.yellow('Context is already small, nothing to prune.'));
           continue;
         }
         
-        // 1. AUTO-EMBED: Save conversation to memory BEFORE pruning (silently skip if no model)
-        const embeddings = loadEmbeddings();
-        
-        // Get messages that will be pruned (all except system and last 4)
-        const messagesToEmbed = messages.slice(1, -4)
-          .filter(m => m.role !== 'system')
-          .map(m => m.content.substring(0, 500))
-          .join('\n---\n');
-        
-        if (messagesToEmbed.length > 50) {
-          try {
-            const embedding = await getEmbedding(messagesToEmbed);
-            if (embedding) {
-              embeddings.chunks.push({
-                text: messagesToEmbed.substring(0, 2000),
-                embedding,
-                timestamp: Date.now()
-              });
-              if (embeddings.chunks.length > 100) {
-                embeddings.chunks = embeddings.chunks.slice(-100);
-              }
-              saveEmbeddings(embeddings);
-              console.log(chalk.green(`🧠 Saved to memory! (${embeddings.chunks.length} memories)`));
-            }
-          } catch (e) {
-            // Silently skip embedding if model not available - prune still works
-          }
-        }
-        
-        // 2. Capture the ORIGINAL detailed system prompt from the very first message
-        const originalSystemPrompt = messages[0];
-        
-        // 3. Capture the last 4 messages (the most recent conversation)
-        const recentMessages = messages.slice(-4);
-        
-        // 4. Rebuild the messages array starting with the ORIGINAL prompt
-        messages = [originalSystemPrompt, ...recentMessages];
-        
-        // 4. Add reminder to stay in tool-using mode
-        messages.push({ 
-          role: 'system', 
-          content: `CONTEXT PRUNED. REMINDER: You are Sapper, an AI assistant with filesystem and shell access.
-
-RULES:
-1. EXPLORE FIRST: Use LIST and READ before making changes.
-2. THINK IN STEPS: Explain your plan before acting.
-3. BE PRECISE: When using PATCH, ensure 'oldText' matches exactly.
-4. VERIFY: Verify changes work after making them.
-5. NO HALLUCINATIONS: Don't guess file contents.
-
-TOOL SYNTAX:
-- [TOOL:LIST]dir[/TOOL]
-- [TOOL:READ]file_path[/TOOL]
-- [TOOL:SEARCH]pattern[/TOOL]
-- [TOOL:WRITE]path:::content[/TOOL]
-- [TOOL:PATCH]path:::old|||new[/TOOL]
-- [TOOL:SHELL]command[/TOOL]
-
-CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are for your internal use only. Just use them silently and show the results.`
-        });
-        
-        // 5. Save to context file so it persists
-        ensureSapperDir();
-        fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
-        
-        console.log(chalk.green(`✅ Pruned context. Sapper reminded to stay in Agent Mode.`));
-        console.log(chalk.gray(`Context size: ${messages.length} messages\n`));
+        messages = await autoSummarizeContext(messages, selectedModel);
         continue;
       }
       
@@ -1517,9 +2386,12 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
           `${chalk.cyan('/auto')}          ${chalk.gray('│')} Toggle auto-attach related files\n` +
           `${chalk.cyan('/recall')}        ${chalk.gray('│')} Search memory for relevant context\n` +
           `${chalk.cyan('/reset /clear')}  ${chalk.gray('│')} Clear all context\n` +
-          `${chalk.cyan('/prune')}         ${chalk.gray('│')} Save to memory + keep last 4 msgs\n` +
+          `${chalk.cyan('/prune')}         ${chalk.gray('│')} AI-summarize context + save to memory\n` +
           `${chalk.cyan('/context')}       ${chalk.gray('│')} Show context size\n` +
           `${chalk.cyan('/debug')}         ${chalk.gray('│')} Toggle debug mode\n` +
+          `${chalk.cyan('/log')}           ${chalk.gray('│')} Show activity timeline\n` +
+          `${chalk.cyan('/log stats')}     ${chalk.gray('│')} Show session statistics\n` +
+          `${chalk.cyan('/log file')}      ${chalk.gray('│')} Show log file path & history\n` +
           `${chalk.cyan('/help')}          ${chalk.gray('│')} Show this help\n` +
           `${chalk.cyan('exit')}           ${chalk.gray('│')} Quit Sapper\n` +
           `\n` +
@@ -1704,7 +2576,7 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
         const contextSize = JSON.stringify(messages).length;
         console.log(chalk.cyan(`\n📊 Context: ${messages.length} messages, ~${Math.round(contextSize/1024)}KB`));
         if (contextSize > 50000) {
-          console.log(chalk.yellow('⚠️  Context is large! Consider using /prune'));
+          console.log(chalk.yellow('⚠️  Context is large! Will auto-summarize on next message, or use /prune now.'));
         }
         continue;
       }
@@ -1716,6 +2588,77 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
         if (debugMode) {
           console.log(chalk.gray('   Will show regex matching details after each AI response.'));
         }
+        continue;
+      }
+      
+      // Handle /log command - show activity log
+      if (input.toLowerCase().startsWith('/log')) {
+        const parts = input.split(' ');
+        const count = parseInt(parts[1]) || 30;
+        
+        if (parts[1] === 'file') {
+          // Show log file path
+          console.log(chalk.cyan(`\n📁 Log file: ${chalk.white(sessionLogFile())}`));
+          if (fs.existsSync(sessionLogFile())) {
+            const size = fs.statSync(sessionLogFile()).size;
+            console.log(chalk.gray(`   Size: ${Math.round(size / 1024)}KB`));
+          }
+          // List all log files
+          try {
+            ensureLogsDir();
+            const logFiles = fs.readdirSync(LOGS_DIR).filter(f => f.endsWith('.md')).sort().reverse();
+            if (logFiles.length > 0) {
+              console.log(chalk.cyan(`\n📋 All session logs:`));
+              logFiles.slice(0, 10).forEach((f, i) => {
+                const stats = fs.statSync(`${LOGS_DIR}/${f}`);
+                const isCurrent = f === `session-${sessionId}.md`;
+                const label = isCurrent ? chalk.green(' ← current') : '';
+                console.log(chalk.gray(`   ${i + 1}. `) + chalk.white(f) + chalk.gray(` (${Math.round(stats.size / 1024)}KB)`) + label);
+              });
+              if (logFiles.length > 10) {
+                console.log(chalk.gray(`   ... and ${logFiles.length - 10} more`));
+              }
+            }
+          } catch (e) {}
+          continue;
+        }
+        
+        if (parts[1] === 'stats') {
+          // Show session statistics
+          const stats = getSessionStats();
+          console.log();
+          console.log(box(
+            `${chalk.white('Session Duration:')} ${chalk.cyan(formatElapsed(stats.totalDuration))}\n` +
+            `${chalk.white('User Messages:')}   ${chalk.blue.bold(stats.userMessages)}\n` +
+            `${chalk.white('AI Responses:')}    ${chalk.magenta.bold(stats.aiMessages)}\n` +
+            `${chalk.white('Tool Calls:')}      ${chalk.yellow.bold(stats.toolCalls)}\n` +
+            `${chalk.white('Shell Commands:')}  ${chalk.red.bold(stats.shellCalls)}\n` +
+            `${chalk.white('Errors:')}          ${stats.errors > 0 ? chalk.red.bold(stats.errors) : chalk.green.bold(stats.errors)}\n` +
+            `${chalk.white('Log Events:')}      ${chalk.gray(activityLog.length + ' total')}`,
+            '📊 Session Stats', 'cyan'
+          ));
+          console.log();
+          continue;
+        }
+        
+        if (parts[1] === 'view' && parts[2]) {
+          // View a specific log file
+          try {
+            const logPath = `${LOGS_DIR}/${parts[2]}`;
+            if (fs.existsSync(logPath)) {
+              const content = fs.readFileSync(logPath, 'utf8');
+              console.log(renderMarkdown(content));
+            } else {
+              console.log(chalk.yellow(`Log file not found: ${parts[2]}`));
+            }
+          } catch (e) {
+            console.log(chalk.red(`Error reading log: ${e.message}`));
+          }
+          continue;
+        }
+        
+        // Default: show activity timeline
+        console.log(renderActivityLog(count));
         continue;
       }
       
@@ -1734,10 +2677,15 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
           let agentList = '';
           for (const [name, agent] of Object.entries(currentAgents)) {
             const active = currentAgent === name ? chalk.green(' ◀ ACTIVE') : '';
-            agentList += `${chalk.cyan('/' + name)} ${chalk.gray('─')} ${chalk.white(agent.description)}${active}\n`;
+            const toolsBadge = agent.tools ? chalk.gray(` [${agent.tools.join(', ')}]`) : chalk.gray(' [all tools]');
+            agentList += `${chalk.cyan('/' + name)} ${chalk.gray('─')} ${chalk.white(agent.description)}${toolsBadge}${active}\n`;
+            if (agent.argumentHint) {
+              agentList += `   ${chalk.gray('💡 ' + agent.argumentHint)}\n`;
+            }
           }
           agentList += `\n${chalk.gray('Usage:')} ${chalk.cyan('/agentname prompt')} to switch & chat`;
           agentList += `\n${chalk.gray('Create:')} ${chalk.cyan('/agents create <name> <description>')}`;
+          agentList += `\n${chalk.gray('Format:')} Supports YAML frontmatter (name, description, tools, argument-hint)`;
           console.log(box(agentList.trim(), '🤖 Available Agents', 'cyan'));
         }
         console.log();
@@ -1765,7 +2713,7 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
         }
         
         const agentTitle = agentName.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-        const agentMd = `# ${agentTitle}\n\nYou are a ${agentTitle} AI assistant working within Sapper.\n${description ? `Your role: ${description}\n` : ''}\nAdapt your responses to match this role. Use Sapper's tools (file read/write, shell commands, search) when needed to assist the user.\n`;
+        const agentMd = `---\nname: "${agentTitle}"\ndescription: "${description || agentTitle + ' assistant'}"\ntools: [read, edit, write, list, search, shell]\n---\n\n# ${agentTitle}\n\nYou are a ${agentTitle} AI assistant working within Sapper.\n${description ? `Your role: ${description}\n` : ''}\nAdapt your responses to match this role. Use Sapper's tools (file read/write, shell commands, search) when needed to assist the user.\n`;
         
         fs.writeFileSync(agentFile, agentMd);
         console.log(chalk.green(`\n✅ Agent "${agentName}" created!`));
@@ -1786,8 +2734,12 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
           for (const [name, skill] of Object.entries(currentSkills)) {
             const loaded = loadedSkills.includes(name) ? chalk.green(' ◀ LOADED') : '';
             skillList += `${chalk.cyan(name)} ${chalk.gray('─')} ${chalk.white(skill.description)}${loaded}\n`;
+            if (skill.argumentHint) {
+              skillList += `   ${chalk.gray('💡 ' + skill.argumentHint)}\n`;
+            }
           }
           skillList += `\n${chalk.gray('Usage:')} ${chalk.cyan('/use skillname')} to load a skill`;
+          skillList += `\n${chalk.gray('Format:')} Supports YAML frontmatter (name, description, argument-hint)`;
           console.log(box(skillList.trim(), '📘 Available Skills', 'cyan'));
         }
         console.log();
@@ -1797,13 +2749,14 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
       // Handle /default command - switch back to default Sapper
       if (input.toLowerCase() === '/default') {
         currentAgent = null;
+        currentAgentTools = null;
         // Rebuild system prompt without agent
         const skillContents = loadedSkills.map(s => {
           const allSkills = loadSkills();
           return allSkills[s]?.content || '';
         }).filter(Boolean);
         messages[0] = { role: 'system', content: buildSystemPrompt(null, skillContents) };
-        console.log(chalk.green('\n✅ Switched back to default Sapper mode'));
+        console.log(chalk.green('\n✅ Switched back to default Sapper mode (all tools enabled)'));
         continue;
       }
       
@@ -1884,9 +2837,11 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
         const agentTitle = await safeQuestion(chalk.cyan('Agent title/role: '));
         const agentExpertise = await safeQuestion(chalk.cyan('Areas of expertise (comma-separated): '));
         const agentStyle = await safeQuestion(chalk.cyan('Communication style (e.g., professional, casual, technical): '));
+        const agentToolsInput = await safeQuestion(chalk.cyan('Allowed tools (comma-sep, or Enter for all): ') + chalk.gray('read,edit,write,list,search,shell: '));
         
-        const expertiseList = agentExpertise.split(',').map(e => `- ${e.trim()}`).join('\\n');
-        const agentMd = `# ${agentTitle.trim() || agentName}\n\nYou are a ${agentTitle.trim() || agentName} AI assistant working within Sapper.\nYour expertise includes:\n${expertiseList}\n\nCommunication style: ${agentStyle.trim() || 'professional and helpful'}.\n\nWhen the user asks for help, leverage your expertise and Sapper's tools (file read/write, shell commands, search) to provide comprehensive assistance.\n`;
+        const expertiseList = agentExpertise.split(',').map(e => `- ${e.trim()}`).join('\n');
+        const toolsLine = agentToolsInput.trim() ? `tools: [${agentToolsInput.trim()}]` : 'tools: [read, edit, write, list, search, shell]';
+        const agentMd = `---\nname: "${agentTitle.trim() || agentName}"\ndescription: "${agentExpertise.trim() || agentTitle.trim() || agentName}"\n${toolsLine}\n---\n\n# ${agentTitle.trim() || agentName}\n\nYou are a ${agentTitle.trim() || agentName} AI assistant working within Sapper.\n\n## Your Expertise\n${expertiseList}\n\n## Communication Style\n${agentStyle.trim() || 'Professional and helpful'}.\n\nWhen the user asks for help, leverage your expertise and Sapper's tools to provide comprehensive assistance.\n`;
         
         fs.writeFileSync(agentFile, agentMd);
         console.log(chalk.green(`\n✅ Agent "${agentName}" created!`));
@@ -1917,11 +2872,16 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
         }
         
         const skillTitle = await safeQuestion(chalk.cyan('Skill title: '));
-        const skillDesc = await safeQuestion(chalk.cyan('Describe the skill knowledge (or press Enter for template): '));
+        const skillDesc = await safeQuestion(chalk.cyan('Brief description (for /skills listing): '));
+        const skillArgHint = await safeQuestion(chalk.cyan('Argument hint (optional, e.g. "Describe what to do"): '));
+        const skillBody = await safeQuestion(chalk.cyan('Skill knowledge (or Enter for template): '));
         
-        const skillMd = skillDesc.trim() 
-          ? `# ${skillTitle.trim() || skillName}\n\n${skillDesc.trim()}\n`
-          : `# ${skillTitle.trim() || skillName}\n\nBest practices and knowledge for ${skillTitle.trim() || skillName}:\n- [Add your knowledge points here]\n- [Add patterns and conventions]\n- [Add common solutions]\n\nProject structure recommendations:\n- [Describe recommended structure]\n`;
+        const descLine = skillDesc.trim() || skillTitle.trim() || skillName;
+        const argHintLine = skillArgHint.trim() ? `\nargument-hint: "${skillArgHint.trim()}"` : '';
+        
+        const skillMd = skillBody.trim() 
+          ? `---\nname: ${skillTitle.trim() || skillName}\ndescription: "${descLine}"${argHintLine}\n---\n\n# ${skillTitle.trim() || skillName}\n\n${skillBody.trim()}\n`
+          : `---\nname: ${skillTitle.trim() || skillName}\ndescription: "${descLine}"${argHintLine}\n---\n\n# ${skillTitle.trim() || skillName}\n\nBest practices and knowledge for ${skillTitle.trim() || skillName}:\n- [Add your knowledge points here]\n- [Add patterns and conventions]\n- [Add common solutions]\n\n## Commands Reference\n| User says | Action |\n|-----------|--------|\n| "example command" | What the AI should do |\n\n## Procedures\n- [Add step-by-step procedures here]\n`;
         
         fs.writeFileSync(skillFile, skillMd);
         console.log(chalk.green(`\n✅ Skill "${skillName}" created!`));
@@ -1947,6 +2907,7 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
             
             // Switch to this agent
             currentAgent = cmdPart;
+            currentAgentTools = agent.tools; // null = all tools, or ['READ','WRITE',...]
             
             // Rebuild system prompt with agent + any loaded skills
             const skillContents = loadedSkills.map(s => {
@@ -1957,7 +2918,8 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
             
             console.log();
             console.log(statusBadge(`AGENT: ${agent.description}`, 'action'));
-            console.log(chalk.green(`Switched to /${cmdPart} agent`));
+            const toolsInfo = agent.tools ? chalk.gray(` [tools: ${agent.tools.join(', ')}]`) : chalk.gray(' [all tools]');
+            console.log(chalk.green(`Switched to /${cmdPart} agent`) + toolsInfo);
             
             if (!prompt) {
               console.log(chalk.gray(`Type your prompt to chat with this agent.`));
@@ -2161,25 +3123,50 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
       }
       
       messages.push({ role: 'user', content: processedInput });
+
+      // Log user input
+      logEntry('user', {
+        message: processedInput,
+        attachments: fileAttachments.map(f => f.path)
+      });
+
       } // End of else block for non-@ input
       } // End of if (!agentHandled)
 
       let toolRounds = 0; // Prevent infinite loops
       const MAX_TOOL_ROUNDS = 20;
-      let unclosedRetries = 0; // Prevent infinite unclosed tool retry loops
-      const MAX_UNCLOSED_RETRIES = 2;
+      const patchFailures = {}; // Track consecutive PATCH failures per file: { path: count }
+      const MAX_PATCH_RETRIES = 3;
       
       let active = true;
       while (active) {
         if (stepMode) await safeQuestion(chalk.gray('[STEP] Press Enter to let AI think...'));
         
         spinner.start('Thinking...');
+        const aiStartTime = Date.now();
         let response;
         try {
-          response = await ollama.chat({ model: selectedModel, messages, stream: true });
+          // Build chat options — pass native tools when supported
+          const chatOpts = { model: selectedModel, messages, stream: true };
+          if (useNativeTools) {
+            // Filter tool defs by agent restrictions if any
+            if (currentAgentTools) {
+              const toolNameMap = {
+                list_directory: 'LIST', read_file: 'READ', search_files: 'SEARCH',
+                write_file: 'WRITE', patch_file: 'PATCH', create_directory: 'MKDIR', run_shell: 'SHELL'
+              };
+              chatOpts.tools = nativeToolDefs.filter(t => 
+                currentAgentTools.includes(toolNameMap[t.function.name])
+              );
+            } else {
+              chatOpts.tools = nativeToolDefs;
+            }
+          }
+          response = await ollama.chat(chatOpts);
         } catch (ollamaError) {
           spinner.stop();
           console.error(chalk.red('\n❌ Ollama error:'), ollamaError.message);
+          logEntry('error', { message: `Ollama error: ${ollamaError.message}` });
           active = false;
           continue;
         }
@@ -2190,6 +3177,9 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
         let lastChunkTime = Date.now();
         let repetitionCount = 0;
         let lastContent = '';
+        let wasInterrupted = false;
+        let wasRepetitionStopped = false;
+        let nativeToolCalls = []; // Collect native tool_calls from streaming chunks
         abortStream = false; // Reset abort flag before streaming
         
         console.log(chalk.magenta('┌─[') + chalk.white.bold('Sapper') + chalk.magenta(']'));
@@ -2198,12 +3188,20 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
           // Check if user pressed Ctrl+C
           if (abortStream) {
             console.log(chalk.yellow('\n│ [Response interrupted]'));
+            wasInterrupted = true;
             break;
           }
           
           const content = chunk.message.content;
-          process.stdout.write(content);
-          msg += content;
+          if (content) {
+            process.stdout.write(content);
+            msg += content;
+          }
+          
+          // Collect native tool_calls (arrive in chunks, usually the final one)
+          if (chunk.message.tool_calls && chunk.message.tool_calls.length > 0) {
+            nativeToolCalls.push(...chunk.message.tool_calls);
+          }
           
           // Smart loop detection: check for repetitive content patterns
           if (msg.length > 10000) {
@@ -2215,6 +3213,7 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
               repetitionCount++;
               if (repetitionCount > 3) {
                 console.log(chalk.red('\n\n⚠️ REPETITIVE OUTPUT DETECTED: Stopping to prevent loop.'));
+                wasRepetitionStopped = true;
                 break;
               }
             } else {
@@ -2229,31 +3228,157 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
           }
         }
         console.log(chalk.magenta('└─────────────────────────────────────'));
-        
-        messages.push({ role: 'assistant', content: msg });
 
+        // Render AI response with markdown (only for non-tool responses displayed to user)
+        const hasTextToolCalls = msg.includes('[TOOL:') && msg.includes('[/TOOL]');
+        const hasNativeToolCalls = nativeToolCalls.length > 0;
+        if (!hasTextToolCalls && !hasNativeToolCalls && msg.trim().length > 0) {
+          try {
+            const rendered = renderMarkdown(msg);
+            // Clear raw output and re-render with markdown
+            process.stdout.write('\x1B[2K'); // clear current line
+            console.log(chalk.magenta('┌─[') + chalk.white.bold('Sapper') + chalk.magenta('] ') + chalk.gray('(rendered)'));
+            console.log(rendered);
+            console.log(chalk.magenta('└─────────────────────────────────────'));
+          } catch (e) {
+            // Markdown rendering failed, raw output already shown
+          }
+        }
+
+        const aiDuration = Date.now() - aiStartTime;
+        // Build assistant message — include tool_calls if native tools were invoked
+        const assistantMsg = { role: 'assistant', content: msg };
+        if (nativeToolCalls.length > 0) {
+          assistantMsg.tool_calls = nativeToolCalls;
+        }
+        messages.push(assistantMsg);
+
+        // Log AI response
+        logEntry('ai', {
+          charCount: msg.length,
+          duration: aiDuration,
+          toolCount: nativeToolCalls.length || 0, // Updated below if text-marker tools found
+          interrupted: wasInterrupted,
+          repetitionStopped: wasRepetitionStopped,
+          preview: msg.replace(/\[TOOL:[^\]]*\][\s\S]*?\[\/TOOL\]/g, '[tool call]')
+        });
+
+        // ═══ NATIVE TOOL CALLS HANDLER ═══════════════════════════════════
+        if (nativeToolCalls.length > 0) {
+          toolRounds++;
+          let hitToolLimit = false;
+          if (toolRounds >= MAX_TOOL_ROUNDS) {
+            console.log(chalk.yellow(`\n⚠️  Tool limit reached (${MAX_TOOL_ROUNDS} rounds). Processing remaining tools then stopping.`));
+            hitToolLimit = true;
+          }
+
+          // Map native function names to tool executors
+          const nativeToolNameMap = {
+            list_directory: 'LIST', read_file: 'READ', search_files: 'SEARCH',
+            write_file: 'WRITE', patch_file: 'PATCH', create_directory: 'MKDIR', run_shell: 'SHELL'
+          };
+
+          for (const tc of nativeToolCalls) {
+            const fn = tc.function;
+            const toolType = nativeToolNameMap[fn.name] || fn.name.toUpperCase();
+            const args = fn.arguments || {};
+
+            // Enforce agent tool restrictions
+            if (currentAgentTools && !currentAgentTools.includes(toolType)) {
+              console.log(chalk.yellow(`\n⚠️  Tool ${toolType} blocked — not in agent's allowed tools`));
+              messages.push({ role: 'tool', content: `Error: Tool ${toolType} is not allowed for the current agent.`, tool_name: fn.name });
+              continue;
+            }
+
+            const displayPath = args.path || args.pattern || args.command || '';
+            console.log();
+            console.log(statusBadge(toolType, 'action') + chalk.gray(' → ') + chalk.white(displayPath));
+
+            const toolStart = Date.now();
+            let result;
+            let toolSuccess = true;
+
+            try {
+              switch (fn.name) {
+                case 'list_directory':
+                  result = tools.list(args.path);
+                  logEntry('file', { action: 'list', path: args.path });
+                  break;
+                case 'read_file':
+                  result = tools.read(args.path);
+                  logEntry('file', { action: 'read', path: args.path, size: result?.length || 0 });
+                  break;
+                case 'search_files':
+                  result = await tools.search(args.pattern);
+                  logEntry('tool', { toolType: 'SEARCH', path: args.pattern, duration: Date.now() - toolStart, success: true, resultSize: result?.length });
+                  break;
+                case 'write_file':
+                  result = await tools.write(args.path, args.content);
+                  logEntry('file', { action: 'write', path: args.path, size: args.content?.length || 0, userApproved: result.includes('Successfully') });
+                  break;
+                case 'patch_file': {
+                  const patchKey = args.path?.trim();
+                  if (patchFailures[patchKey] >= MAX_PATCH_RETRIES) {
+                    result = `Error: PATCH failed ${MAX_PATCH_RETRIES} times on ${patchKey}. Use read_file to see exact content, then try write_file instead.`;
+                    toolSuccess = false;
+                  } else {
+                    result = await tools.patch(args.path, args.old_text, args.new_text);
+                    if (result.includes('Successfully')) {
+                      patchFailures[patchKey] = 0;
+                    } else if (result.startsWith('Error:')) {
+                      patchFailures[patchKey] = (patchFailures[patchKey] || 0) + 1;
+                      result += `\n(Attempt ${patchFailures[patchKey]}/${MAX_PATCH_RETRIES})`;
+                    }
+                  }
+                  logEntry('file', { action: 'patch', path: args.path, userApproved: result.includes('Successfully') });
+                  break;
+                }
+                case 'create_directory':
+                  result = tools.mkdir(args.path);
+                  logEntry('file', { action: 'mkdir', path: args.path });
+                  break;
+                case 'run_shell':
+                  result = await tools.shell(args.command);
+                  logEntry('shell', { command: args.command, duration: Date.now() - toolStart, userApproved: !result.includes('blocked'), exitCode: result.match(/code (\d+)/)?.[1] ?? null });
+                  break;
+                default:
+                  result = `Unknown tool: ${fn.name}`;
+                  toolSuccess = false;
+              }
+            } catch (toolError) {
+              result = `Error executing ${fn.name}: ${toolError.message}`;
+              toolSuccess = false;
+              logEntry('error', { message: result });
+            }
+
+            // Feed result back as tool role message (Ollama native format)
+            messages.push({ role: 'tool', content: String(result), tool_name: fn.name });
+          }
+
+          // Save context
+          ensureSapperDir();
+          fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
+
+          if (hitToolLimit) {
+            resetTerminal();
+            messages.push({ role: 'user', content: 'STOP using tools now. Provide your analysis based on what you have.' });
+          }
+          continue; // Loop back for AI to process tool results
+        }
+
+        // ═══ TEXT-MARKER TOOL PARSING (fallback for models without native tool support) ═══
         // Strip markdown code blocks before tool parsing to avoid executing tool examples
-        const msgForToolParsing = msg.replace(/```[\s\S]*?```/g, '');
+        let msgForToolParsing = msg.replace(/```[\s\S]*?```/g, '');
+
+        // Check for unclosed tool calls and auto-close them instead of burning AI rounds
+        const hasUnclosedTool = msgForToolParsing.includes('[TOOL:') && !msgForToolParsing.includes('[/TOOL]');
+        if (hasUnclosedTool) {
+          console.log(chalk.yellow('\n⚠️  Unclosed tool detected — auto-closing with [/TOOL]'));
+          msgForToolParsing += '[/TOOL]';
+        }
 
         // Regex: supports both old format (path]content) and new format (path:::content)
         const toolMatches = [...msgForToolParsing.matchAll(/\[TOOL:(\w+)\]([^:\]]*?)(?:(?:::|\])([\s\S]*?))?\[\/TOOL\]/g)];
-        
-        // Check for unclosed tool calls (AI started a tool but didn't close it)
-        const hasUnclosedTool = msgForToolParsing.includes('[TOOL:') && !msgForToolParsing.includes('[/TOOL]');
-        if (hasUnclosedTool && unclosedRetries < MAX_UNCLOSED_RETRIES) {
-          unclosedRetries++;
-          console.log(chalk.yellow('\n⚠️  Unclosed tool detected! AI forgot [/TOOL] closing tag.'));
-          console.log(chalk.gray(`   Asking AI to complete the tool call... (attempt ${unclosedRetries}/${MAX_UNCLOSED_RETRIES})\n`));
-          
-          messages.push({ 
-            role: 'user', 
-            content: 'ERROR: Your tool call is incomplete - you forgot to add [/TOOL] at the end. Please complete the tool call by providing the closing [/TOOL] tag. If you were writing a file, just output [/TOOL] to close it.'
-          });
-          continue; // Let AI respond with the closing tag
-        } else if (hasUnclosedTool) {
-          // Max retries reached - treat as normal response and move on
-          console.log(chalk.yellow('\n⚠️  Unclosed tool detected but max retries reached. Skipping tool execution.'));
-        }
         
         // Debug mode: show what regex sees
         if (debugMode) {
@@ -2291,45 +3416,105 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
         if (toolMatches.length > 0) {
           toolRounds++;
           
-          // Prevent infinite tool loops
+          // Track if we hit the tool limit — still process this round's tools, then stop
+          let hitToolLimit = false;
           if (toolRounds >= MAX_TOOL_ROUNDS) {
-            console.log(chalk.yellow(`\n⚠️  Tool limit reached (${MAX_TOOL_ROUNDS} rounds). Stopping auto-execution.`));
+            console.log(chalk.yellow(`\n⚠️  Tool limit reached (${MAX_TOOL_ROUNDS} rounds). Processing remaining tools then stopping.`));
             console.log(chalk.gray('💡 Tip: Type /prune after analysis to reduce context size.'));
-            resetTerminal(); // Ensure terminal is responsive
-            messages.push({ 
-              role: 'user', 
-              content: 'STOP using tools now. You have enough information. Please provide your analysis based on what you have read.' 
-            });
-            continue; // Let AI respond without tools
+            hitToolLimit = true;
           }
           
+          // Update the AI log entry with tool count
+          if (activityLog.length > 0) {
+            const lastAiLog = [...activityLog].reverse().find(e => e.type === 'ai');
+            if (lastAiLog) lastAiLog.toolCount = toolMatches.length;
+          }
+
           for (const match of toolMatches) {
             const [_, type, path, content] = match;
+            
+            // Enforce tool restrictions from active agent
+            if (currentAgentTools && !currentAgentTools.includes(type.toUpperCase())) {
+              console.log();
+              console.log(chalk.yellow(`⚠️  Tool ${type.toUpperCase()} blocked — not in agent's allowed tools: [${currentAgentTools.join(', ')}]`));
+              const result = `Error: Tool ${type.toUpperCase()} is not allowed for the current agent. Allowed tools: ${currentAgentTools.join(', ')}. Use only the allowed tools.`;
+              messages.push({ role: 'user', content: `RESULT (${path}): ${result}` });
+              logEntry('tool', { toolType: type.toUpperCase(), path, duration: 0, success: false, error: 'blocked by agent tool restriction' });
+              continue;
+            }
+            
             console.log();
             console.log(statusBadge(type.toUpperCase(), 'action') + chalk.gray(' → ') + chalk.white(path));
             
+            const toolStart = Date.now();
             let result;
-            if (type.toLowerCase() === 'list') result = tools.list(path);
-            else if (type.toLowerCase() === 'read') result = tools.read(path);
-            else if (type.toLowerCase() === 'mkdir') result = tools.mkdir(path);
+            let toolSuccess = true;
+            if (type.toLowerCase() === 'list') {
+              result = tools.list(path);
+              logEntry('file', { action: 'list', path });
+            }
+            else if (type.toLowerCase() === 'read') {
+              result = tools.read(path);
+              logEntry('file', { action: 'read', path, size: result?.length || 0 });
+            }
+            else if (type.toLowerCase() === 'mkdir') {
+              result = tools.mkdir(path);
+              logEntry('file', { action: 'mkdir', path });
+            }
             else if (type.toLowerCase() === 'write') {
               if (!content || content.trim() === '') {
                 result = 'Error: WRITE requires content. Use [TOOL:WRITE]path]content here[/TOOL]';
+                toolSuccess = false;
               } else {
                 result = await tools.write(path, content);
+                const approved = result.includes('Successfully');
+                logEntry('file', { action: 'write', path, size: content.length, userApproved: approved });
               }
             }
             else if (type.toLowerCase() === 'patch') {
-              // PATCH format: [TOOL:PATCH]path]OLD_TEXT|||NEW_TEXT[/TOOL]
-              const parts = content?.split('|||');
-              if (parts && parts.length === 2) {
-                result = await tools.patch(path, parts[0], parts[1]);
+              // PATCH format: [TOOL:PATCH]path:::OLD_TEXT|||NEW_TEXT[/TOOL]
+              // Also supports line mode: [TOOL:PATCH]path:::LINE:15|||new text[/TOOL]
+              const patchKey = path.trim();
+              if (patchFailures[patchKey] >= MAX_PATCH_RETRIES) {
+                result = `Error: PATCH failed ${MAX_PATCH_RETRIES} times on ${patchKey}. STOP retrying PATCH on this file. Instead, use [TOOL:READ]${patchKey}[/TOOL] to see exact content, then either use LINE:number mode (e.g. [TOOL:PATCH]${patchKey}:::LINE:42|||new text[/TOOL]) or use [TOOL:WRITE] to rewrite the file.`;
+                toolSuccess = false;
+                logEntry('file', { action: 'patch', path, userApproved: false });
               } else {
-                result = 'Error: PATCH requires format [TOOL:PATCH]path]OLD_TEXT|||NEW_TEXT[/TOOL]';
+                // Accept ||| as primary separator, ||: as fallback (small models sometimes mistype)
+                let parts = content?.split('|||');
+                if (!parts || parts.length !== 2) {
+                  parts = content?.split('||:');
+                }
+                if (parts && parts.length === 2) {
+                  result = await tools.patch(path, parts[0], parts[1]);
+                  const approved = result.includes('Successfully');
+                  if (!approved && result.startsWith('Error:')) {
+                    patchFailures[patchKey] = (patchFailures[patchKey] || 0) + 1;
+                    result += `\n(Attempt ${patchFailures[patchKey]}/${MAX_PATCH_RETRIES} — after ${MAX_PATCH_RETRIES} failures, PATCH will be blocked on this file)`;
+                  } else if (approved) {
+                    patchFailures[patchKey] = 0; // Reset on success
+                  }
+                  logEntry('file', { action: 'patch', path, userApproved: approved });
+                } else {
+                  result = 'Error: PATCH requires format [TOOL:PATCH]path:::OLD_TEXT|||NEW_TEXT[/TOOL] or [TOOL:PATCH]path:::LINE:number|||NEW_TEXT[/TOOL]';
+                  toolSuccess = false;
+                }
               }
             }
-            else if (type.toLowerCase() === 'search') result = await tools.search(path);
-            else if (type.toLowerCase() === 'shell') result = await tools.shell(path);
+            else if (type.toLowerCase() === 'search') {
+              result = await tools.search(path);
+              logEntry('tool', { toolType: 'SEARCH', path, duration: Date.now() - toolStart, success: true, resultSize: result?.length });
+            }
+            else if (type.toLowerCase() === 'shell') {
+              result = await tools.shell(path);
+              const approved = !result.includes('blocked');
+              logEntry('shell', { command: path, duration: Date.now() - toolStart, userApproved: approved, exitCode: result.match(/code (\d+)/)?.[1] ?? null });
+            }
+
+            // Log tool execution (for non-shell, non-file specific ones)
+            if (!['list', 'read', 'mkdir', 'write', 'patch', 'search', 'shell'].includes(type.toLowerCase())) {
+              logEntry('tool', { toolType: type.toUpperCase(), path, duration: Date.now() - toolStart, success: toolSuccess, resultSize: result?.length, error: toolSuccess ? undefined : result });
+            }
 
             messages.push({ role: 'user', content: `RESULT (${path}): ${result}` });
           }
@@ -2338,6 +3523,15 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
           
           if (toolMatches.length > 30) {
             console.log(chalk.yellow('\n⚠️  Reading 30+ files! This might take time.'));
+          }
+          
+          // If tool limit was reached, stop after processing this round
+          if (hitToolLimit) {
+            resetTerminal();
+            messages.push({ 
+              role: 'user', 
+              content: 'STOP using tools now. You have enough information. Please provide your analysis based on what you have read.' 
+            });
           }
         } else {
           // No tools found - check if malformed command
@@ -2360,6 +3554,7 @@ CRITICAL: NEVER show [TOOL:...] syntax in your responses to the user. Tools are 
       }
     } catch (error) {
       console.error(chalk.red('\n❌ Error:'), error.message);
+      logEntry('error', { message: error.message });
       // Loop continues automatically
     }
   }

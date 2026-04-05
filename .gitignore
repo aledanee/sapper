@@ -7,6 +7,10 @@ node_modules/
 
 # Session files
 .sapper_context.json
+.sapper/
+
+# Symlinks
+bin/
 
 # Logs
 *.log
