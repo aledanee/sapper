@@ -88,6 +88,56 @@ function loadSkills() {
 
 const IGNORE_DIRS = new Set(['node_modules', '.git', '.sapper', '__pycache__', '.next', 'dist', 'build', '.cache']);
 
+// ─── .sapperignore Support ─────────────────────────────────
+const SAPPERIGNORE_FILE = '.sapperignore';
+
+function loadSapperIgnorePatterns() {
+  const patterns = [];
+  try {
+    const ignorePath = join(workingDir, SAPPERIGNORE_FILE);
+    if (fs.existsSync(ignorePath)) {
+      const lines = fs.readFileSync(ignorePath, 'utf8').split('\n');
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#')) continue;
+        const negate = line.startsWith('!');
+        const pattern = negate ? line.slice(1) : line;
+        patterns.push({ pattern, negate });
+      }
+    }
+  } catch (e) {}
+  return patterns;
+}
+
+let _sapperIgnorePatterns = null;
+function getSapperIgnorePatterns() {
+  if (_sapperIgnorePatterns === null) _sapperIgnorePatterns = loadSapperIgnorePatterns();
+  return _sapperIgnorePatterns;
+}
+
+function ignorePatternToRegex(pattern) {
+  let p = pattern.replace(/\/+$/, '');
+  p = p.replace(/([.+^${}()|[\]\\])/g, '\\$1');
+  p = p.replace(/\*\*/g, '<<<GLOBSTAR>>>');
+  p = p.replace(/\*/g, '[^/]*');
+  p = p.replace(/<<<GLOBSTAR>>>/g, '.*');
+  p = p.replace(/\?/g, '[^/]');
+  return new RegExp(`(^|/)${p}($|/)`, 'i');
+}
+
+function shouldIgnore(nameOrPath) {
+  const baseName = nameOrPath.includes('/') ? nameOrPath.split('/').pop() : nameOrPath;
+  if (IGNORE_DIRS.has(baseName)) return true;
+  const patterns = getSapperIgnorePatterns();
+  if (patterns.length === 0) return false;
+  let ignored = false;
+  for (const { pattern, negate } of patterns) {
+    const regex = ignorePatternToRegex(pattern);
+    if (regex.test(nameOrPath) || regex.test(baseName)) ignored = !negate;
+  }
+  return ignored;
+}
+
 function safePath(p) {
   const resolved = resolve(workingDir, p || '.');
   if (!resolved.startsWith(workingDir)) return null;
@@ -150,7 +200,7 @@ const tools = {
       let dir = resolve(workingDir, path.trim() || '.');
       if (dir === '/') dir = workingDir;
       const entries = fs.readdirSync(dir);
-      return entries.filter(e => !IGNORE_DIRS.has(e) && !e.startsWith('.')).join('\n') || '(empty)';
+      return entries.filter(e => !shouldIgnore(e) && !e.startsWith('.')).join('\n') || '(empty)';
     } catch (e) { return `Error: ${e.message}`; }
   },
   read: (path) => {
@@ -208,7 +258,11 @@ const tools = {
   },
   search: (pattern) => {
     return new Promise((res) => {
-      const excludes = [...IGNORE_DIRS].join(',');
+      const allIgnoreDirs = new Set(IGNORE_DIRS);
+      for (const { pattern: p, negate } of getSapperIgnorePatterns()) {
+        if (!negate && p.endsWith('/')) allIgnoreDirs.add(p.replace(/\/+$/, ''));
+      }
+      const excludes = [...allIgnoreDirs].join(',');
       const cmd = `grep -rEin "${pattern.replace(/"/g, '\\"')}" . --exclude-dir={${excludes}} --include="*.{js,ts,jsx,tsx,py,java,go,rs,rb,php,c,cpp,h,css,scss,html,json,md,txt,yml,yaml,toml,sh}" 2>/dev/null | head -50`;
       const proc = spawn('sh', ['-c', cmd], { cwd: workingDir });
       let out = '';
@@ -403,7 +457,7 @@ function getTreeEntries(dirPath) {
   try {
     const entries = fs.readdirSync(safe);
     return entries
-      .filter(e => !IGNORE_DIRS.has(e) && !e.startsWith('.'))
+      .filter(e => !shouldIgnore(e) && !e.startsWith('.'))
       .map(e => {
         try {
           const stat = fs.statSync(join(safe, e));

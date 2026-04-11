@@ -8,7 +8,7 @@ import readline from 'readline';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { marked } from 'marked';
-import TerminalRenderer from 'marked-terminal';
+import { markedTerminal } from 'marked-terminal';
 import * as acorn from 'acorn';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -26,7 +26,7 @@ process.on('unhandledRejection', (reason) => {
 let ctrlCCount = 0;
 process.on('SIGINT', () => {
   ctrlCCount++;
-  if (ctrlCCount >= 2) {
+  if (ctrlCCount >= 3) {
     console.log(chalk.red('\nForce quitting...'));
     process.exit(1);
   }
@@ -36,7 +36,11 @@ process.on('SIGINT', () => {
   // Clear current line and move to new one - stops ghost output
   process.stdout.clearLine(0);
   process.stdout.cursorTo(0);
-  console.log(chalk.yellow('\n⏹️  Stopping response... (Ctrl+C again to force quit)'));
+  if (ctrlCCount >= 2) {
+    console.log(chalk.yellow('\n⏹️  Press Ctrl+C once more to force quit'));
+  } else {
+    console.log(UI.slate('\n⏹️  Stopped'));
+  }
   
   // Reset terminal immediately
   resetTerminal();
@@ -76,6 +80,7 @@ const CONFIG_FILE = `${SAPPER_DIR}/config.json`;
 const AGENTS_DIR = `${SAPPER_DIR}/agents`;
 const SKILLS_DIR = `${SAPPER_DIR}/skills`;
 const LOGS_DIR = `${SAPPER_DIR}/logs`;
+const SAPPERIGNORE_FILE = '.sapperignore';
 
 // ═══════════════════════════════════════════════════════════════
 // COMPREHENSIVE ACTIVITY LOGGER
@@ -298,6 +303,156 @@ function ensureSapperDir() {
   if (!fs.existsSync(SAPPER_DIR)) {
     fs.mkdirSync(SAPPER_DIR, { recursive: true });
   }
+}
+
+// Default .sapperignore template — created on first run
+const DEFAULT_SAPPERIGNORE = `# ═══════════════════════════════════════════════════════════════
+# .sapperignore — Files and folders Sapper should ignore
+# Works like .gitignore: one pattern per line, # for comments
+# Edit this file to customize what Sapper skips
+# ═══════════════════════════════════════════════════════════════
+
+# ── Sapper internal ──
+.sapper/
+
+# ── Dependencies ──
+node_modules/
+vendor/
+bower_components/
+
+# ── Build outputs ──
+dist/
+build/
+out/
+.next/
+.nuxt/
+.output/
+.vercel/
+.netlify/
+
+# ── Environment & secrets ──
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+
+# ── Version control ──
+.git/
+.svn/
+.hg/
+
+# ── IDE / Editor ──
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── OS files ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Caches ──
+.cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# ── Coverage & tests ──
+coverage/
+.nyc_output/
+htmlcov/
+
+# ── Logs ──
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Lock files (large) ──
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+composer.lock
+Gemfile.lock
+Cargo.lock
+
+# ── Compiled / binary / large ──
+*.min.js
+*.min.css
+*.map
+*.bundle.js
+*.chunk.js
+*.wasm
+*.so
+*.dylib
+*.dll
+*.exe
+*.o
+*.a
+*.class
+*.jar
+*.war
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+*.iso
+*.dmg
+
+# ── Media (large files) ──
+*.mp4
+*.mp3
+*.avi
+*.mov
+*.mkv
+*.wav
+*.flac
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.ico
+*.svg
+*.webp
+*.ttf
+*.woff
+*.woff2
+*.eot
+*.otf
+*.pdf
+
+# ── Database ──
+*.sqlite
+*.sqlite3
+*.db
+
+# ── Terraform / IaC ──
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# ── Docker ──
+*.tar
+
+# ── Gradle / Maven ──
+.gradle/
+target/
+`;
+
+// Create .sapperignore if it doesn't exist (runs on startup)
+function ensureSapperIgnore() {
+  if (!fs.existsSync(SAPPERIGNORE_FILE)) {
+    fs.writeFileSync(SAPPERIGNORE_FILE, DEFAULT_SAPPERIGNORE);
+    return true; // newly created
+  }
+  return false;
 }
 
 // Ensure agents and skills directories exist
@@ -755,7 +910,7 @@ function loadConfig() {
       return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
     }
   } catch (e) {}
-  return { autoAttach: true }; // Default: auto-attach related files is ON
+  return { autoAttach: true, contextLimit: null }; // Default: auto-attach ON, no custom context limit
 }
 
 function saveConfig(config) {
@@ -765,6 +920,14 @@ function saveConfig(config) {
 
 // Global config
 let sapperConfig = loadConfig();
+
+// Effective context length — user limit overrides model's reported size
+function effectiveContextLength() {
+  if (sapperConfig.contextLimit && sapperConfig.contextLimit > 0) {
+    return sapperConfig.contextLimit;
+  }
+  return modelContextLength;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // WORKSPACE GRAPH - Track file relationships and summaries
@@ -876,9 +1039,10 @@ async function buildWorkspaceGraph(showProgress = true) {
         const fullPath = dir === '.' ? entry.name : `${dir}/${entry.name}`;
         
         if (entry.isDirectory()) {
-          if (IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+          if (shouldIgnore(entry.name) || entry.name.startsWith('.')) continue;
           scanDir(fullPath, depth + 1);
         } else {
+          if (shouldIgnore(fullPath) || shouldIgnore(entry.name)) continue;
           const ext = entry.name.includes('.') ? '.' + entry.name.split('.').pop() : '';
           if (!CODE_EXTENSIONS.has(ext.toLowerCase())) continue;
           
@@ -1298,15 +1462,30 @@ async function addToEmbeddings(text, embeddings) {
 // SMART CONTEXT SUMMARIZATION
 // ═══════════════════════════════════════════════════════════════
 
-async function autoSummarizeContext(messages, model) {
+async function autoSummarizeContext(messages, model, force = false) {
+  // Use real token-based threshold if we know the model's context length
+  const estimatedTokens = estimateMessagesTokens(messages);
   const contextSize = JSON.stringify(messages).length;
-  if (contextSize <= 32000 || messages.length <= 5) return messages;
+  
+  // Summarize when we hit 75% of effective context window (leave room for response)
+  const ctxLen = effectiveContextLength();
+  const tokenThreshold = ctxLen ? Math.floor(ctxLen * 0.75) : 8000;
+  // Also keep the old byte-based check as a fallback
+  const shouldSummarize = (ctxLen && estimatedTokens > tokenThreshold) || 
+                          (!ctxLen && contextSize > 32000);
+  
+  if ((!force && !shouldSummarize) || messages.length <= 5) return messages;
+
+  const usagePercent = ctxLen 
+    ? Math.round((estimatedTokens / ctxLen) * 100)
+    : Math.round((contextSize / 32000) * 100);
 
   console.log();
   console.log(box(
-    `Context is ${chalk.red.bold(Math.round(contextSize / 1024) + 'KB')} (${messages.length} messages)\n` +
-    `${chalk.cyan('Auto-summarizing via AI to keep things fast...')}`,
-    '🧠 Smart Summary', 'cyan'
+    `Context: ~${chalk.red.bold(estimatedTokens.toLocaleString())} tokens / ${chalk.white(ctxLen ? ctxLen.toLocaleString() : '?')} max (${chalk.red.bold(usagePercent + '%')})\n` +
+    `${chalk.gray(`${messages.length} messages, ${Math.round(contextSize / 1024)}KB raw`)}\n` +
+    `${chalk.cyan('Auto-summarizing to stay within context window...')}`,
+    '🧠 Context Window Management', 'cyan'
   ));
 
   const summarySpinner = ora('Summarizing conversation...').start();
@@ -1366,6 +1545,7 @@ async function autoSummarizeContext(messages, model) {
   try {
     const summaryResponse = await ollama.chat({
       model,
+      ...(effectiveContextLength() ? { options: { num_ctx: effectiveContextLength() } } : {}),
       messages: [
         {
           role: 'system',
@@ -1444,14 +1624,19 @@ Output ONLY the summary, no preamble. Keep it under 800 words. Use bullet points
     fs.writeFileSync(CONTEXT_FILE, JSON.stringify(newMessages, null, 2));
 
     const newSize = JSON.stringify(newMessages).length;
+    const newTokens = estimateMessagesTokens(newMessages);
     summarySpinner.stop();
-    console.log(chalk.green(`✅ Summarized! ${chalk.gray(`${Math.round(contextSize / 1024)}KB → ${Math.round(newSize / 1024)}KB`)} (${messages.length} → ${newMessages.length} messages)`));
+    console.log(chalk.green(`✅ Summarized! ~${chalk.white(estimatedTokens.toLocaleString())} → ~${chalk.white(newTokens.toLocaleString())} tokens (${messages.length} → ${newMessages.length} messages)`));
+    if (ctxLen) {
+      const newPercent = Math.round((newTokens / ctxLen) * 100);
+      console.log(chalk.gray(`   📊 Context window usage: ${newPercent}% of ${ctxLen.toLocaleString()} tokens`));
+    }
     if (embeddings.chunks.length > 0) {
       console.log(chalk.gray(`   🧠 Old context saved to memory (${embeddings.chunks.length} memories)`));
     }
     logEntry('summary', {
-      before: `${Math.round(contextSize / 1024)}KB / ${messages.length} msgs`,
-      after: `${Math.round(newSize / 1024)}KB / ${newMessages.length} msgs`
+      before: `~${estimatedTokens.toLocaleString()} tokens / ${messages.length} msgs`,
+      after: `~${newTokens.toLocaleString()} tokens / ${newMessages.length} msgs`
     });
     console.log();
 
@@ -1468,64 +1653,182 @@ Output ONLY the summary, no preamble. Keep it under 800 words. Use bullet points
 // FANCY UI HELPERS
 // ═══════════════════════════════════════════════════════════════
 
-const BANNER = `
-${chalk.cyan('  ███████╗ █████╗ ██████╗ ██████╗ ███████╗██████╗ ')}
-${chalk.cyan('  ██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔════╝██╔══██╗')}
-${chalk.cyan('  ███████╗███████║██████╔╝██████╔╝█████╗  ██████╔╝')}
-${chalk.cyan('  ╚════██║██╔══██║██╔═══╝ ██╔═══╝ ██╔══╝  ██╔══██╗')}
-${chalk.cyan('  ███████║██║  ██║██║     ██║     ███████╗██║  ██║')}
-${chalk.cyan('  ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝     ╚══════╝╚═╝  ╚═╝')}
-`;
+const UI = {
+  accent: chalk.hex('#7cc4ff'),
+  accentSoft: chalk.hex('#b8d9ff'),
+  mint: chalk.hex('#9ad7b3'),
+  gold: chalk.hex('#d8bc7a'),
+  coral: chalk.hex('#de9d8f'),
+  slate: chalk.hex('#8a95a6'),
+  ink: chalk.hex('#e6ebf2'),
+};
 
-function box(content, title = '', color = 'cyan') {
-  const lines = content.split('\n');
-  const maxLen = Math.max(...lines.map(l => l.length), title.length + 4);
-  const colorFn = chalk[color] || chalk.cyan;
-  
-  let result = colorFn('╭' + (title ? `─ ${title} ` : '') + '─'.repeat(maxLen - title.length - (title ? 3 : 0)) + '╮') + '\n';
-  for (const line of lines) {
-    result += colorFn('│') + ' ' + line.padEnd(maxLen) + ' ' + colorFn('│') + '\n';
-  }
-  result += colorFn('╰' + '─'.repeat(maxLen + 2) + '╯');
-  return result;
+const BOX_TONES = {
+  cyan: UI.accent,
+  green: UI.mint,
+  yellow: UI.gold,
+  red: UI.coral,
+  magenta: chalk.hex('#b7b9ff'),
+  gray: UI.slate,
+  blue: chalk.hex('#8fb6ff'),
+};
+
+const BADGE_STYLES = {
+  info: UI.accent,
+  success: UI.mint,
+  warning: UI.gold,
+  error: UI.coral,
+  action: chalk.hex('#9bbcff'),
+  neutral: UI.slate,
+};
+
+const ANSI_PATTERN = /\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001B\\))/g;
+
+function stripAnsi(value = '') {
+  return String(value).replace(ANSI_PATTERN, '');
 }
 
-function divider(char = '─', color = 'gray') {
-  const width = process.stdout.columns || 60;
-  return chalk[color](char.repeat(Math.min(width, 60)));
+function visibleLength(value = '') {
+  return stripAnsi(value).length;
+}
+
+function terminalWidth(max = 98) {
+  return Math.max(48, Math.min(max, process.stdout.columns || 88));
+}
+
+function toneColor(tone = 'cyan') {
+  return BOX_TONES[tone] || chalk.cyan;
+}
+
+function padAnsi(value = '', width = 0) {
+  return `${value}${' '.repeat(Math.max(0, width - visibleLength(value)))}`;
+}
+
+function formatBytes(bytes = 0) {
+  if (!bytes || bytes < 1024) return `${bytes || 0} B`;
+
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let size = bytes / 1024;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex++;
+  }
+
+  const precision = size >= 100 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(precision)} ${units[unitIndex]}`;
+}
+
+function formatRelativeTime(value) {
+  if (!value) return 'unknown';
+
+  const delta = Math.max(0, Date.now() - new Date(value).getTime());
+  const units = [
+    ['d', 24 * 60 * 60 * 1000],
+    ['h', 60 * 60 * 1000],
+    ['m', 60 * 1000],
+  ];
+
+  for (const [label, size] of units) {
+    const amount = Math.floor(delta / size);
+    if (amount >= 1) return `${amount}${label} ago`;
+  }
+
+  return 'just now';
+}
+
+const BANNER = [
+  `${chalk.hex('#c8ecff').bold('Sapper')} ${UI.slate('terminal workspace')}`,
+  UI.slate('Local models, live tools, and focused coding in one loop')
+].join('\n');
+
+function box(content, title = '', tone = 'cyan', options = {}) {
+  const width = Math.max(28, Math.min(options.width || terminalWidth(72), terminalWidth(72)));
+  const header = title ? `${toneColor(tone).bold(title)}\n${divider('─', tone, width)}\n` : '';
+  return `${header}${String(content ?? '')}\n${divider('─', tone, width)}`;
+}
+
+function divider(char = '─', tone = 'gray', width = terminalWidth(70)) {
+  return toneColor(tone)(char.repeat(Math.max(12, width)));
+}
+
+function sectionTitle(title, subtitle = '', tone = 'cyan') {
+  return `${toneColor(tone).bold(title)}${subtitle ? ` ${UI.slate(subtitle)}` : ''}`;
 }
 
 function statusBadge(text, type = 'info') {
-  const badges = {
-    info: chalk.bgCyan.black(` ${text} `),
-    success: chalk.bgGreen.black(` ${text} `),
-    warning: chalk.bgYellow.black(` ${text} `),
-    error: chalk.bgRed.white(` ${text} `),
-    action: chalk.bgMagenta.white(` ${text} `)
+  const badge = BADGE_STYLES[type] || BADGE_STYLES.info;
+  return badge(`[${text}]`);
+}
+
+function keyValue(label, value, width = 12) {
+  return `${padAnsi(UI.slate(label), width)} ${value}`;
+}
+
+function commandRow(command, description, width = 18) {
+  return `${padAnsi(UI.accent(command), width)} ${UI.slate('—')} ${UI.ink(description)}`;
+}
+
+function meter(current = 0, total = 0, width = 20) {
+  if (!total || total <= 0) return UI.slate('░'.repeat(width));
+
+  const ratio = Math.max(0, Math.min(1, current / total));
+  const filled = Math.round(ratio * width);
+  const colorFn = ratio >= 0.85 ? toneColor('red') : ratio >= 0.65 ? toneColor('yellow') : toneColor('green');
+  return `${colorFn('█'.repeat(filled))}${UI.slate('░'.repeat(Math.max(0, width - filled)))}`;
+}
+
+function ellipsis(text = '', max = 48) {
+  const plain = String(text);
+  if (plain.length <= max) return plain;
+  return `${plain.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function promptShell(label, detail = '') {
+  return `${UI.slate(label)}${detail ? `\n${detail}` : ''}\n${UI.accent('› ')} `;
+}
+
+function confirmPrompt(label, type = 'warning') {
+  const colors = {
+    info: UI.accent,
+    success: UI.mint,
+    warning: UI.gold,
+    error: UI.coral,
+    action: chalk.hex('#8fb6ff'),
+    neutral: UI.slate,
   };
-  return badges[type] || badges.info;
+  const colorFn = colors[type] || UI.gold;
+  return colorFn(`\n${label}? `) + UI.slate('[y/N] ');
 }
 
 // Configure marked with terminal renderer
-marked.setOptions({
-  renderer: new TerminalRenderer({
+marked.use(markedTerminal({
     code: chalk.cyan,
     blockquote: chalk.gray.italic,
     html: chalk.gray,
     heading: chalk.bold.cyan,
     firstHeading: chalk.bold.cyan,
-    hr: chalk.gray('─'.repeat(40)),
-    listitem: chalk.yellow('• ') + '%s',
     table: chalk.white,
+    tableOptions: {
+      chars: {
+        top: '─', 'top-mid': '┬', 'top-left': '┌', 'top-right': '┐',
+        bottom: '─', 'bottom-mid': '┴', 'bottom-left': '└', 'bottom-right': '┘',
+        left: '│', 'left-mid': '├', mid: '─', 'mid-mid': '┼',
+        right: '│', 'right-mid': '┤', middle: '│'
+      },
+      style: { head: ['cyan', 'bold'], border: ['gray'] }
+    },
     paragraph: chalk.white,
     strong: chalk.bold.white,
     em: chalk.italic,
     codespan: chalk.cyan,
     del: chalk.strikethrough,
     link: chalk.underline.blue,
-    href: chalk.gray
-  })
-});
+    href: chalk.gray,
+    showSectionPrefix: true,
+    reflowText: true,
+    width: Math.min(process.stdout.columns || 80, 120)
+}));
 
 // Render markdown to terminal
 function renderMarkdown(text) {
@@ -1539,6 +1842,35 @@ function renderMarkdown(text) {
 let stepMode = false;
 let debugMode = false; // Toggle with /debug command
 let abortStream = false; // Flag to interrupt AI response
+
+// ═══════════════════════════════════════════════════════════════
+// REAL CONTEXT WINDOW TRACKING
+// ═══════════════════════════════════════════════════════════════
+let modelContextLength = null;  // Detected from ollama.show() model_info
+let lastPromptTokens = 0;      // prompt_eval_count from last response
+let lastEvalTokens = 0;        // eval_count from last response
+
+// Estimate token count from text (~4 chars per token for English, ~3 for code)
+// This is a rough heuristic - actual counts come from Ollama response stats
+function estimateTokens(text) {
+  if (!text) return 0;
+  // Count code blocks separately (denser tokens)
+  const codeBlocks = text.match(/```[\s\S]*?```/g) || [];
+  let codeChars = codeBlocks.reduce((sum, b) => sum + b.length, 0);
+  let textChars = text.length - codeChars;
+  return Math.ceil(textChars / 4 + codeChars / 3.5);
+}
+
+// Estimate total tokens for the messages array
+function estimateMessagesTokens(messages) {
+  let total = 0;
+  for (const m of messages) {
+    // Each message has ~4 tokens of overhead (role, formatting)
+    total += 4;
+    total += estimateTokens(m.content);
+  }
+  return total;
+}
 let rl = readline.createInterface({ 
   input: process.stdin, 
   output: process.stdout,
@@ -1589,6 +1921,157 @@ const CODE_EXTENSIONS = new Set([
 // Max file size to include (skip large files like bundled/minified)
 const MAX_FILE_SIZE = 100000; // 100KB per file
 const MAX_TOTAL_SCAN_SIZE = 1000000; // 1000KB total scan limit
+const MAX_URL_SIZE = 200000; // 200KB max for fetched web pages
+
+// ═══════════════════════════════════════════════════════════════
+// URL FETCHING — Read web pages and learn from them
+// ═══════════════════════════════════════════════════════════════
+import https from 'https';
+import http from 'http';
+
+// Fetch a URL and return extracted text content
+function fetchUrl(url, timeout = 15000) {
+  return new Promise((resolve, reject) => {
+    const lib = url.startsWith('https') ? https : http;
+    const req = lib.get(url, { 
+      headers: { 
+        'User-Agent': 'Sapper-AI/1.0',
+        'Accept': 'text/html,application/json,text/plain,*/*'
+      },
+      timeout 
+    }, (res) => {
+      // Follow redirects (up to 3)
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        const redirectUrl = res.headers.location.startsWith('http') 
+          ? res.headers.location 
+          : new URL(res.headers.location, url).href;
+        return fetchUrl(redirectUrl, timeout).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) {
+        return reject(new Error(`HTTP ${res.statusCode}`));
+      }
+      
+      let data = '';
+      let size = 0;
+      res.on('data', (chunk) => {
+        size += chunk.length;
+        if (size > MAX_URL_SIZE) {
+          res.destroy();
+          reject(new Error(`Page too large (>${Math.round(MAX_URL_SIZE/1024)}KB)`));
+          return;
+        }
+        data += chunk;
+      });
+      res.on('end', () => resolve(data));
+      res.on('error', reject);
+    });
+    req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out')); });
+    req.on('error', reject);
+  });
+}
+
+// Strip HTML tags and extract readable text
+function htmlToText(html) {
+  let text = html;
+  // Remove script and style blocks entirely
+  text = text.replace(/<script[\s\S]*?<\/script>/gi, '');
+  text = text.replace(/<style[\s\S]*?<\/style>/gi, '');
+  text = text.replace(/<nav[\s\S]*?<\/nav>/gi, '');
+  text = text.replace(/<footer[\s\S]*?<\/footer>/gi, '');
+  text = text.replace(/<header[\s\S]*?<\/header>/gi, ''); 
+  // Convert common block elements to newlines
+  text = text.replace(/<\/?(p|div|br|h[1-6]|li|tr|td|th|blockquote|pre|hr)[^>]*>/gi, '\n');
+  // Remove all other HTML tags
+  text = text.replace(/<[^>]+>/g, '');
+  // Decode common HTML entities
+  text = text.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(n));
+  // Clean up whitespace
+  text = text.replace(/[ \t]+/g, ' ');
+  text = text.replace(/\n\s*\n/g, '\n\n');
+  text = text.trim();
+  // Limit to reasonable size
+  if (text.length > 50000) {
+    text = text.substring(0, 50000) + '\n\n[... content truncated at 50KB ...]';
+  }
+  return text;
+}
+
+// Detect URLs in text
+const URL_REGEX = /https?:\/\/[^\s<>"')\]]+/g;
+
+// ═══════════════════════════════════════════════════════════════
+// .sapperignore SUPPORT — like .gitignore for Sapper
+// ═══════════════════════════════════════════════════════════════
+
+// Parse .sapperignore patterns (glob-like, one per line, # comments)
+function loadSapperIgnorePatterns() {
+  const patterns = [];
+  try {
+    if (fs.existsSync(SAPPERIGNORE_FILE)) {
+      const lines = fs.readFileSync(SAPPERIGNORE_FILE, 'utf8').split('\n');
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#')) continue;
+        // Track negation patterns (lines starting with !)
+        const negate = line.startsWith('!');
+        const pattern = negate ? line.slice(1) : line;
+        patterns.push({ pattern, negate });
+      }
+    }
+  } catch (e) {
+    // Silent fail — ignore file is optional
+  }
+  return patterns;
+}
+
+let _sapperIgnorePatterns = null;
+function getSapperIgnorePatterns() {
+  if (_sapperIgnorePatterns === null) {
+    _sapperIgnorePatterns = loadSapperIgnorePatterns();
+  }
+  return _sapperIgnorePatterns;
+}
+
+// Reload patterns (call when .sapperignore changes)
+function reloadSapperIgnore() {
+  _sapperIgnorePatterns = null;
+}
+
+// Convert a .sapperignore glob pattern to a regex
+function ignorePatternToRegex(pattern) {
+  // Remove trailing slashes (directory markers)
+  let p = pattern.replace(/\/+$/, '');
+  // Escape regex special chars except * and ?
+  p = p.replace(/([.+^${}()|[\]\\])/g, '\\$1');
+  // Convert glob wildcards
+  p = p.replace(/\*\*/g, '<<<GLOBSTAR>>>');
+  p = p.replace(/\*/g, '[^/]*');
+  p = p.replace(/<<<GLOBSTAR>>>/g, '.*');
+  p = p.replace(/\?/g, '[^/]');
+  // Match the whole name or path
+  return new RegExp(`(^|/)${p}($|/)`, 'i');
+}
+
+// Check if a file/dir name or path should be ignored
+function shouldIgnore(nameOrPath) {
+  // Always check built-in IGNORE_DIRS first (fast path)
+  const baseName = nameOrPath.includes('/') ? nameOrPath.split('/').pop() : nameOrPath;
+  if (IGNORE_DIRS.has(baseName)) return true;
+
+  const patterns = getSapperIgnorePatterns();
+  if (patterns.length === 0) return false;
+
+  let ignored = false;
+  for (const { pattern, negate } of patterns) {
+    const regex = ignorePatternToRegex(pattern);
+    if (regex.test(nameOrPath) || regex.test(baseName)) {
+      ignored = !negate;
+    }
+  }
+  return ignored;
+}
 
 // Scan entire codebase and return summary
 function scanCodebase(dir = '.', depth = 0, maxDepth = 5) {
@@ -1603,14 +2086,15 @@ function scanCodebase(dir = '.', depth = 0, maxDepth = 5) {
     for (const entry of entries) {
       const fullPath = dir === '.' ? entry.name : `${dir}/${entry.name}`;
       
-      // Skip ignored directories
+      // Skip ignored directories and files (respects .sapperignore)
       if (entry.isDirectory()) {
-        if (IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+        if (shouldIgnore(entry.name) || entry.name.startsWith('.')) continue;
         const subResult = scanCodebase(fullPath, depth + 1, maxDepth);
         files = files.concat(subResult.files);
         totalSize += subResult.totalSize;
       } else {
         // Check if file should be included
+        if (shouldIgnore(fullPath) || shouldIgnore(entry.name)) continue;
         const ext = entry.name.includes('.') ? '.' + entry.name.split('.').pop() : entry.name;
         const isCodeFile = CODE_EXTENSIONS.has(ext.toLowerCase()) || CODE_EXTENSIONS.has(entry.name);
         
@@ -1649,7 +2133,7 @@ function getFilesForPicker(dir = '.', prefix = '', maxFiles = 50) {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
       if (files.length >= maxFiles) break;
-      if (IGNORE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+      if (shouldIgnore(entry.name) || entry.name.startsWith('.')) continue;
       
       const fullPath = prefix ? `${prefix}/${entry.name}` : entry.name;
       
@@ -1697,8 +2181,9 @@ async function pickFiles() {
     // Clear screen and move cursor to top
     console.clear();
     console.log(box(
-      `${chalk.cyan('↑↓')} Navigate  ${chalk.cyan('Space')} Toggle  ${chalk.cyan('a')} All  ${chalk.cyan('Enter')} Confirm  ${chalk.cyan('q/Esc')} Cancel`,
-      '📎 Select Files', 'cyan'
+      `${statusBadge('Move', 'info')} ↑ ↓   ${statusBadge('Toggle', 'success')} space   ${statusBadge('All', 'warning')} a\n` +
+      `${statusBadge('Confirm', 'success')} enter   ${statusBadge('Cancel', 'error')} q / esc`,
+      'Attach Files', 'cyan'
     ));
     console.log();
     
@@ -1729,7 +2214,7 @@ async function pickFiles() {
     }
     
     console.log();
-    console.log(chalk.gray(`  Selected: ${selected.size} file${selected.size !== 1 ? 's' : ''}`));
+        console.log(`${statusBadge('Selected', 'action')} ${chalk.white(`${selected.size} file${selected.size !== 1 ? 's' : ''}`)}`);
   };
   
   return new Promise((resolve) => {
@@ -1828,6 +2313,114 @@ function formatScanResults(scanResult) {
   return output;
 }
 
+// Interactive model picker with keyboard navigation
+async function pickModel(models) {
+  if (!models || models.length === 0) return null;
+
+  let cursor = 0;
+  const pageSize = Math.max(5, Math.min(8, (process.stdout.rows || 24) - 14));
+
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+  }
+  process.stdin.resume();
+
+  const render = () => {
+    const current = models[cursor];
+    console.clear();
+    console.log(BANNER);
+    console.log(`${UI.slate(process.cwd())} ${UI.slate('·')} ${UI.slate(`v${CURRENT_VERSION}`)}`);
+    console.log(divider());
+    console.log(sectionTitle('Model selection', 'use ↑↓ or j/k, enter to confirm', 'cyan'));
+    console.log();
+
+    const startIdx = Math.max(0, Math.min(cursor - Math.floor(pageSize / 2), models.length - pageSize));
+    const endIdx = Math.min(startIdx + pageSize, models.length);
+
+    if (startIdx > 0) {
+      console.log(UI.slate('  ↑ more models'));
+    }
+
+    for (let i = startIdx; i < endIdx; i++) {
+      const model = models[i];
+      const isActive = i === cursor;
+      const marker = isActive ? UI.accent('›') : UI.slate(' ');
+      const index = isActive ? UI.accent(String(i + 1).padStart(2, '0')) : UI.slate(String(i + 1).padStart(2, '0'));
+      const name = isActive ? UI.accentSoft.bold(ellipsis(model.name, 40)) : chalk.white(ellipsis(model.name, 40));
+      const meta = [
+        model.size ? formatBytes(model.size) : null,
+        model.modified_at ? formatRelativeTime(model.modified_at) : null,
+        model.details?.parameter_size || null,
+      ].filter(Boolean).join(' · ');
+
+      console.log(`${marker} ${index}  ${name}`);
+      if (meta) {
+        console.log(`     ${UI.slate(meta)}`);
+      }
+    }
+
+    if (endIdx < models.length) {
+      console.log(UI.slate('  ↓ more models'));
+    }
+
+    const family = current.details?.family || current.details?.format || current.details?.parameter_size || 'local model';
+    const quant = current.details?.quantization_level || current.details?.quantization || 'default';
+    console.log();
+    console.log(box(
+      `${keyValue('Selected', chalk.white.bold(current.name), 10)}\n` +
+      `${keyValue('Footprint', UI.ink(current.size ? formatBytes(current.size) : 'unknown'), 10)}\n` +
+      `${keyValue('Updated', UI.ink(current.modified_at ? formatRelativeTime(current.modified_at) : 'unknown'), 10)}\n` +
+      `${keyValue('Profile', UI.ink(family), 10)}\n` +
+      `${keyValue('Quant', UI.ink(quant), 10)}`,
+      'Preview', 'gray'
+    ));
+  };
+
+  return new Promise((resolve) => {
+    render();
+
+    const cleanup = () => {
+      process.stdin.removeListener('data', onKeypress);
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(false);
+      }
+    };
+
+    const onKeypress = (chunk, key) => {
+      if (!key) {
+        const str = chunk.toString();
+        if (str === '\x1b[A') key = { name: 'up' };
+        else if (str === '\x1b[B') key = { name: 'down' };
+        else if (str === '\r' || str === '\n') key = { name: 'return' };
+        else if (str === '\x1b' || str === 'q') key = { name: 'escape' };
+        else if (str === 'j') key = { name: 'down' };
+        else if (str === 'k') key = { name: 'up' };
+        else if (str === '\x03') key = { name: 'c', ctrl: true };
+      }
+
+      if (!key) return;
+
+      if (key.name === 'up') {
+        cursor = cursor > 0 ? cursor - 1 : models.length - 1;
+        render();
+      } else if (key.name === 'down') {
+        cursor = cursor < models.length - 1 ? cursor + 1 : 0;
+        render();
+      } else if (key.name === 'return') {
+        cleanup();
+        console.log(UI.slate(`\nUsing ${models[cursor].name}`));
+        resolve(models[cursor].name);
+      } else if (key.name === 'escape' || key.name === 'q' || (key.ctrl && key.name === 'c')) {
+        cleanup();
+        console.log(UI.slate(`\nUsing ${models[cursor].name}`));
+        resolve(models[cursor].name);
+      }
+    };
+
+    process.stdin.on('data', onKeypress);
+  });
+}
+
 const tools = {
   read: (path) => {
     try { return fs.readFileSync(path.trim(), 'utf8'); } 
@@ -1851,12 +2444,13 @@ const tools = {
         const newContent = lines.join('\n');
         console.log();
         const diffContent =
-          `${chalk.white('File:')} ${chalk.cyan(trimmedPath)} ${chalk.gray(`(line ${lineNum})`)}\n` +
-          chalk.gray('─'.repeat(40)) + '\n' +
+          `${keyValue('File', chalk.white(trimmedPath), 8)}\n` +
+          `${keyValue('Line', chalk.white(String(lineNum)), 8)}\n` +
+          `${UI.slate('Preview')}\n` +
           chalk.red('- ' + oldLine) + '\n' +
           chalk.green('+ ' + newText);
-        console.log(box(diffContent, '🔧 Patch (line mode)', 'yellow'));
-        const confirm = await safeQuestion(chalk.yellow('\n↪ Apply patch? ') + chalk.gray('(y/n): '));
+        console.log(box(diffContent, 'Patch Review', 'yellow'));
+        const confirm = await safeQuestion(confirmPrompt('Apply patch', 'warning'));
         if (confirm.toLowerCase() === 'y') {
           fs.writeFileSync(trimmedPath, newContent);
           return `Successfully patched line ${lineNum} of ${trimmedPath}`;
@@ -1923,13 +2517,13 @@ const tools = {
       // Show diff preview
       console.log();
       const diffContent = 
-        `${chalk.white('File:')} ${chalk.cyan(trimmedPath)}\n` +
-        chalk.gray('─'.repeat(40)) + '\n' +
+        `${keyValue('File', chalk.white(trimmedPath), 8)}\n` +
+        `${UI.slate('Preview')}\n` +
         chalk.red('- ' + matchedOld.split('\n').join('\n- ')) + '\n' +
         chalk.green('+ ' + (newContent === content.replace(matchedOld, newText.trim()) ? newText.trim() : newText).split('\n').join('\n+ '));
-      console.log(box(diffContent, '🔧 Patch', 'yellow'));
+      console.log(box(diffContent, 'Patch Review', 'yellow'));
       
-      const confirm = await safeQuestion(chalk.yellow('\n↪ Apply patch? ') + chalk.gray('(y/n): '));
+      const confirm = await safeQuestion(confirmPrompt('Apply patch', 'warning'));
       if (confirm.toLowerCase() === 'y') {
         fs.writeFileSync(trimmedPath, newContent);
         return `Successfully patched ${trimmedPath}`;
@@ -1941,13 +2535,13 @@ const tools = {
     const trimmedPath = path.trim();
     console.log();
     console.log(box(
-      `${chalk.white('File:')} ${chalk.cyan(trimmedPath)}\n` +
-      `${chalk.white('Size:')} ${content?.length || 0} chars\n` +
-      chalk.gray('─'.repeat(40)) + '\n' +
+      `${keyValue('File', chalk.white(trimmedPath), 8)}\n` +
+      `${keyValue('Size', chalk.white((content?.length || 0) + ' chars'), 8)}\n` +
+      `${UI.slate('Preview')}\n` +
       chalk.gray(content?.substring(0, 300)?.split('\n').slice(0, 8).join('\n') + (content?.length > 300 ? '\n...' : '')),
-      '✏️  Write File', 'yellow'
+      'Write Review', 'yellow'
     ));
-    const confirm = await safeQuestion(chalk.yellow('\n↪ Allow write? ') + chalk.gray('(y/n): '));
+    const confirm = await safeQuestion(confirmPrompt('Allow file write', 'warning'));
     if (confirm.toLowerCase() === 'y') {
       try {
         fs.writeFileSync(trimmedPath, content);
@@ -1965,10 +2559,11 @@ const tools = {
   shell: async (cmd) => {
     console.log();
     console.log(box(
-      chalk.white.bold(cmd),
-      '🔐 Shell Command', 'red'
+      `${keyValue('Directory', chalk.white(process.cwd()), 11)}\n` +
+      `${UI.slate('Command')}\n${chalk.white.bold(cmd)}`,
+      'Shell Approval', 'red'
     ));
-    const confirm = await safeQuestion(chalk.red('\n↪ Execute? ') + chalk.gray('(y/n): '));
+    const confirm = await safeQuestion(confirmPrompt('Run shell command', 'error'));
     if (confirm.toLowerCase() === 'y') {
       return new Promise((resolve) => {
         const useShell = cmd.includes('&&') || cmd.includes('|') || cmd.includes('cd ') || cmd.includes('>') || cmd.includes('<');
@@ -2014,9 +2609,9 @@ const tools = {
       // If AI sends "/" (root), treat as current directory "."
       if (dir === '/') dir = '.';
       const entries = fs.readdirSync(dir);
-      // Filter out ignored directories
+      // Filter out ignored files/directories (respects .sapperignore)
       const filtered = entries.filter(entry => {
-        if (IGNORE_DIRS.has(entry)) return false;
+        if (shouldIgnore(entry)) return false;
         // Also skip hidden files/folders (starting with .) except current dir
         if (entry.startsWith('.') && entry !== '.') return false;
         return true;
@@ -2026,7 +2621,12 @@ const tools = {
   },
   search: (pattern) => {
     return new Promise((resolve) => {
-      const excludeDirs = Array.from(IGNORE_DIRS).join(',');
+      // Build exclude dirs from IGNORE_DIRS + .sapperignore directory patterns
+      const allIgnoreDirs = new Set(IGNORE_DIRS);
+      for (const { pattern: p, negate } of getSapperIgnorePatterns()) {
+        if (!negate && p.endsWith('/')) allIgnoreDirs.add(p.replace(/\/+$/, ''));
+      }
+      const excludeDirs = Array.from(allIgnoreDirs).join(',');
       // Use grep to search for pattern, excluding ignored directories
       const cmd = `grep -rEin "${pattern.replace(/"/g, '\\"')}" . --exclude-dir={${excludeDirs}} --include="*.{js,ts,jsx,tsx,py,java,go,rs,rb,php,c,cpp,h,css,scss,html,json,md,txt,yml,yaml,toml,sh}" 2>/dev/null | head -50`;
       
@@ -2054,10 +2654,8 @@ async function checkForUpdates() {
     const latestVersion = data.version;
     
     if (latestVersion && latestVersion !== CURRENT_VERSION) {
-      console.log(chalk.yellow('🔄 UPDATE AVAILABLE!'));
-      console.log(chalk.gray(`   Current: v${CURRENT_VERSION}`));
-      console.log(chalk.green(`   Latest:  v${latestVersion}`));
-      console.log(chalk.cyan('   Run: npm update -g sapper-iq\n'));
+      console.log(UI.gold(`Update available: v${CURRENT_VERSION} -> v${latestVersion}`));
+      console.log(UI.slate('Run npm update -g sapper-iq\n'));
     }
   } catch (error) {
     // Silently fail if update check fails
@@ -2067,22 +2665,30 @@ async function checkForUpdates() {
 async function runSapper() {
   console.clear();
   console.log(BANNER);
-  console.log(chalk.gray.dim('  ') + chalk.white.bold(`v${CURRENT_VERSION}`) + chalk.gray(' │ ') + chalk.cyan('Autonomous AI Coding Agent'));
-  console.log(chalk.gray.dim('  ') + chalk.gray('📁 ') + chalk.white(process.cwd()));
-  console.log();
-  
-  // Quick tips box
-  console.log(box(
-    `${chalk.yellow('💡')} Use ${chalk.cyan('@file')} to attach files (e.g., "fix @app.js")\n` +
-    `${chalk.yellow('💡')} Type ${chalk.cyan('/scan')} to load entire codebase\n` +
-    `${chalk.yellow('💡')} Type ${chalk.cyan('/agents')} to see agents, ${chalk.cyan('/agentname')} to switch\n` +
-    `${chalk.yellow('💡')} Type ${chalk.cyan('/help')} for all commands`,
-    'Quick Tips', 'gray'
-  ));
+  console.log(`${UI.slate(process.cwd())} ${UI.slate('·')} ${UI.slate(`v${CURRENT_VERSION}`)}`);
+  console.log(divider());
+  console.log(sectionTitle('Quick start', '@file attach · /help commands · /agents modes', 'gray'));
   console.log();
   
   // Check for updates
   await checkForUpdates();
+  
+  // Ensure .sapperignore exists (create default on first run)
+  const sapperIgnoreCreated = ensureSapperIgnore();
+  if (sapperIgnoreCreated) {
+    console.log(chalk.green('📋 Created .sapperignore') + chalk.gray(' — edit it to customize ignored files'));
+  } else {
+    // Reload patterns in case file was modified since last run
+    reloadSapperIgnore();
+  }
+
+  // Ensure config file exists with defaults, or reload user's config
+  if (!fs.existsSync(CONFIG_FILE)) {
+    saveConfig(sapperConfig);
+  } else {
+    // Reload in case user edited config.json manually
+    sapperConfig = loadConfig();
+  }
   
   // Auto-load or build workspace graph
   let workspace = loadWorkspaceGraph();
@@ -2101,30 +2707,33 @@ async function runSapper() {
     }
   }
   
-  // Show memory status
-  console.log(chalk.gray(`📁 Memory: .sapper/ folder`));
-  console.log(chalk.gray(`🔗 Auto-attach: ${sapperConfig.autoAttach ? 'ON' : 'OFF'} (toggle with /auto)`));
-  
   // Initialize agents and skills
   const newlyCreated = createDefaultAgentsAndSkills();
   const agents = loadAgents();
   const skills = loadSkills();
   const agentCount = Object.keys(agents).length;
   const skillCount = Object.keys(skills).length;
-  console.log(chalk.gray(`🤖 Agents: ${agentCount} available`) + chalk.gray(` │ `) + chalk.gray(`📘 Skills: ${skillCount} available`));
+  const workspaceFileCount = Object.keys(workspace.files).length;
+  const workspaceSymbolCount = Object.values(workspace.files).reduce((sum, f) => sum + (f.symbols?.length || 0), 0);
+  const workspaceAgeMinutes = workspace.indexed
+    ? Math.max(0, Math.round((Date.now() - new Date(workspace.indexed).getTime()) / 1000 / 60))
+    : 0;
+  const startupLines = [
+    `${statusBadge('workspace', 'info')} ${chalk.white(`${workspaceFileCount} files`)} ${UI.slate('·')} ${chalk.white(`${workspaceSymbolCount} symbols`)} ${UI.slate('·')} ${UI.slate(`indexed ${workspaceAgeMinutes}m ago`)}`,
+    `${statusBadge('memory', 'neutral')} ${chalk.white('.sapper/')} ${UI.slate('·')} ${UI.slate(`auto-attach ${sapperConfig.autoAttach ? 'on' : 'off'}`)}`,
+    `${statusBadge('agents', 'action')} ${chalk.white(`${agentCount}`)} ${UI.slate('·')} ${statusBadge('skills', 'success')} ${chalk.white(`${skillCount}`)}`,
+  ];
   if (newlyCreated > 0) {
-    console.log(chalk.green(`   ✨ Created ${newlyCreated} default agents/skills in .sapper/`));
+    startupLines.push(UI.slate(`${newlyCreated} default agents or skills created in .sapper/`));
   }
-  if (agentCount > 0) {
-    console.log(chalk.gray(`   Agents: ${Object.keys(agents).map(a => '/' + a).join(', ')}`));
-  }
+  console.log(box(startupLines.join('\n'), 'Workspace', 'gray'));
   console.log();
   
   let messages = [];
   if (fs.existsSync(CONTEXT_FILE)) {
-    console.log();
-    console.log(box('Previous session found! Resume where you left off?', '📂 Session', 'green'));
-    const resume = await safeQuestion(chalk.green('\n↪ Resume? ') + chalk.gray('(y/n): '));
+    console.log(divider());
+    console.log(UI.ink('Previous session found in .sapper/context.json'));
+    const resume = await safeQuestion(confirmPrompt('Resume session', 'success'));
     if (resume.toLowerCase() === 'y') {
       messages = JSON.parse(fs.readFileSync(CONTEXT_FILE, 'utf8'));
       console.log(chalk.green('  ✓ Session restored\n'));
@@ -2165,30 +2774,58 @@ async function runSapper() {
     process.exit(1);
   }
   
-  console.log(divider());
-  console.log(statusBadge('MODELS', 'info') + chalk.gray(' Available Ollama models:\n'));
-  localModels.models.forEach((m, i) => {
-    const num = chalk.cyan.bold(`[${i + 1}]`);
-    const name = chalk.white(m.name);
-    console.log(`  ${num} ${name}`);
-  });
-  console.log(divider());
-  const choice = await safeQuestion(chalk.cyan('\n⚡ Select model: '));
-  const selectedModel = localModels.models[parseInt(choice) - 1]?.name || localModels.models[0].name;
+  const selectedModel = await pickModel(localModels.models) || localModels.models[0].name;
 
-  // ─── Detect native tool-calling support ───────────────────────────
+  // ─── Detect model capabilities & context window ───────────────────
   let useNativeTools = false;
+  let toolModeLabel = 'tool detection unavailable';
+  let contextLabel = '4,096 tokens (fallback)';
   try {
     const modelInfo = await ollama.show({ model: selectedModel });
     if (modelInfo.capabilities && modelInfo.capabilities.includes('tools')) {
       useNativeTools = true;
-      console.log(chalk.green('  ✓ ') + chalk.gray('Native tool calling: ') + chalk.green('enabled'));
+      toolModeLabel = 'native tool calling';
     } else {
-      console.log(chalk.yellow('  ℹ ') + chalk.gray('Native tool calling: ') + chalk.yellow('unavailable — using text markers'));
+      toolModeLabel = 'text markers';
+    }
+    // Extract context window size from model_info
+    // Different model families use different keys: llama.context_length, qwen2.context_length, etc.
+    if (modelInfo.model_info) {
+      for (const [key, value] of Object.entries(modelInfo.model_info)) {
+        if (key.endsWith('.context_length') && typeof value === 'number') {
+          modelContextLength = value;
+          break;
+        }
+      }
+    }
+    // Fallback: parse from parameters string (e.g. "num_ctx 4096")
+    if (!modelContextLength && modelInfo.parameters) {
+      const match = modelInfo.parameters.match(/num_ctx\s+(\d+)/);
+      if (match) modelContextLength = parseInt(match[1]);
+    }
+    if (modelContextLength) {
+      contextLabel = `${modelContextLength.toLocaleString()} tokens`;
+    } else {
+      modelContextLength = 4096; // Conservative default
+      contextLabel = '4,096 tokens (default)';
     }
   } catch (e) {
-    console.log(chalk.gray('  ℹ Tool detection skipped — using text markers'));
+    modelContextLength = 4096;
+    toolModeLabel = 'default mode';
+    contextLabel = '4,096 tokens (fallback)';
   }
+  // Show custom limit if set
+  const effectiveCtx = effectiveContextLength();
+  if (sapperConfig.contextLimit && effectiveCtx !== modelContextLength) {
+    contextLabel = `${effectiveCtx.toLocaleString()} tokens (custom limit, model: ${modelContextLength.toLocaleString()})`;
+  }
+  console.log(box(
+    `${statusBadge('model', 'action')} ${chalk.white.bold(selectedModel)}\n` +
+    `${statusBadge('tools', useNativeTools ? 'success' : 'neutral')} ${UI.ink(toolModeLabel)}\n` +
+    `${statusBadge('context', 'info')} ${UI.ink(contextLabel)}`,
+    'Session', 'cyan'
+  ));
+  console.log();
   _useNativeToolsFlag = useNativeTools; // Set global for buildSystemPrompt
 
   // Native Ollama tool definitions (used when useNativeTools=true)
@@ -2313,22 +2950,51 @@ async function runSapper() {
   // Main conversation loop - never exits unless user types 'exit'
   while (true) {
     try {
-      // Context size check - auto-summarize when too large
-      const contextSize = JSON.stringify(messages).length;
-      if (contextSize > 32000) {
+      // Context size check - auto-summarize when approaching effective context limit
+      const estimatedTokens = estimateMessagesTokens(messages);
+      const ctxLen = effectiveContextLength();
+      const tokenThreshold = ctxLen ? Math.floor(ctxLen * 0.75) : 8000;
+      if (estimatedTokens > tokenThreshold) {
         messages = await autoSummarizeContext(messages, selectedModel);
       }
       
       // Build prompt label with active agent/skills
-      let promptLabel = chalk.white.bold('You');
-      if (currentAgent) {
-        promptLabel += chalk.gray(' → ') + chalk.magenta.bold(currentAgent);
-      }
+      const contextPercent = ctxLen ? Math.round((estimatedTokens / ctxLen) * 100) : null;
+      const promptParts = [
+        statusBadge(selectedModel.split(':')[0] || selectedModel, 'action'),
+        currentAgent ? statusBadge(`/${currentAgent}`, 'info') : statusBadge('default', 'neutral'),
+      ];
       if (loadedSkills.length > 0) {
-        promptLabel += chalk.gray(' [') + chalk.blue(loadedSkills.join(', ')) + chalk.gray(']');
+        promptParts.push(statusBadge(`${loadedSkills.length} skill${loadedSkills.length !== 1 ? 's' : ''}`, 'success'));
       }
+      if (contextPercent !== null) {
+        const tone = contextPercent >= 85 ? 'error' : contextPercent >= 65 ? 'warning' : 'neutral';
+        promptParts.push(statusBadge(`${contextPercent}% ctx`, tone));
+      }
+
+      const promptDetail = ctxLen
+        ? `${meter(estimatedTokens, ctxLen, 24)} ${UI.slate(`${estimatedTokens.toLocaleString()}/${ctxLen.toLocaleString()} tokens`)}`
+        : UI.slate(`${estimatedTokens.toLocaleString()} estimated tokens`);
+
+      const input = await safeQuestion(`\n${promptShell(promptParts.join(' '), promptDetail)}`);
       
-      const input = await safeQuestion(chalk.cyan('\n┌─[') + promptLabel + chalk.cyan(']\n└─➤ '));
+      // Block empty prompts
+      if (!input.trim()) {
+        continue;
+      }
+
+      // Clear readline echo to prevent duplicate display
+      {
+        const promptWidth = visibleLength(promptParts.join(' ')) + 4; // account for prompt chars
+        const totalLen = promptWidth + input.length;
+        const lines = Math.ceil(totalLen / (process.stdout.columns || 80));
+        for (let i = 0; i < lines; i++) {
+          process.stdout.write('\x1B[1A\x1B[2K');
+        }
+        // Reprint clean version
+        const preview = input.length > 120 ? input.substring(0, 120) + chalk.gray('...') : input;
+        console.log(UI.accent('› ') + chalk.white(preview));
+      }
       
       if (input.toLowerCase() === 'exit') {
         const stats = getSessionStats();
@@ -2369,42 +3035,46 @@ async function runSapper() {
           continue;
         }
         
-        messages = await autoSummarizeContext(messages, selectedModel);
+        messages = await autoSummarizeContext(messages, selectedModel, true);
         continue;
       }
       
       // Handle help command
       if (input.toLowerCase() === '/help') {
         console.log();
-        const helpContent = 
-          `${chalk.cyan('@')} or ${chalk.cyan('/attach')}  ${chalk.gray('│')} Pick files to attach (interactive)\n` +
-          `${chalk.cyan('@file')}          ${chalk.gray('│')} Attach file inline (e.g., @src/app.js)\n` +
-          `${chalk.cyan('/scan')}          ${chalk.gray('│')} Scan codebase into context\n` +
-          `${chalk.cyan('/index')}         ${chalk.gray('│')} Rebuild workspace graph\n` +
-          `${chalk.cyan('/graph file')}    ${chalk.gray('│')} Show related files\n` +
-          `${chalk.cyan('/symbol name')}   ${chalk.gray('│')} Search functions/classes\n` +
-          `${chalk.cyan('/auto')}          ${chalk.gray('│')} Toggle auto-attach related files\n` +
-          `${chalk.cyan('/recall')}        ${chalk.gray('│')} Search memory for relevant context\n` +
-          `${chalk.cyan('/reset /clear')}  ${chalk.gray('│')} Clear all context\n` +
-          `${chalk.cyan('/prune')}         ${chalk.gray('│')} AI-summarize context + save to memory\n` +
-          `${chalk.cyan('/context')}       ${chalk.gray('│')} Show context size\n` +
-          `${chalk.cyan('/debug')}         ${chalk.gray('│')} Toggle debug mode\n` +
-          `${chalk.cyan('/log')}           ${chalk.gray('│')} Show activity timeline\n` +
-          `${chalk.cyan('/log stats')}     ${chalk.gray('│')} Show session statistics\n` +
-          `${chalk.cyan('/log file')}      ${chalk.gray('│')} Show log file path & history\n` +
-          `${chalk.cyan('/help')}          ${chalk.gray('│')} Show this help\n` +
-          `${chalk.cyan('exit')}           ${chalk.gray('│')} Quit Sapper\n` +
-          `\n` +
-          chalk.bold.white('🤖 Agents & Skills:\n') +
-          `${chalk.cyan('/agents')}        ${chalk.gray('│')} List available agents\n` +
-          `${chalk.cyan('/skills')}        ${chalk.gray('│')} List available skills\n` +
-          `${chalk.cyan('/agentname')}     ${chalk.gray('│')} Switch to agent (e.g., /salesmanager)\n` +
-          `${chalk.cyan('/default')}       ${chalk.gray('│')} Switch back to default Sapper\n` +
-          `${chalk.cyan('/use skill')}     ${chalk.gray('│')} Load a skill (e.g., /use react)\n` +
-          `${chalk.cyan('/unload skill')}  ${chalk.gray('│')} Unload a skill\n` +
-          `${chalk.cyan('/newagent')}      ${chalk.gray('│')} Create a new agent\n` +
-          `${chalk.cyan('/newskill')}      ${chalk.gray('│')} Create a new skill`;
-        console.log(box(helpContent, '📚 Commands', 'cyan'));
+        console.log(sectionTitle('Core', 'daily workflow', 'cyan'));
+        console.log(commandRow('@ or /attach', 'Pick files to attach interactively'));
+        console.log(commandRow('@file', 'Attach a file inline, for example @src/app.js'));
+        console.log(commandRow('/scan', 'Scan the codebase into context'));
+        console.log(commandRow('/index', 'Rebuild the workspace graph'));
+        console.log(commandRow('/graph file', 'Show related files from the graph'));
+        console.log(commandRow('/symbol name', 'Search indexed functions and classes'));
+        console.log(commandRow('/auto', 'Toggle automatic related-file attach'));
+        console.log();
+        console.log(sectionTitle('Context', 'memory and visibility', 'cyan'));
+        console.log(commandRow('/recall', 'Search memory for relevant context'));
+        console.log(commandRow('/fetch <url>', 'Fetch a web page into context'));
+        console.log(commandRow('/reset /clear', 'Clear all current context'));
+        console.log(commandRow('/prune', 'Summarize long context and store memory'));
+        console.log(commandRow('/context', 'Inspect token usage and model window'));
+        console.log(commandRow('/ctx <limit>', 'Set context window limit (e.g. /ctx 64k)'));
+        console.log(commandRow('/debug', 'Toggle regex and tool debug output'));
+        console.log(commandRow('/log', 'Show the session activity timeline'));
+        console.log(commandRow('/log stats', 'Show session statistics'));
+        console.log(commandRow('/log file', 'Show log file path and history'));
+        console.log(commandRow('/help', 'Open this command view again'));
+        console.log(commandRow('exit', 'Quit Sapper'));
+        console.log();
+        console.log(sectionTitle('Agents', 'specialist modes and skills', 'cyan'));
+        console.log(commandRow('/agents', 'List available agents'));
+        console.log(commandRow('/skills', 'List available skills'));
+        console.log(commandRow('/agentname', 'Switch to an agent such as /reviewer'));
+        console.log(commandRow('/default', 'Return to the default Sapper role'));
+        console.log(commandRow('/use skill', 'Load a skill into the session'));
+        console.log(commandRow('/unload skill', 'Unload a previously loaded skill'));
+        console.log(commandRow('/newagent', 'Create a new agent'));
+        console.log(commandRow('/newskill', 'Create a new skill'));
+        console.log(divider());
         console.log();
         continue;
       }
@@ -2572,12 +3242,73 @@ async function runSapper() {
       }
       
       // Handle context size command
+      // Handle /ctx command — view or set context window limit
+      if (input.toLowerCase().startsWith('/ctx')) {
+        const arg = input.substring(4).trim();
+        if (arg === 'reset' || arg === 'auto') {
+          sapperConfig.contextLimit = null;
+          saveConfig(sapperConfig);
+          console.log(chalk.green(`✅ Context limit reset to model default (${modelContextLength ? modelContextLength.toLocaleString() : 'auto'} tokens)`));
+        } else if (arg) {
+          // Parse number with optional k/K suffix (e.g. 64k, 32768)
+          let limit = null;
+          const kMatch = arg.match(/^(\d+\.?\d*)\s*[kK]$/);
+          if (kMatch) {
+            limit = Math.round(parseFloat(kMatch[1]) * 1024);
+          } else {
+            limit = parseInt(arg);
+          }
+          if (!limit || limit < 1024) {
+            console.log(chalk.yellow('Usage: /ctx <tokens>  — e.g. /ctx 64k, /ctx 32768, /ctx reset'));
+            console.log(chalk.gray('  Minimum: 1024 tokens'));
+          } else {
+            sapperConfig.contextLimit = limit;
+            saveConfig(sapperConfig);
+            const effective = effectiveContextLength();
+            console.log(chalk.green(`✅ Context limit set to ${chalk.white.bold(effective.toLocaleString())} tokens`));
+            if (modelContextLength && limit < modelContextLength) {
+              console.log(chalk.gray(`   Model supports ${modelContextLength.toLocaleString()} but will use ${limit.toLocaleString()} (saves RAM)`));
+            } else if (modelContextLength && limit > modelContextLength) {
+              console.log(chalk.yellow(`   ⚠ Limit exceeds model's ${modelContextLength.toLocaleString()} context — may cause errors`));
+            }
+          }
+        } else {
+          // Show current setting
+          const effective = effectiveContextLength();
+          const custom = sapperConfig.contextLimit;
+          const lines = [
+            `model default  ${chalk.white(modelContextLength ? modelContextLength.toLocaleString() : 'unknown')} tokens`,
+            `custom limit   ${custom ? chalk.cyan.bold(custom.toLocaleString() + ' tokens') : UI.slate('not set (using model default)')}`,
+            `effective      ${chalk.white.bold(effective ? effective.toLocaleString() + ' tokens' : 'unknown')}`,
+          ];
+          console.log();
+          console.log(box(lines.join('\n'), 'Context Limit', 'cyan'));
+          console.log(UI.slate('  Set: /ctx 64k  |  /ctx 32768  |  /ctx reset'));
+        }
+        continue;
+      }
+
       if (input.toLowerCase() === '/context') {
         const contextSize = JSON.stringify(messages).length;
-        console.log(chalk.cyan(`\n📊 Context: ${messages.length} messages, ~${Math.round(contextSize/1024)}KB`));
-        if (contextSize > 50000) {
-          console.log(chalk.yellow('⚠️  Context is large! Will auto-summarize on next message, or use /prune now.'));
+        const estTokens = estimateMessagesTokens(messages);
+        const ctxLen = effectiveContextLength();
+        const contextLines = [
+          `messages ${chalk.white(String(messages.length))} ${UI.slate('·')} raw ${chalk.white(Math.round(contextSize / 1024) + 'KB')} ${UI.slate('·')} tokens ${chalk.white('~' + estTokens.toLocaleString())}`,
+        ];
+        if (ctxLen) {
+          const usagePercent = Math.round((estTokens / ctxLen) * 100);
+          const threshold = Math.floor(ctxLen * 0.75);
+          const limitLabel = sapperConfig.contextLimit
+            ? `${ctxLen.toLocaleString()} tokens ${chalk.cyan('(custom)')}`
+            : `${ctxLen.toLocaleString()} tokens`;
+          contextLines.push(`limit ${chalk.white(limitLabel)} ${UI.slate('·')} usage ${chalk.white(usagePercent + '%')}`);
+          contextLines.push(`${meter(estTokens, ctxLen, 28)} ${UI.slate(`summarize near ${threshold.toLocaleString()} tokens`)}`);
         }
+        if (lastPromptTokens > 0) {
+          contextLines.push(`last turn ${UI.slate(`${lastPromptTokens.toLocaleString()} prompt • ${lastEvalTokens.toLocaleString()} response`)}`);
+        }
+        console.log();
+        console.log(box(contextLines.join('\n'), 'Context', 'gray'));
         continue;
       }
       
@@ -2917,12 +3648,15 @@ async function runSapper() {
             messages[0] = { role: 'system', content: buildSystemPrompt(agent.content, skillContents) };
             
             console.log();
-            console.log(statusBadge(`AGENT: ${agent.description}`, 'action'));
-            const toolsInfo = agent.tools ? chalk.gray(` [tools: ${agent.tools.join(', ')}]`) : chalk.gray(' [all tools]');
-            console.log(chalk.green(`Switched to /${cmdPart} agent`) + toolsInfo);
+            console.log(box(
+              `${statusBadge('Active Agent', 'action')} ${chalk.white('/' + cmdPart)}\n` +
+              `${keyValue('Role', chalk.white(agent.description), 8)}\n` +
+              `${keyValue('Tools', agent.tools ? UI.slate(agent.tools.join(', ')) : UI.slate('all tools'), 8)}`,
+              'Agent Mode', 'magenta'
+            ));
             
             if (!prompt) {
-              console.log(chalk.gray(`Type your prompt to chat with this agent.`));
+              console.log(UI.slate('Type your prompt to chat with this agent.'));
               continue; // Just switched, no prompt to send
             }
             
@@ -2932,6 +3666,46 @@ async function runSapper() {
             // Don't continue - fall through to the AI response loop below
           }
         }
+      }
+      
+      // Handle /fetch command - fetch a URL and add to context
+      if (input.toLowerCase().startsWith('/fetch')) {
+        const url = input.slice(6).trim();
+        if (!url || !url.match(/^https?:\/\//)) {
+          console.log(chalk.yellow('Usage: /fetch <url>'));
+          console.log(chalk.gray('  Example: /fetch https://docs.example.com/api'));
+          continue;
+        }
+        try {
+          const fetchSpinner = ora({ text: chalk.cyan(`🌐 Fetching ${url}...`), spinner: 'dots' }).start();
+          const rawContent = await fetchUrl(url);
+          fetchSpinner.stop();
+          
+          const isJson = rawContent.trim().startsWith('{') || rawContent.trim().startsWith('[');
+          const isHtml = rawContent.trim().startsWith('<') || rawContent.includes('<html');
+          let text;
+          if (isJson) {
+            try { text = JSON.stringify(JSON.parse(rawContent), null, 2); } catch { text = rawContent; }
+          } else if (isHtml) {
+            text = htmlToText(rawContent);
+          } else {
+            text = rawContent;
+          }
+          
+          if (text.trim().length > 0) {
+            const webContent = `\n\n══════════════════════════════════════\n🌐 WEB PAGE CONTENT\n══════════════════════════════════════\n\nURL: ${url}\n\n${text}\n`;
+            messages.push({ role: 'user', content: `I fetched this web page for reference:\n${webContent}\n\nUse this information to help me.` });
+            ensureSapperDir();
+            fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
+            console.log(chalk.green(`🌐 Fetched: ${url} (${Math.round(text.length/1024)}KB)`));
+            console.log(chalk.gray('📝 Added to context. AI can now reference this page.\n'));
+          } else {
+            console.log(chalk.yellow('⚠️  No readable content found on that page.'));
+          }
+        } catch (e) {
+          console.log(chalk.yellow(`⚠️  Could not fetch: ${e.message}`));
+        }
+        continue;
       }
       
       // Handle recall command - search embeddings
@@ -3022,14 +3796,24 @@ async function runSapper() {
         const fileAttachments = [];
         for (const filePath of selectedFiles) {
           try {
+            // Check .sapperignore
+            if (shouldIgnore(filePath)) {
+              console.log(chalk.yellow(`⚠️  ${filePath} is in .sapperignore — skipped`));
+              continue;
+            }
             const stats = fs.statSync(filePath);
             if (stats.size > MAX_FILE_SIZE) {
-              console.log(chalk.yellow(`⚠️  ${filePath} is too large, skipping`));
+              console.log(chalk.red.bold(`\n╔══════════════════════════════════════════════════════════╗`));
+              console.log(chalk.red.bold(`║  ⛔ FILE TOO LARGE — Cannot attach                       ║`));
+              console.log(chalk.red.bold(`╚══════════════════════════════════════════════════════════╝`));
+              console.log(chalk.yellow(`   File: ${filePath}`));
+              console.log(chalk.yellow(`   Size: ${Math.round(stats.size/1024)}KB (limit: ${Math.round(MAX_FILE_SIZE/1024)}KB)`));
+              console.log(chalk.gray(`   Tip: Use a smaller file or increase limit in .sapper/config.json\n`));
               continue;
             }
             const content = fs.readFileSync(filePath, 'utf8');
             fileAttachments.push({ path: filePath, content, size: stats.size });
-            console.log(chalk.green(`📎 Attached: ${filePath}`));
+            console.log(chalk.green(`📎 Attached: ${filePath} (${Math.round(stats.size/1024)}KB)`));
           } catch (e) {
             console.log(chalk.yellow(`⚠️  Could not read ${filePath}`));
           }
@@ -3071,10 +3855,19 @@ async function runSapper() {
         const filePath = attachMatch[1];
         try {
           if (fs.existsSync(filePath)) {
+            // Check .sapperignore
+            if (shouldIgnore(filePath)) {
+              console.log(chalk.yellow(`⚠️  @${filePath} is in .sapperignore — skipped`));
+              continue;
+            }
             const stats = fs.statSync(filePath);
             if (stats.isFile()) {
               if (stats.size > MAX_FILE_SIZE) {
-                console.log(chalk.yellow(`⚠️  @${filePath} is too large (${Math.round(stats.size/1024)}KB), skipping`));
+                console.log(chalk.red.bold(`\n╔══════════════════════════════════════════════════════════╗`));
+                console.log(chalk.red.bold(`║  ⛔ FILE TOO LARGE — Cannot attach @${filePath.padEnd(22).slice(0, 22)}║`));
+                console.log(chalk.red.bold(`╚══════════════════════════════════════════════════════════╝`));
+                console.log(chalk.yellow(`   Size: ${Math.round(stats.size/1024)}KB — exceeds ${Math.round(MAX_FILE_SIZE/1024)}KB limit`));
+                console.log(chalk.gray(`   Tip: Use a smaller file or increase limit in .sapper/config.json\n`));
               } else {
                 const content = fs.readFileSync(filePath, 'utf8');
                 fileAttachments.push({ path: filePath, content, size: stats.size });
@@ -3122,6 +3915,60 @@ async function runSapper() {
         processedInput = input + attachedContent;
       }
       
+      // ── Detect and fetch URLs in the message ──
+      const urlMatches = input.match(URL_REGEX);
+      if (urlMatches && urlMatches.length > 0) {
+        const uniqueUrls = [...new Set(urlMatches)].slice(0, 5); // Max 5 URLs
+        const urlContents = [];
+        
+        for (const url of uniqueUrls) {
+          try {
+            const urlSpinner = ora({ text: chalk.cyan(`🌐 Fetching ${url}...`), spinner: 'dots' }).start();
+            const rawContent = await fetchUrl(url);
+            urlSpinner.stop();
+            
+            // Detect content type
+            const isJson = rawContent.trim().startsWith('{') || rawContent.trim().startsWith('[');
+            const isHtml = rawContent.trim().startsWith('<') || rawContent.includes('<html');
+            
+            let text;
+            if (isJson) {
+              // Pretty-print JSON
+              try { text = JSON.stringify(JSON.parse(rawContent), null, 2); } 
+              catch { text = rawContent; }
+            } else if (isHtml) {
+              text = htmlToText(rawContent);
+            } else {
+              text = rawContent; // Plain text, markdown, etc.
+            }
+            
+            if (text.trim().length > 0) {
+              urlContents.push({ url, content: text, size: text.length });
+              console.log(chalk.green(`🌐 Fetched: ${url} (${Math.round(text.length/1024)}KB)`));
+            } else {
+              console.log(chalk.yellow(`⚠️  ${url} — no readable content`));
+            }
+          } catch (e) {
+            console.log(chalk.yellow(`⚠️  Could not fetch ${url}: ${e.message}`));
+          }
+        }
+        
+        if (urlContents.length > 0) {
+          let urlAttached = '\n\n══════════════════════════════════════\n';
+          urlAttached += `🌐 FETCHED WEB PAGES (${urlContents.length})\n`;
+          urlAttached += '══════════════════════════════════════\n\n';
+          
+          for (const page of urlContents) {
+            urlAttached += `┌─── ${page.url} ───\n`;
+            urlAttached += page.content;
+            if (!page.content.endsWith('\n')) urlAttached += '\n';
+            urlAttached += `└─── END ${page.url} ───\n\n`;
+          }
+          
+          processedInput = processedInput + urlAttached;
+        }
+      }
+      
       messages.push({ role: 'user', content: processedInput });
 
       // Log user input
@@ -3148,6 +3995,11 @@ async function runSapper() {
         try {
           // Build chat options — pass native tools when supported
           const chatOpts = { model: selectedModel, messages, stream: true };
+          if (effectiveContextLength()) {
+            chatOpts.options = { num_ctx: effectiveContextLength() };
+          }
+          // Enable thinking for reasoning models (deepseek-r1, qwq, etc.)
+          chatOpts.think = true;
           if (useNativeTools) {
             // Filter tool defs by agent restrictions if any
             if (currentAgentTools) {
@@ -3173,6 +4025,7 @@ async function runSapper() {
         spinner.stop();
 
         let msg = '';
+        let thinkMsg = ''; // Thinking/reasoning content from thinking models
         const MAX_RESPONSE_LENGTH = 100000; // 100KB - allow long code generation
         let lastChunkTime = Date.now();
         let repetitionCount = 0;
@@ -3181,22 +4034,54 @@ async function runSapper() {
         let wasRepetitionStopped = false;
         let nativeToolCalls = []; // Collect native tool_calls from streaming chunks
         abortStream = false; // Reset abort flag before streaming
+        let chunkPromptTokens = 0; // Track actual tokens from Ollama
+        let chunkEvalTokens = 0;
+        let isThinking = false; // Track if we're currently in thinking mode
+        const genStartTime = Date.now(); // Track generation elapsed time
+        let genTokenCount = 0; // Count response tokens as they stream
         
-        console.log(chalk.magenta('┌─[') + chalk.white.bold('Sapper') + chalk.magenta(']'));
-        process.stdout.write(chalk.magenta('│ '));
+        console.log(sectionTitle('Sapper', selectedModel, 'cyan'));
         for await (const chunk of response) {
           // Check if user pressed Ctrl+C
           if (abortStream) {
-            console.log(chalk.yellow('\n│ [Response interrupted]'));
+            console.log(UI.slate('\n[response interrupted]'));
             wasInterrupted = true;
             break;
           }
           
+          // Handle thinking/reasoning content (deepseek-r1, qwq, etc.)
+          const thinking = chunk.message.thinking;
+          if (thinking) {
+            if (!isThinking) {
+              isThinking = true;
+              process.stdout.write(`\n${UI.slate.italic('  ◇ Thinking')}\n${UI.slate('  │ ')}`);
+            }
+            // Live-stream thinking — dim italic, wrap at line breaks
+            const lines = thinking.split('\n');
+            for (let li = 0; li < lines.length; li++) {
+              if (li > 0) process.stdout.write(`\n${UI.slate('  │ ')}`);
+              process.stdout.write(UI.slate.italic(lines[li]));
+            }
+            thinkMsg += thinking;
+          }
+          
           const content = chunk.message.content;
           if (content) {
-            process.stdout.write(content);
+            if (isThinking) {
+              isThinking = false;
+              process.stdout.write(`\n${UI.slate('  └─')}\n\n`);
+            }
             msg += content;
+            genTokenCount++;
+            // Show live progress with timer, tokens, and interrupt hint
+            const elapsed = ((Date.now() - genStartTime) / 1000).toFixed(1);
+            const tps = genTokenCount / Math.max((Date.now() - genStartTime) / 1000, 0.1);
+            process.stdout.write(`\r  ${UI.slate(`Generating... ${genTokenCount} tokens · ${elapsed}s · ${tps.toFixed(1)} t/s`)}  ${UI.slate.italic('Ctrl+C to stop')}`);
           }
+          
+          // Capture token stats from the final chunk (done: true)
+          if (chunk.prompt_eval_count) chunkPromptTokens = chunk.prompt_eval_count;
+          if (chunk.eval_count) chunkEvalTokens = chunk.eval_count;
           
           // Collect native tool_calls (arrive in chunks, usually the final one)
           if (chunk.message.tool_calls && chunk.message.tool_calls.length > 0) {
@@ -3227,31 +4112,47 @@ async function runSapper() {
             // Don't break - just warn. User can Ctrl+C if needed
           }
         }
-        console.log(chalk.magenta('└─────────────────────────────────────'));
-
-        // Render AI response with markdown (only for non-tool responses displayed to user)
-        const hasTextToolCalls = msg.includes('[TOOL:') && msg.includes('[/TOOL]');
-        const hasNativeToolCalls = nativeToolCalls.length > 0;
-        if (!hasTextToolCalls && !hasNativeToolCalls && msg.trim().length > 0) {
-          try {
-            const rendered = renderMarkdown(msg);
-            // Clear raw output and re-render with markdown
-            process.stdout.write('\x1B[2K'); // clear current line
-            console.log(chalk.magenta('┌─[') + chalk.white.bold('Sapper') + chalk.magenta('] ') + chalk.gray('(rendered)'));
-            console.log(rendered);
-            console.log(chalk.magenta('└─────────────────────────────────────'));
-          } catch (e) {
-            // Markdown rendering failed, raw output already shown
-          }
+        // Clear progress line and render formatted markdown
+        process.stdout.write('\r\x1b[K');
+        if (msg.trim()) {
+          console.log(renderMarkdown(msg));
+        } else {
+          console.log();
         }
 
+        // Update global token tracking from actual Ollama response
+        if (chunkPromptTokens > 0) {
+          lastPromptTokens = chunkPromptTokens;
+          lastEvalTokens = chunkEvalTokens;
+          const totalTokens = chunkPromptTokens + chunkEvalTokens;
+          const ctxLenDisplay = effectiveContextLength();
+          if (ctxLenDisplay) {
+            const usagePercent = Math.round((totalTokens / ctxLenDisplay) * 100);
+            const thinkNote = thinkMsg ? ` · ${UI.slate.italic(`${thinkMsg.length.toLocaleString()} chars thinking`)}` : '';
+            console.log(`${meter(totalTokens, ctxLenDisplay, 22)} ${UI.slate(`${chunkPromptTokens.toLocaleString()} prompt · ${chunkEvalTokens.toLocaleString()} response · ${usagePercent}% of context`)}${thinkNote}`);
+          }
+        }
+        console.log(divider('─', 'gray', 56));
+
         const aiDuration = Date.now() - aiStartTime;
-        // Build assistant message — include tool_calls if native tools were invoked
+        // Build assistant message — include tool_calls and thinking if present
         const assistantMsg = { role: 'assistant', content: msg };
+        if (thinkMsg) {
+          assistantMsg.thinking = thinkMsg;
+        }
         if (nativeToolCalls.length > 0) {
           assistantMsg.tool_calls = nativeToolCalls;
         }
         messages.push(assistantMsg);
+
+        // If interrupted, skip tool processing — go straight back to prompt
+        if (wasInterrupted) {
+          ensureSapperDir();
+          fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
+          active = false;
+          resetTerminal();
+          continue;
+        }
 
         // Log AI response
         logEntry('ai', {
