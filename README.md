@@ -19,7 +19,13 @@ Sapper is a command-line interface that connects to Ollama models to help you bu
 ## Installation
 
 ```bash
-npm install -g sapper
+npm install -g sapper-iq
+```
+
+Then run:
+
+```bash
+sapper
 ```
 
 ## Prerequisites

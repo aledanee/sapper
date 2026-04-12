@@ -1,148 +1,212 @@
-# Publishing Sapper to NPM
+# Publishing sapper-iq to npm
 
-This guide explains how to publish Sapper to npm registry manually.
+This guide documents the current manual release flow for the published npm package `sapper-iq`.
+
+The npm package name is `sapper-iq`.
+The installed CLI commands remain:
+
+- `sapper`
+- `sapper-ui`
 
 ## Prerequisites
 
-1. **npm account** - Create at [npmjs.com](https://npmjs.com)
-2. **npm login** - Run `npm login` in terminal
-3. **Package name available** - Check if "sapper" is available on npm
+1. You have publish access to `sapper-iq` on npm.
+2. You are logged in with `npm login`.
+3. The working tree is in a state you are ready to release.
+4. Node.js 16 or newer is available.
 
-## Step-by-Step Publishing Process
+Helpful checks:
 
-### 1. Verify Package Configuration
+```bash
+npm whoami
+git status --short --branch
+```
 
-Check `package.json` has correct information:
+## Current package metadata
+
+Release metadata currently lives in `package.json`:
+
 ```json
 {
-  "name": "sapper",
-  "version": "1.0.0",
-  "main": "sapper.mjs",
+  "name": "sapper-iq",
+  "version": "1.1.38",
   "bin": {
-    "sapper": "./sapper.mjs"
+    "sapper": "sapper.mjs",
+    "sapper-ui": "sapper-ui.mjs"
   },
-  "type": "module"
+  "files": [
+    "sapper.mjs",
+    "sapper-ui.mjs",
+    "README.md"
+  ]
 }
 ```
 
-### 2. Make Executable
+Notes:
 
-Ensure the main file is executable:
+- The published package name is `sapper-iq`, not `sapper`.
+- The global executable is still `sapper`.
+- Package contents are controlled by the `files` whitelist in `package.json`.
+
+## Release checklist
+
+Run this sequence before every publish.
+
+### 1. Verify the version you are about to publish
+
+Check the local version:
+
 ```bash
+node -p "require('./package.json').version"
+```
+
+Check the latest published version:
+
+```bash
+npm view sapper-iq version
+```
+
+If the local version already exists on npm, bump it before publishing.
+
+### 2. Update version metadata
+
+For a manual bump, update both files together:
+
+- `package.json`
+- `package-lock.json`
+
+Or use npm versioning commands:
+
+```bash
+npm version patch
+# or
+npm version minor
+# or
+npm version major
+```
+
+If you use `npm version`, review the created commit and tag before pushing.
+
+### 3. Sanity-check the CLI entrypoint
+
+```bash
+node --check sapper.mjs
 chmod +x sapper.mjs
 ```
 
-### 3. Test Locally
+`chmod +x` is usually already satisfied in git, but it is worth confirming if execute bits changed.
 
-Test the package locally before publishing:
-```bash
-npm link
-sapper --version  # Test if it works
-npm unlink -g sapper  # Clean up
-```
+### 4. Test the package contents
 
-### 4. Check Package Contents
+Always run a dry run before publishing:
 
-See what files will be published:
 ```bash
 npm pack --dry-run
 ```
 
-### 5. Login to NPM
+Confirm the tarball contains only the intended release files. Right now that should be driven by the `files` whitelist and typically includes:
 
-```bash
-npm login
-# Enter username, password, email, and 2FA code
-```
+- `README.md`
+- `package.json`
+- `sapper.mjs`
+- `sapper-ui.mjs`
 
-### 6. Publish
+If extra files appear, fix `package.json.files` before publishing.
+
+### 5. Publish
 
 ```bash
 npm publish
 ```
 
-If successful, you'll see:
-```
-+ sapper@1.0.0
+Successful output will look like:
+
+```text
++ sapper-iq@1.1.38
 ```
 
-### 7. Verify Installation
+### 6. Verify the published version
 
-Test global installation:
 ```bash
-npm install -g sapper
+npm view sapper-iq version
+```
+
+The returned version should match the version you just published.
+
+### 7. Verify install flow
+
+Install the package by package name, then run the CLI by bin name:
+
+```bash
+npm install -g sapper-iq
 sapper --version
 ```
 
-## Publishing Updates
+If you want to test the local repo without publishing, `npm link` is optional, not required:
 
-### For patch updates (1.0.0 → 1.0.1):
 ```bash
-npm version patch
-git push --follow-tags
-npm publish
+npm link
+sapper --version
+npm unlink -g sapper-iq
 ```
 
-### For minor updates (1.0.0 → 1.1.0):
+## Recommended git flow around a release
+
+One practical sequence is:
+
 ```bash
-npm version minor  
-git push --follow-tags
+git status --short --branch
+git add README.md package.json package-lock.json sapper.mjs PUBLISHING.md
+git commit -m "release: 1.1.39"
+git push origin main
 npm publish
+git tag v1.1.39
+git push origin v1.1.39
 ```
 
-### For major updates (1.0.0 → 2.0.0):
-```bash
-npm version major
-git push --follow-tags
-npm publish
-```
+If you publish before pushing source changes, verify afterward that the published version and git history still match.
 
 ## Troubleshooting
 
-### Package name taken
-If "sapper" is taken, try alternatives:
-- `sapper-ai`
-- `sapper-cli`  
-- `ai-sapper`
-
-Update `package.json` name field accordingly.
-
 ### Authentication errors
+
 ```bash
 npm logout
 npm login
+npm whoami
 ```
 
+### Version already exists
+
+If `npm publish` fails because the version already exists:
+
+1. Bump the version in `package.json` and `package-lock.json`.
+2. Re-run `npm pack --dry-run`.
+3. Publish again.
+
+### Wrong files in the tarball
+
+If `npm pack --dry-run` includes extra files such as local state, backups, or old folders, fix the `files` array in `package.json` and rerun the dry run.
+
 ### Permission errors
-Check if you have publish rights to the package name.
 
-### Version conflicts
-Each publish must have a unique version number. Increment version in `package.json`.
+Make sure the npm account you are logged into has publish rights for `sapper-iq`.
 
-## Post-Publish Steps
+## Reference commands
 
-1. **Verify on npmjs.com** - Visit `https://npmjs.com/package/sapper`
-2. **Test installation** - `npm install -g sapper`
-3. **Update README** - Add npm installation instructions
-4. **Tag release on GitHub** - Create release tag matching npm version
+```bash
+npm whoami
+npm view sapper-iq version
+npm pack --dry-run
+npm publish
+npm install -g sapper-iq
+npm deprecate sapper-iq@1.1.38 "reason"
+npm owner ls sapper-iq
+```
 
-## NPM Commands Reference
+## Post-publish checks
 
-- `npm whoami` - Check logged in user
-- `npm view sapper` - View package info
-- `npm unpublish sapper@1.0.0` - Remove specific version (within 24hrs)
-- `npm deprecate sapper@1.0.0 "reason"` - Mark version as deprecated
-- `npm owner ls sapper` - List package owners
-
-## GitHub Integration
-
-After publishing, users can install via:
-- `npm install -g sapper` (from npm registry)  
-- `npm install -g git+https://github.com/aledanee/sapper.git` (from GitHub)
-
-Keep both npm and GitHub versions synchronized.
-
-
-
-
-git add . && git commit -m "Add specialized Node.js/PostgreSQL prompts with use cases" && npm version patch && npm publish
+1. Confirm the new version on `https://www.npmjs.com/package/sapper-iq`.
+2. Confirm `npm view sapper-iq version` returns the expected version.
+3. Confirm the repo contains the matching source changes.
+4. Optionally create and push a matching git tag.
