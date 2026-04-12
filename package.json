@@ -1,12 +1,17 @@
 {
   "name": "sapper-iq",
-  "version": "1.1.37",
+  "version": "1.1.38",
   "description": "AI-powered development assistant that executes commands and builds projects",
   "main": "sapper.mjs",
   "bin": {
     "sapper": "sapper.mjs",
     "sapper-ui": "sapper-ui.mjs"
   },
+  "files": [
+    "sapper.mjs",
+    "sapper-ui.mjs",
+    "README.md"
+  ],
   "type": "module",
   "scripts": {
     "start": "node sapper.mjs"

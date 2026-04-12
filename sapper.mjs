@@ -818,7 +818,10 @@ function buildSystemPrompt(agentContent = null, skillContents = []) {
   const now = new Date();
   const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-  let prompt = `You are Sapper, an intelligent AI assistant with access to the local filesystem and shell.
+  const promptConfig = getPromptConfig();
+  const promptPrepend = promptConfig.prepend.trim();
+  const promptAppend = promptConfig.append.trim();
+  const corePrompt = promptConfig.coreOverride.trim() || `You are Sapper, an intelligent AI assistant with access to the local filesystem and shell.
 You can help with ANY task - coding, writing, research, planning, analysis, and more.
 Adapt your personality and expertise based on the active agent role and loaded skills.
 
@@ -830,6 +833,9 @@ RULES:
 3. BE PRECISE: When using patch, ensure the 'old_text' matches exactly.
 4. VERIFY: After making changes, verify they work (run tests, check output, etc).
 5. NO HALLUCINATIONS: If a file doesn't exist, don't guess its content. List the directory instead.`;
+  let prompt = promptPrepend
+    ? `${wrapPromptCustomizationBlock('CUSTOM PROMPT PREPEND', promptPrepend, false)}\n\n${corePrompt}`
+    : corePrompt;
 
   if (_useNativeToolsFlag) {
     prompt += `
@@ -841,7 +847,12 @@ Available tools: list_directory, read_file, search_files, write_file, patch_file
 PATCH TIPS:
 - For patch_file, set old_text to "LINE:<number>" to replace a specific line by number (most reliable).
 - Always read_file first to see exact content before using patch_file.
-- If a patch fails, do NOT retry with slight variations. Switch to LINE:number mode or use write_file instead.`;
+- If a patch fails, do NOT retry with slight variations. Switch to LINE:number mode or use write_file instead.
+
+SHELL TIPS:
+- run_shell may keep long-running commands in a background session depending on config.
+- If a shell result returns a session id, inspect more output with run_shell command "__shell_read__ <session_id>".
+- Use run_shell command "__shell_list__" to list sessions and "__shell_stop__ <session_id>" to stop one.`;
   } else {
     prompt += `
 
@@ -858,6 +869,11 @@ PATCH TIPS:
 - PREFER the LINE:number mode when you know which line to change. It is much more reliable than text matching.
 - Always READ the file first to see exact content before using PATCH.
 - If a PATCH fails, do NOT retry with slight variations. Switch to LINE:number mode or use WRITE instead.
+
+SHELL TIPS:
+- Long-running commands may be moved to a background shell session depending on config.
+- If shell output mentions a session id, inspect more output with [TOOL:SHELL]__shell_read__ <session_id>[/TOOL].
+- Use [TOOL:SHELL]__shell_list__[/TOOL] to list sessions and [TOOL:SHELL]__shell_stop__ <session_id>[/TOOL] to stop one.
 
 You MUST use the [TOOL:...][/TOOL] syntax above to perform actions. This is how you interact with the filesystem and shell - there is no other way. When you want to read a file, output [TOOL:READ]path[/TOOL] in your response. When you want to list a directory, output [TOOL:LIST].[/TOOL]. Always actually use the tools - do not just describe what you would do.
 Do NOT show tool syntax as examples or documentation to the user. Only use them to perform real actions.`;
@@ -894,6 +910,10 @@ FORBIDDEN TOOLS (DO NOT USE): ${forbidden.join(', ')}. You MUST NOT attempt to u
     prompt += `\n═══ END SKILLS ═══\n\nUse the knowledge from the loaded skills above when relevant to the user's request.`;
   }
 
+  if (promptAppend) {
+    prompt += wrapPromptCustomizationBlock('CUSTOM PROMPT APPEND', promptAppend);
+  }
+
   return prompt;
 }
 
@@ -902,20 +922,204 @@ let currentAgent = null; // null = default Sapper, or agent name string
 let currentAgentTools = null; // null = all tools allowed, or array of allowed tool names
 let loadedSkills = []; // array of skill names currently loaded
 
-// Load config (settings like autoAttach)
+const DEFAULT_CONFIG = Object.freeze({
+  autoAttach: true,
+  contextLimit: null,
+  toolRoundLimit: 40,
+  summaryPhases: true,
+  summarizeTriggerPercent: 65,
+  shell: Object.freeze({
+    streamToModel: true,
+    backgroundMode: 'auto',
+    backgroundAfterSeconds: 8,
+    outputChunkChars: 4000,
+  }),
+  streaming: Object.freeze({
+    showPhaseStatus: true,
+    showHeartbeat: true,
+    idleNoticeSeconds: 4,
+  }),
+  thinking: Object.freeze({
+    mode: 'auto',
+  }),
+  prompt: Object.freeze({
+    prepend: '',
+    append: '',
+    coreOverride: '',
+  }),
+});
+
+function normalizeBoolean(value, fallback) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
+function normalizeContextLimit(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : null;
+}
+
+function normalizeSummarizeTriggerPercent(value) {
+  let parsed = Number(value);
+  if (!Number.isFinite(parsed)) return DEFAULT_CONFIG.summarizeTriggerPercent;
+  if (parsed > 0 && parsed <= 1) parsed *= 100;
+  return Math.max(40, Math.min(90, Math.round(parsed)));
+}
+
+function normalizeToolRoundLimit(value) {
+  return normalizeIntegerInRange(value, DEFAULT_CONFIG.toolRoundLimit, 1, 200);
+}
+
+function normalizeThinkingMode(value) {
+  if (typeof value === 'boolean') return value ? 'on' : 'off';
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['on', 'true', '1', 'yes', 'enable', 'enabled', 'always'].includes(normalized)) return 'on';
+  if (['off', 'false', '0', 'no', 'disable', 'disabled', 'never'].includes(normalized)) return 'off';
+  return 'auto';
+}
+
+function normalizeShellBackgroundMode(value) {
+  if (typeof value === 'boolean') return value ? 'on' : 'off';
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['on', 'true', '1', 'yes', 'enable', 'enabled', 'always'].includes(normalized)) return 'on';
+  if (['off', 'false', '0', 'no', 'disable', 'disabled', 'never'].includes(normalized)) return 'off';
+  return 'auto';
+}
+
+function normalizeThinkingConfig(thinkingConfig = {}) {
+  if (typeof thinkingConfig === 'boolean' || typeof thinkingConfig === 'string') {
+    return { mode: normalizeThinkingMode(thinkingConfig) };
+  }
+
+  if (!thinkingConfig || typeof thinkingConfig !== 'object' || Array.isArray(thinkingConfig)) {
+    return { ...DEFAULT_CONFIG.thinking };
+  }
+
+  return {
+    mode: normalizeThinkingMode(thinkingConfig.mode),
+  };
+}
+
+function normalizeShellConfig(shellConfig = {}) {
+  if (typeof shellConfig === 'boolean' || typeof shellConfig === 'string') {
+    return {
+      ...DEFAULT_CONFIG.shell,
+      backgroundMode: normalizeShellBackgroundMode(shellConfig),
+    };
+  }
+
+  if (!shellConfig || typeof shellConfig !== 'object' || Array.isArray(shellConfig)) {
+    return { ...DEFAULT_CONFIG.shell };
+  }
+
+  return {
+    streamToModel: normalizeBoolean(shellConfig.streamToModel, DEFAULT_CONFIG.shell.streamToModel),
+    backgroundMode: normalizeShellBackgroundMode(shellConfig.backgroundMode),
+    backgroundAfterSeconds: normalizeIntegerInRange(shellConfig.backgroundAfterSeconds, DEFAULT_CONFIG.shell.backgroundAfterSeconds, 2, 120),
+    outputChunkChars: normalizeIntegerInRange(shellConfig.outputChunkChars, DEFAULT_CONFIG.shell.outputChunkChars, 400, 12000),
+  };
+}
+
+function normalizeIntegerInRange(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(parsed)));
+}
+
+function normalizeStreamingConfig(streamingConfig = {}) {
+  if (typeof streamingConfig === 'boolean') {
+    return {
+      ...DEFAULT_CONFIG.streaming,
+      showPhaseStatus: streamingConfig,
+      showHeartbeat: streamingConfig,
+    };
+  }
+
+  if (!streamingConfig || typeof streamingConfig !== 'object' || Array.isArray(streamingConfig)) {
+    return { ...DEFAULT_CONFIG.streaming };
+  }
+
+  return {
+    showPhaseStatus: normalizeBoolean(streamingConfig.showPhaseStatus, DEFAULT_CONFIG.streaming.showPhaseStatus),
+    showHeartbeat: normalizeBoolean(streamingConfig.showHeartbeat, DEFAULT_CONFIG.streaming.showHeartbeat),
+    idleNoticeSeconds: normalizeIntegerInRange(streamingConfig.idleNoticeSeconds, DEFAULT_CONFIG.streaming.idleNoticeSeconds, 2, 60),
+  };
+}
+
+function normalizePromptText(value) {
+  if (typeof value === 'string') return value;
+  if (value === null || value === undefined) return '';
+  return String(value);
+}
+
+function normalizePromptConfig(promptConfig = {}) {
+  if (!promptConfig || typeof promptConfig !== 'object' || Array.isArray(promptConfig)) {
+    return {
+      ...DEFAULT_CONFIG.prompt,
+      append: normalizePromptText(promptConfig),
+    };
+  }
+
+  const coreOverride = promptConfig.coreOverride !== undefined
+    ? promptConfig.coreOverride
+    : promptConfig.override;
+
+  return {
+    prepend: normalizePromptText(promptConfig.prepend),
+    append: normalizePromptText(promptConfig.append),
+    coreOverride: normalizePromptText(coreOverride),
+  };
+}
+
+function normalizeConfig(config = {}) {
+  return {
+    ...config,
+    autoAttach: normalizeBoolean(config.autoAttach, DEFAULT_CONFIG.autoAttach),
+    contextLimit: normalizeContextLimit(config.contextLimit),
+    toolRoundLimit: normalizeToolRoundLimit(config.toolRoundLimit),
+    summaryPhases: normalizeBoolean(config.summaryPhases, DEFAULT_CONFIG.summaryPhases),
+    summarizeTriggerPercent: normalizeSummarizeTriggerPercent(config.summarizeTriggerPercent),
+    shell: normalizeShellConfig(config.shell),
+    streaming: normalizeStreamingConfig(config.streaming),
+    thinking: normalizeThinkingConfig(config.thinking),
+    prompt: normalizePromptConfig(config.prompt),
+  };
+}
+
+// Load config (settings like autoAttach and context summarization)
 function loadConfig() {
   try {
     ensureSapperDir();
     if (fs.existsSync(CONFIG_FILE)) {
-      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+      const rawConfig = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+      const normalizedConfig = normalizeConfig(rawConfig);
+      if (JSON.stringify(rawConfig) !== JSON.stringify(normalizedConfig)) {
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(normalizedConfig, null, 2));
+      }
+      return normalizedConfig;
     }
   } catch (e) {}
-  return { autoAttach: true, contextLimit: null }; // Default: auto-attach ON, no custom context limit
+
+  const defaultConfig = normalizeConfig();
+  try {
+    ensureSapperDir();
+    if (!fs.existsSync(CONFIG_FILE)) {
+      fs.writeFileSync(CONFIG_FILE, JSON.stringify(defaultConfig, null, 2));
+    }
+  } catch (e) {}
+  return defaultConfig;
 }
 
 function saveConfig(config) {
   ensureSapperDir();
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  const normalizedConfig = normalizeConfig(config);
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(normalizedConfig, null, 2));
+  sapperConfig = normalizedConfig;
 }
 
 // Global config
@@ -927,6 +1131,202 @@ function effectiveContextLength() {
     return sapperConfig.contextLimit;
   }
   return modelContextLength;
+}
+
+const SUMMARY_PHASES = [
+  'Prepare summary request',
+  'Summarize older messages',
+  'Save compressed context',
+  'Resume your prompt',
+];
+
+function summaryPhasesEnabled() {
+  return sapperConfig.summaryPhases !== false;
+}
+
+function toolRoundLimit() {
+  return normalizeToolRoundLimit(sapperConfig.toolRoundLimit);
+}
+
+function getShellConfig() {
+  return normalizeShellConfig(sapperConfig.shell);
+}
+
+function shellStreamToModelEnabled() {
+  return getShellConfig().streamToModel;
+}
+
+function shellBackgroundMode() {
+  return getShellConfig().backgroundMode;
+}
+
+function shellBackgroundAfterSeconds() {
+  return getShellConfig().backgroundAfterSeconds;
+}
+
+function shellOutputChunkChars() {
+  return getShellConfig().outputChunkChars;
+}
+
+function summaryTriggerPercent() {
+  return normalizeSummarizeTriggerPercent(sapperConfig.summarizeTriggerPercent);
+}
+
+function summaryTokenThreshold(ctxLen) {
+  return ctxLen ? Math.floor(ctxLen * (summaryTriggerPercent() / 100)) : 8000;
+}
+
+function parseSummaryTriggerInput(value) {
+  if (value === undefined || value === null) return null;
+  const normalized = String(value).trim().replace(/%$/, '');
+  if (!normalized) return null;
+
+  let parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) return null;
+  if (parsed > 0 && parsed <= 1) parsed *= 100;
+
+  return Math.max(40, Math.min(90, Math.round(parsed)));
+}
+
+function summaryPhaseText(stepNumber, detail = '') {
+  const fallback = SUMMARY_PHASES[stepNumber - 1] || 'Context summarization';
+  if (!summaryPhasesEnabled()) {
+    return detail || fallback;
+  }
+  return detail
+    ? `Step ${stepNumber}/${SUMMARY_PHASES.length} ${detail}`
+    : `Step ${stepNumber}/${SUMMARY_PHASES.length} ${fallback}`;
+}
+
+function renderSummaryPhaseList(activeStep = null) {
+  return SUMMARY_PHASES
+    .map((label, index) => {
+      const stepNumber = index + 1;
+      const line = `Step ${stepNumber}/${SUMMARY_PHASES.length} ${label}`;
+      return activeStep === stepNumber ? chalk.cyan(line) : UI.slate(line);
+    })
+    .join('\n');
+}
+
+function getPromptConfig() {
+  return normalizePromptConfig(sapperConfig.prompt);
+}
+
+function getThinkingConfig() {
+  return normalizeThinkingConfig(sapperConfig.thinking);
+}
+
+function getStreamingConfig() {
+  return normalizeStreamingConfig(sapperConfig.streaming);
+}
+
+function streamPhaseStatusEnabled() {
+  return getStreamingConfig().showPhaseStatus;
+}
+
+function streamHeartbeatEnabled() {
+  return getStreamingConfig().showHeartbeat;
+}
+
+function streamIdleNoticeSeconds() {
+  return getStreamingConfig().idleNoticeSeconds;
+}
+
+function thinkingMode() {
+  return getThinkingConfig().mode;
+}
+
+function normalizeThinkingInput(input = '') {
+  let normalized = String(input ?? '').trim();
+  if (normalized.startsWith('/') && normalized.includes(' ')) {
+    normalized = normalized.substring(normalized.indexOf(' ') + 1).trim();
+  }
+  return normalized;
+}
+
+function isSimplePrompt(input = '') {
+  const normalized = normalizeThinkingInput(input).toLowerCase();
+  if (!normalized) return true;
+  if (normalized.includes('\n')) return false;
+  if (/@|https?:\/\//.test(normalized)) return false;
+  if (/[`{}[\]();<>]/.test(normalized)) return false;
+  if (/^(hi|hello|hey|thanks|thank you|ok|okay|continue|go on|proceed|yes|no|y|n|cool|nice|bye|good morning|good evening)$/.test(normalized)) {
+    return true;
+  }
+  if (/\b(analyze|debug|fix|implement|refactor|design|plan|optimi[sz]e|architect|investigate|review|build|create|generate|search|find|error|bug|test|compare|explain deeply)\b/.test(normalized)) {
+    return false;
+  }
+  if (normalized.length <= 32) return true;
+  return normalized.length <= 60 && normalized.split(/\s+/).length <= 8;
+}
+
+function shouldUseThinkingForInput(input = '') {
+  const mode = thinkingMode();
+  if (mode === 'on') return true;
+  if (mode === 'off') return false;
+  return !isSimplePrompt(input);
+}
+
+function isLikelyLongRunningCommand(command = '') {
+  const normalized = String(command ?? '').trim().toLowerCase();
+  if (!normalized) return false;
+
+  const patterns = [
+    /\buvicorn\b/,
+    /\bnpm\s+run\s+(dev|start|watch)\b/,
+    /\bpnpm\s+(dev|start|watch)\b/,
+    /\byarn\s+(dev|start|watch)\b/,
+    /\bnext\s+dev\b/,
+    /\bvite\b/,
+    /\bnodemon\b/,
+    /\bdocker\s+compose\s+up\b/,
+    /\bwebpack(?:\s+serve|\s+--watch)?\b/,
+    /\bpython\s+-m\s+http\.server\b/,
+    /\btail\s+-f\b/,
+    /\bserve\b/,
+    /--reload\b/,
+    /--watch\b/
+  ];
+
+  return patterns.some(pattern => pattern.test(normalized));
+}
+
+function shouldBackgroundShellCommand(command = '') {
+  const mode = shellBackgroundMode();
+  if (mode === 'off') return false;
+  if (mode === 'on') return true;
+  return isLikelyLongRunningCommand(command);
+}
+
+function hasCustomPromptConfig() {
+  const promptConfig = getPromptConfig();
+  return Boolean(promptConfig.prepend.trim() || promptConfig.append.trim() || promptConfig.coreOverride.trim());
+}
+
+function wrapPromptCustomizationBlock(title, content, leadingNewline = true) {
+  const normalized = String(content ?? '').trim();
+  if (!normalized) return '';
+  const prefix = leadingNewline ? '\n\n' : '';
+  return `${prefix}═══ ${title} ═══\n${normalized}\n═══ END ${title} ═══`;
+}
+
+function resolveLoadedSkillContents() {
+  const allSkills = loadSkills();
+  return loadedSkills.map(skillName => allSkills[skillName]?.content || '').filter(Boolean);
+}
+
+function resolveActiveAgentContent() {
+  if (!currentAgent) return null;
+  const allAgents = loadAgents();
+  return allAgents[currentAgent]?.content || null;
+}
+
+function refreshSystemPrompt(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return;
+  messages[0] = {
+    role: 'system',
+    content: buildSystemPrompt(resolveActiveAgentContent(), resolveLoadedSkillContents())
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1467,9 +1867,9 @@ async function autoSummarizeContext(messages, model, force = false) {
   const estimatedTokens = estimateMessagesTokens(messages);
   const contextSize = JSON.stringify(messages).length;
   
-  // Summarize when we hit 75% of effective context window (leave room for response)
+  // Summarize when we hit the configured share of the effective context window
   const ctxLen = effectiveContextLength();
-  const tokenThreshold = ctxLen ? Math.floor(ctxLen * 0.75) : 8000;
+  const tokenThreshold = summaryTokenThreshold(ctxLen);
   // Also keep the old byte-based check as a fallback
   const shouldSummarize = (ctxLen && estimatedTokens > tokenThreshold) || 
                           (!ctxLen && contextSize > 32000);
@@ -1481,14 +1881,22 @@ async function autoSummarizeContext(messages, model, force = false) {
     : Math.round((contextSize / 32000) * 100);
 
   console.log();
-  console.log(box(
-    `Context: ~${chalk.red.bold(estimatedTokens.toLocaleString())} tokens / ${chalk.white(ctxLen ? ctxLen.toLocaleString() : '?')} max (${chalk.red.bold(usagePercent + '%')})\n` +
-    `${chalk.gray(`${messages.length} messages, ${Math.round(contextSize / 1024)}KB raw`)}\n` +
-    `${chalk.cyan('Auto-summarizing to stay within context window...')}`,
-    '🧠 Context Window Management', 'cyan'
-  ));
+  const summaryIntroLines = [
+    `Context: ~${chalk.red.bold(estimatedTokens.toLocaleString())} tokens / ${chalk.white(ctxLen ? ctxLen.toLocaleString() : '?')} max (${chalk.red.bold(usagePercent + '%')})`,
+    chalk.gray(`${messages.length} messages, ${Math.round(contextSize / 1024)}KB raw`),
+    chalk.cyan('Auto-summarizing to stay within context window before answering your prompt...'),
+    chalk.gray(`Trigger: ${summaryTriggerPercent()}% of the active context window (${tokenThreshold.toLocaleString()} tokens)`),
+    chalk.gray('This is an extra model call, so large contexts can pause here for a while.'),
+  ];
+  if (summaryPhasesEnabled()) {
+    summaryIntroLines.push('');
+    summaryIntroLines.push(renderSummaryPhaseList(1));
+  }
+  console.log(box(summaryIntroLines.join('\n'), '🧠 Context Window Management', 'cyan'));
 
-  const summarySpinner = ora('Summarizing conversation...').start();
+  const summaryStart = Date.now();
+  const elapsedSummaryTime = () => `${Math.max(0, Math.round((Date.now() - summaryStart) / 1000))}s`;
+  const summarySpinner = ora(summaryPhaseText(1, 'Preparing summary request...')).start();
 
   // Separate: system prompt, messages to summarize, recent messages to keep
   const systemPrompt = messages[0];
@@ -1542,14 +1950,13 @@ async function autoSummarizeContext(messages, model, force = false) {
     })
     .join('\n\n');
 
+  const conversationTokens = estimateTokens(conversationText);
+  const conversationBytes = Buffer.byteLength(conversationText, 'utf8');
+  summarySpinner.text = summaryPhaseText(1, `Preparing summary request from ${oldMessages.length} older messages (~${conversationTokens.toLocaleString()} tokens, ${formatBytes(conversationBytes)})`);
+  let spinnerInterval = null;
+
   try {
-    const summaryResponse = await ollama.chat({
-      model,
-      ...(effectiveContextLength() ? { options: { num_ctx: effectiveContextLength() } } : {}),
-      messages: [
-        {
-          role: 'system',
-          content: `You are a conversation summarizer for an AI coding agent called Sapper. Produce a concise but thorough summary of the conversation below. Include:
+    const summaryInstruction = `You are a conversation summarizer for an AI coding agent called Sapper. Produce a concise but thorough summary of the conversation below. Include:
 - Key topics discussed and decisions made
 - Files that were read, created, or modified (with paths)
 - Important code changes or bugs found
@@ -1561,7 +1968,20 @@ async function autoSummarizeContext(messages, model, force = false) {
 
 CRITICAL: The AI assistant uses tools with syntax like [TOOL:READ]path[/TOOL]. Make sure to note which tools were used so the assistant remembers to keep using them after this summary.
 
-Output ONLY the summary, no preamble. Keep it under 800 words. Use bullet points.`
+Output ONLY the summary, no preamble. Keep it under 800 words. Use bullet points.`;
+    const summaryInputTokens = estimateTokens(summaryInstruction) + estimateTokens(`Summarize this conversation:\n\n${conversationText}`);
+    summarySpinner.text = summaryPhaseText(2, `Waiting for ${model} to summarize (~${summaryInputTokens.toLocaleString()} tokens, ${elapsedSummaryTime()} elapsed)`);
+    spinnerInterval = setInterval(() => {
+      summarySpinner.text = summaryPhaseText(2, `Waiting for ${model} to summarize (~${summaryInputTokens.toLocaleString()} tokens, ${elapsedSummaryTime()} elapsed)`);
+    }, 1000);
+
+    const summaryResponse = await ollama.chat({
+      model,
+      ...(effectiveContextLength() ? { options: { num_ctx: effectiveContextLength() } } : {}),
+      messages: [
+        {
+          role: 'system',
+          content: summaryInstruction
         },
         {
           role: 'user',
@@ -1570,10 +1990,13 @@ Output ONLY the summary, no preamble. Keep it under 800 words. Use bullet points
       ],
       stream: false
     });
+    clearInterval(spinnerInterval);
+    spinnerInterval = null;
 
     const summary = summaryResponse.message.content;
 
     // Save old messages to embeddings before discarding
+    summarySpinner.text = summaryPhaseText(3, `Saving compressed context and memory (${elapsedSummaryTime()} elapsed)`);
     const embeddings = loadEmbeddings();
     const textToEmbed = oldMessages
       .filter(m => m.role !== 'system')
@@ -1626,10 +2049,16 @@ Output ONLY the summary, no preamble. Keep it under 800 words. Use bullet points
     const newSize = JSON.stringify(newMessages).length;
     const newTokens = estimateMessagesTokens(newMessages);
     summarySpinner.stop();
+    if (summaryPhasesEnabled()) {
+      console.log(chalk.gray(`   ${summaryPhaseText(4, 'Context ready. Returning to chat...')}`));
+    }
     console.log(chalk.green(`✅ Summarized! ~${chalk.white(estimatedTokens.toLocaleString())} → ~${chalk.white(newTokens.toLocaleString())} tokens (${messages.length} → ${newMessages.length} messages)`));
     if (ctxLen) {
       const newPercent = Math.round((newTokens / ctxLen) * 100);
       console.log(chalk.gray(`   📊 Context window usage: ${newPercent}% of ${ctxLen.toLocaleString()} tokens`));
+      if (newPercent >= 80) {
+        console.log(chalk.yellow('   ⚠️  Context is still dense, so the next reply may still be slower than usual.'));
+      }
     }
     if (embeddings.chunks.length > 0) {
       console.log(chalk.gray(`   🧠 Old context saved to memory (${embeddings.chunks.length} memories)`));
@@ -1642,6 +2071,7 @@ Output ONLY the summary, no preamble. Keep it under 800 words. Use bullet points
 
     return newMessages;
   } catch (e) {
+    if (spinnerInterval) clearInterval(spinnerInterval);
     summarySpinner.stop();
     console.log(chalk.yellow(`⚠️  Auto-summary failed: ${e.message}`));
     console.log(chalk.gray('   Tip: Use /prune to manually reduce context.\n'));
@@ -1788,7 +2218,54 @@ function promptShell(label, detail = '') {
   return `${UI.slate(label)}${detail ? `\n${detail}` : ''}\n${UI.accent('› ')} `;
 }
 
-function confirmPrompt(label, type = 'warning') {
+function renderedTerminalLineCount(text = '', width = process.stdout.columns || 80) {
+  const terminalColumns = Math.max(1, width || 80);
+  return String(text ?? '')
+    .split('\n')
+    .reduce((count, line) => count + Math.max(1, Math.ceil(Math.max(1, visibleLength(line)) / terminalColumns)), 0);
+}
+
+function clearPromptEcho(promptText, inputText = '') {
+  const totalLines = renderedTerminalLineCount(`${promptText}${inputText}`);
+  for (let index = 0; index < totalLines; index++) {
+    process.stdout.write('\x1B[1A\x1B[2K');
+  }
+  process.stdout.write('\r');
+}
+
+function streamPhaseMessage(message, type = 'neutral') {
+  const colorFn = BADGE_STYLES[type] || UI.slate;
+  return `${colorFn('[status]')} ${UI.slate(message)}`;
+}
+
+function showStreamPhase(message, type = 'neutral') {
+  if (!streamPhaseStatusEnabled()) return;
+  console.log(streamPhaseMessage(message, type));
+}
+
+function renderStreamingHeartbeat({
+  genTokenCount = 0,
+  genStartTime,
+  lastVisibleActivityAt,
+  stage = 'generating',
+}) {
+  const elapsedSeconds = Math.max((Date.now() - genStartTime) / 1000, 0.1);
+  const elapsed = elapsedSeconds.toFixed(1);
+  const idleSeconds = Math.max(0, Math.floor((Date.now() - lastVisibleActivityAt) / 1000));
+  const idleThreshold = streamIdleNoticeSeconds();
+
+  if (stage === 'waiting-first') {
+    const waitNote = idleSeconds >= idleThreshold ? ` · waiting ${idleSeconds}s` : '';
+    process.stdout.write(`\r  ${UI.slate(`Waiting for first model chunk... ${elapsed}s elapsed${waitNote}`)}  ${UI.slate.italic('Ctrl+C to stop')}`);
+    return;
+  }
+
+  const tps = genTokenCount / elapsedSeconds;
+  const waitNote = idleSeconds >= idleThreshold ? ` · waiting ${idleSeconds}s for next chunk` : '';
+  process.stdout.write(`\r  ${UI.slate(`Generating... ${genTokenCount} tokens · ${elapsed}s · ${tps.toFixed(1)} t/s${waitNote}`)}  ${UI.slate.italic('Ctrl+C to stop')}`);
+}
+
+function confirmPrompt(label, type = 'warning', optionsLabel = '[y/N] ') {
   const colors = {
     info: UI.accent,
     success: UI.mint,
@@ -1798,7 +2275,246 @@ function confirmPrompt(label, type = 'warning') {
     neutral: UI.slate,
   };
   const colorFn = colors[type] || UI.gold;
-  return colorFn(`\n${label}? `) + UI.slate('[y/N] ');
+  return colorFn(`\n${label}? `) + UI.slate(optionsLabel);
+}
+
+function parseApprovalShortcut(input = '') {
+  const trimmed = String(input ?? '').trim();
+  if (!trimmed) return null;
+
+  const match = trimmed.match(/^(f|feedback|e|edit)\b(?:\s*[:=-]?\s*(.*))?$/i);
+  if (!match) return null;
+
+  const command = match[1].toLowerCase();
+  return {
+    type: command.startsWith('e') ? 'edit' : 'feedback',
+    detail: String(match[2] ?? '').trim(),
+  };
+}
+
+async function resolveApprovalInstruction(input, {
+  feedbackPrompt = 'Feedback for Sapper: ',
+  editPrompt = 'Edit instruction for Sapper: ',
+} = {}) {
+  const shortcut = parseApprovalShortcut(input);
+  if (!shortcut) return null;
+
+  let detail = shortcut.detail;
+  if (!detail) {
+    const promptLabel = shortcut.type === 'edit' ? editPrompt : feedbackPrompt;
+    detail = String(await safeQuestion(chalk.cyan(promptLabel))).trim();
+  }
+
+  return {
+    type: shortcut.type,
+    detail,
+  };
+}
+
+const shellSessions = new Map();
+let shellSessionCounter = 0;
+const SHELL_OUTPUT_BUFFER_MAX_CHARS = 50000;
+
+function createShellSession(command, cwd, proc) {
+  const id = `shell-${++shellSessionCounter}`;
+  const session = {
+    id,
+    command,
+    cwd,
+    proc,
+    startedAt: Date.now(),
+    output: '',
+    reportedOffset: 0,
+    completed: false,
+    backgrounded: false,
+    exitCode: null,
+    signal: null,
+    error: null,
+    liveEchoEnabled: true,
+  };
+  shellSessions.set(id, session);
+  return session;
+}
+
+function activeShellSessionCount() {
+  return Array.from(shellSessions.values()).filter(session => !session.completed).length;
+}
+
+function appendShellSessionOutput(session, text) {
+  if (!session || !text) return;
+  session.output += text;
+  if (session.output.length > SHELL_OUTPUT_BUFFER_MAX_CHARS) {
+    const overflow = session.output.length - SHELL_OUTPUT_BUFFER_MAX_CHARS;
+    session.output = session.output.slice(overflow);
+    session.reportedOffset = Math.max(0, session.reportedOffset - overflow);
+  }
+}
+
+function formatShellOutputChunk(text = '', emptyLabel = '(no output yet)') {
+  const normalized = String(text ?? '').trim();
+  if (!normalized) return emptyLabel;
+  const maxChars = shellOutputChunkChars();
+  if (normalized.length <= maxChars) return normalized;
+  return `... (showing last ${maxChars.toLocaleString()} chars)\n${normalized.slice(-maxChars)}`;
+}
+
+function shellSessionUsageHint(sessionId) {
+  return `Use run_shell with command \"__shell_read__ ${sessionId}\" to inspect more output, \"__shell_list__\" to list sessions, or \"__shell_stop__ ${sessionId}\" to stop it.`;
+}
+
+function buildShellSessionResult(session, {
+  includeOutput = true,
+  onlyNewOutput = false,
+  markReported = false,
+  backgroundHandoff = false,
+} = {}) {
+  const relevantOutput = onlyNewOutput
+    ? session.output.slice(session.reportedOffset)
+    : session.output;
+
+  if (markReported) {
+    session.reportedOffset = session.output.length;
+  }
+
+  const elapsedSeconds = Math.max(1, Math.round((Date.now() - session.startedAt) / 1000));
+  const statusLine = session.completed
+    ? `Shell session ${session.id} completed in ${elapsedSeconds}s with exit code ${session.exitCode ?? 'unknown'}.`
+    : `Shell session ${session.id} is still running in background after ${elapsedSeconds}s.`;
+
+  const lines = [
+    statusLine,
+    `Command: ${session.command}`,
+    `Directory: ${session.cwd}`,
+  ];
+
+  if (session.error) {
+    lines.push(`Error: ${session.error}`);
+  }
+
+  if (!session.completed || backgroundHandoff) {
+    lines.push(shellSessionUsageHint(session.id));
+  }
+
+  if (includeOutput) {
+    lines.push('');
+    lines.push(onlyNewOutput ? 'Output since last check:' : backgroundHandoff ? 'Initial streamed output:' : 'Captured output:');
+    lines.push(formatShellOutputChunk(relevantOutput, onlyNewOutput ? '(no new output since last check)' : '(no output yet)'));
+  }
+
+  return lines.join('\n');
+}
+
+function parseShellSessionCommand(command = '') {
+  const trimmed = String(command ?? '').trim();
+  if (!trimmed.startsWith('__shell_')) return null;
+
+  const [directive, ...rest] = trimmed.split(/\s+/);
+  const sessionId = rest.join(' ').trim();
+
+  if (directive === '__shell_list__') return { action: 'list' };
+  if (directive === '__shell_read__') return { action: 'read', sessionId };
+  if (directive === '__shell_stop__') return { action: 'stop', sessionId };
+  return { action: 'unknown', directive };
+}
+
+async function handleShellSessionCommand(command = '') {
+  const parsed = parseShellSessionCommand(command);
+  if (!parsed) return null;
+
+  if (parsed.action === 'unknown') {
+    return `Unknown shell session command: ${parsed.directive}. Use __shell_list__, __shell_read__ <session_id>, or __shell_stop__ <session_id>.`;
+  }
+
+  if (parsed.action === 'list') {
+    const sessions = Array.from(shellSessions.values());
+    if (sessions.length === 0) return 'No shell sessions are currently tracked.';
+    return sessions.map(session => {
+      const state = session.completed ? `done (exit ${session.exitCode ?? 'unknown'})` : 'running';
+      return `${session.id} · ${state} · ${session.command}`;
+    }).join('\n');
+  }
+
+  if (!parsed.sessionId) {
+    return 'Missing shell session id. Use __shell_read__ <session_id> or __shell_stop__ <session_id>.';
+  }
+
+  const session = shellSessions.get(parsed.sessionId);
+  if (!session) {
+    return `Shell session not found: ${parsed.sessionId}. Use __shell_list__ to see available sessions.`;
+  }
+
+  if (parsed.action === 'read') {
+    return buildShellSessionResult(session, {
+      includeOutput: true,
+      onlyNewOutput: true,
+      markReported: true,
+      backgroundHandoff: !session.completed,
+    });
+  }
+
+  if (parsed.action === 'stop') {
+    if (session.completed) {
+      return buildShellSessionResult(session, {
+        includeOutput: true,
+        onlyNewOutput: false,
+        markReported: true,
+      });
+    }
+
+    console.log();
+    const confirmation = await safeQuestion(confirmPrompt(`Stop background shell session ${session.id}`, 'error', '[y/N] '));
+    if (!['y', 'yes'].includes(String(confirmation ?? '').trim().toLowerCase())) {
+      return `Stop request cancelled for shell session ${session.id}.`;
+    }
+
+    try {
+      session.proc.kill('SIGTERM');
+      return `Sent SIGTERM to shell session ${session.id}. ${shellSessionUsageHint(session.id)}`;
+    } catch (error) {
+      return `Could not stop shell session ${session.id}: ${error.message}`;
+    }
+  }
+
+  return null;
+}
+
+function getTrackedShellSessions() {
+  return Array.from(shellSessions.values()).sort((left, right) => right.startedAt - left.startedAt);
+}
+
+function shellSessionStatusLabel(session) {
+  if (!session) return 'unknown';
+  if (!session.completed) return 'running';
+  if (session.signal) return `stopped (${session.signal})`;
+  return `done (${session.exitCode ?? 'unknown'})`;
+}
+
+function renderShellSessionsPanel() {
+  const sessions = getTrackedShellSessions();
+  const activeCount = sessions.filter(session => !session.completed).length;
+  const completedCount = sessions.length - activeCount;
+  const lines = [
+    `config        ${chalk.white(shellStreamToModelEnabled() ? 'stream on' : 'stream off')} ${UI.slate('·')} ${chalk.white(`bg ${shellBackgroundMode()}`)} ${UI.slate('·')} ${chalk.white(`after ${shellBackgroundAfterSeconds()}s`)} ${UI.slate('·')} ${chalk.white(`chunk ${shellOutputChunkChars()}`)}`,
+    UI.slate(`visibility    bg off keeps long shell commands fully attached and visible in the terminal`),
+    `sessions      ${chalk.white(`${activeCount} active`)} ${UI.slate('·')} ${chalk.white(`${completedCount} completed`)}`,
+  ];
+
+  if (sessions.length === 0) {
+    lines.push(UI.slate('No background shell sessions are currently tracked.'));
+  } else {
+    for (const session of sessions.slice(0, 8)) {
+      const elapsed = formatElapsed(Date.now() - session.startedAt);
+      const lastOutputLine = String(session.output || '').trim().split('\n').filter(Boolean).slice(-1)[0] || '(no output yet)';
+      lines.push(`${chalk.white(session.id)} ${UI.slate('·')} ${chalk.white(shellSessionStatusLabel(session))} ${UI.slate('·')} ${UI.slate(elapsed)}`);
+      lines.push(`  ${UI.ink(ellipsis(session.command, 90))}`);
+      lines.push(`  ${UI.slate(ellipsis(lastOutputLine, 90))}`);
+    }
+    if (sessions.length > 8) {
+      lines.push(UI.slate(`Showing 8 of ${sessions.length} tracked sessions.`));
+    }
+  }
+
+  return box(lines.join('\n'), 'Shell Sessions', 'cyan');
 }
 
 // Configure marked with terminal renderer
@@ -1899,6 +2615,181 @@ async function safeQuestion(query) {
       resolve(answer ? answer.trim() : '');
     });
   });
+}
+
+function countLines(text = '') {
+  if (!text) return 0;
+  return String(text).split('\n').length;
+}
+
+function formatPreviewLine(line = '', maxWidth = Math.max(32, terminalWidth(82) - 12)) {
+  return ellipsis(String(line).replace(/\t/g, '  '), maxWidth);
+}
+
+function buildPreviewBlock(lines, startIdx, endIdx, changeStart, changeEnd, marker, colorFn, maxLines = 14) {
+  if (lines.length === 0) {
+    return colorFn(`${marker}   | (empty)`);
+  }
+
+  const indexes = [];
+  for (let index = startIdx; index <= endIdx; index++) {
+    indexes.push(index);
+  }
+
+  const clipped = indexes.length > maxLines;
+  const visibleIndexes = clipped
+    ? [
+        ...indexes.slice(0, Math.ceil(maxLines / 2)),
+        -1,
+        ...indexes.slice(-(Math.floor(maxLines / 2)))
+      ]
+    : indexes;
+  const numberWidth = String(Math.max(endIdx + 1, 1)).length;
+  const rows = [];
+
+  if (startIdx > 0) {
+    rows.push(UI.slate('  ...'));
+  }
+
+  for (const index of visibleIndexes) {
+    if (index === -1) {
+      rows.push(UI.slate('  ...'));
+      continue;
+    }
+
+    const prefix = index >= changeStart && index <= changeEnd ? marker : ' ';
+    const row = `${prefix} ${String(index + 1).padStart(numberWidth)} | ${formatPreviewLine(lines[index])}`;
+    rows.push(prefix === marker ? colorFn(row) : UI.slate(row));
+  }
+
+  if (clipped || endIdx < lines.length - 1) {
+    rows.push(UI.slate('  ...'));
+  }
+
+  return rows.join('\n');
+}
+
+function buildFileChangePreview(oldContent = '', newContent = '') {
+  const before = String(oldContent ?? '');
+  const after = String(newContent ?? '');
+
+  if (before === after) {
+    return UI.slate('No visible text changes.');
+  }
+
+  const oldLines = before ? before.split('\n') : [];
+  const newLines = after ? after.split('\n') : [];
+
+  if (oldLines.length === 0) {
+    return [
+      chalk.green('New file content'),
+      buildPreviewBlock(newLines, 0, Math.max(0, Math.min(newLines.length - 1, 13)), 0, Math.max(0, Math.min(newLines.length - 1, 13)), '+', chalk.green)
+    ].join('\n');
+  }
+
+  let start = 0;
+  while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) {
+    start++;
+  }
+
+  let oldEnd = oldLines.length - 1;
+  let newEnd = newLines.length - 1;
+  while (oldEnd >= start && newEnd >= start && oldLines[oldEnd] === newLines[newEnd]) {
+    oldEnd--;
+    newEnd--;
+  }
+
+  const contextLines = 3;
+  const oldStart = Math.max(0, start - contextLines);
+  const newStart = Math.max(0, start - contextLines);
+  const oldPreviewEnd = Math.min(oldLines.length - 1, Math.max(oldEnd, start - 1) + contextLines);
+  const newPreviewEnd = Math.min(newLines.length - 1, Math.max(newEnd, start - 1) + contextLines);
+
+  return [
+    chalk.red('Before'),
+    buildPreviewBlock(oldLines, oldStart, oldPreviewEnd, start, oldEnd, '-', chalk.red),
+    '',
+    chalk.green('After'),
+    buildPreviewBlock(newLines, newStart, newPreviewEnd, start, newEnd, '+', chalk.green),
+  ].join('\n');
+}
+
+function ensureParentDirectory(filePath) {
+  const parentDir = dirname(filePath);
+  if (parentDir && parentDir !== '.' && !fs.existsSync(parentDir)) {
+    fs.mkdirSync(parentDir, { recursive: true });
+  }
+}
+
+function restoreFileSnapshot(filePath, originalContent, existedBefore) {
+  if (existedBefore) {
+    fs.writeFileSync(filePath, originalContent);
+  } else if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+  }
+}
+
+async function reviewCandidateFile({ filePath, originalContent = '', newContent = '', title = 'File Review', successMessage }) {
+  const existedBefore = fs.existsSync(filePath);
+
+  ensureParentDirectory(filePath);
+  fs.writeFileSync(filePath, newContent);
+
+  while (true) {
+    console.log();
+    console.log(box(
+      `${keyValue('File', chalk.white(filePath), 8)}\n` +
+      `${keyValue('Status', chalk.white(existedBefore ? 'modified' : 'new file'), 8)}\n` +
+      `${keyValue('Lines', chalk.white(`${countLines(originalContent)} -> ${countLines(newContent)}`), 8)}\n` +
+      `${UI.slate('Candidate change written to disk. Review it in your editor now.')}\n` +
+      `${UI.slate('Choose keep to accept it, ignore to revert it, diff to inspect, f for feedback, or e for edit instructions.')}`,
+      title, 'yellow'
+    ));
+
+    const decisionInput = await safeQuestion(chalk.yellow('Review change ') + chalk.gray('[k]eep/[i]gnore/[d]iff/[f]eedback/[e]dit: '));
+    const decisionRaw = String(decisionInput ?? '').trim();
+    const decision = decisionRaw.toLowerCase();
+
+    if (['k', 'keep', 'y', 'yes'].includes(decision)) {
+      return successMessage || `Successfully saved changes to ${filePath}`;
+    }
+
+    if (['i', 'ignore', 'n', 'no'].includes(decision)) {
+      restoreFileSnapshot(filePath, originalContent, existedBefore);
+      return existedBefore
+        ? `Ignored change and restored ${filePath}`
+        : `Ignored change and removed ${filePath}`;
+    }
+
+    if (decision === '' || decision === 'd' || decision === 'diff') {
+      console.log();
+      console.log(box(buildFileChangePreview(originalContent, newContent), 'Change Diff', 'yellow'));
+      continue;
+    }
+
+    const approvalInstruction = await resolveApprovalInstruction(decisionRaw, {
+      feedbackPrompt: 'Feedback for this change: ',
+      editPrompt: 'Edit instruction for this change: ',
+    });
+
+    if (approvalInstruction) {
+      if (!approvalInstruction.detail) {
+        console.log(UI.slate('Enter feedback or edit instructions for Sapper, or choose keep/ignore/diff.'));
+        continue;
+      }
+
+      restoreFileSnapshot(filePath, originalContent, existedBefore);
+      const label = approvalInstruction.type === 'edit' ? 'User edit instruction' : 'User feedback';
+      return `Change rejected by user for ${filePath}.\n${label}: ${approvalInstruction.detail}\nThe original file was restored. Revise the change and try again.`;
+    }
+
+    if (decisionRaw) {
+      restoreFileSnapshot(filePath, originalContent, existedBefore);
+      return `Change rejected by user for ${filePath}.\nUser feedback: ${decisionRaw}\nThe original file was restored. Revise the change and try again.`;
+    }
+
+    console.log(UI.slate('Type k to keep, i to ignore, d to view the diff, f for feedback, e for edit instructions, or write feedback directly.'));
+  }
 }
 
 // Directories to ignore when listing files
@@ -2423,11 +3314,17 @@ async function pickModel(models) {
 
 const tools = {
   read: (path) => {
-    try { return fs.readFileSync(path.trim(), 'utf8'); } 
+    const trimmedPath = typeof path === 'string' ? path.trim() : '';
+    if (!trimmedPath) return 'Error reading file: missing file path';
+    try { return fs.readFileSync(trimmedPath, 'utf8'); } 
     catch (error) { return `Error reading file: ${error.message}`; }
   },
   patch: async (path, oldText, newText) => {
-    const trimmedPath = path.trim();
+    const trimmedPath = typeof path === 'string' ? path.trim() : '';
+    if (!trimmedPath) return 'Error patching file: missing file path';
+    if (typeof oldText !== 'string' || typeof newText !== 'string') {
+      return 'Error patching file: missing old_text or new_text';
+    }
     try {
       const content = fs.readFileSync(trimmedPath, 'utf8');
 
@@ -2439,23 +3336,19 @@ const tools = {
         if (lineNum < 1 || lineNum > lines.length) {
           return `Error: Line ${lineNum} out of range (file has ${lines.length} lines) in ${trimmedPath}`;
         }
-        const oldLine = lines[lineNum - 1];
         lines[lineNum - 1] = newText;
         const newContent = lines.join('\n');
-        console.log();
-        const diffContent =
-          `${keyValue('File', chalk.white(trimmedPath), 8)}\n` +
-          `${keyValue('Line', chalk.white(String(lineNum)), 8)}\n` +
-          `${UI.slate('Preview')}\n` +
-          chalk.red('- ' + oldLine) + '\n' +
-          chalk.green('+ ' + newText);
-        console.log(box(diffContent, 'Patch Review', 'yellow'));
-        const confirm = await safeQuestion(confirmPrompt('Apply patch', 'warning'));
-        if (confirm.toLowerCase() === 'y') {
-          fs.writeFileSync(trimmedPath, newContent);
-          return `Successfully patched line ${lineNum} of ${trimmedPath}`;
+        if (newContent === content) {
+          return `No changes needed in ${trimmedPath}`;
         }
-        return 'Patch rejected by user.';
+
+        return reviewCandidateFile({
+          filePath: trimmedPath,
+          originalContent: content,
+          newContent,
+          title: 'Patch Review',
+          successMessage: `Successfully patched line ${lineNum} of ${trimmedPath}`,
+        });
       }
 
       // --- Exact match (try as-is first, then trimmed) ---
@@ -2513,99 +3406,179 @@ const tools = {
             `Tip: Use LINE:number mode instead, e.g. [TOOL:PATCH]${trimmedPath}:::LINE:42|||replacement text[/TOOL]`;
         }
       }
-      
-      // Show diff preview
-      console.log();
-      const diffContent = 
-        `${keyValue('File', chalk.white(trimmedPath), 8)}\n` +
-        `${UI.slate('Preview')}\n` +
-        chalk.red('- ' + matchedOld.split('\n').join('\n- ')) + '\n' +
-        chalk.green('+ ' + (newContent === content.replace(matchedOld, newText.trim()) ? newText.trim() : newText).split('\n').join('\n+ '));
-      console.log(box(diffContent, 'Patch Review', 'yellow'));
-      
-      const confirm = await safeQuestion(confirmPrompt('Apply patch', 'warning'));
-      if (confirm.toLowerCase() === 'y') {
-        fs.writeFileSync(trimmedPath, newContent);
-        return `Successfully patched ${trimmedPath}`;
+
+      if (newContent === content) {
+        return `No changes needed in ${trimmedPath}`;
       }
-      return 'Patch rejected by user.';
+
+      return reviewCandidateFile({
+        filePath: trimmedPath,
+        originalContent: content,
+        newContent,
+        title: 'Patch Review',
+        successMessage: `Successfully patched ${trimmedPath}`,
+      });
     } catch (error) { return `Error patching file: ${error.message}`; }
   },
   write: async (path, content) => {
-    const trimmedPath = path.trim();
-    console.log();
-    console.log(box(
-      `${keyValue('File', chalk.white(trimmedPath), 8)}\n` +
-      `${keyValue('Size', chalk.white((content?.length || 0) + ' chars'), 8)}\n` +
-      `${UI.slate('Preview')}\n` +
-      chalk.gray(content?.substring(0, 300)?.split('\n').slice(0, 8).join('\n') + (content?.length > 300 ? '\n...' : '')),
-      'Write Review', 'yellow'
-    ));
-    const confirm = await safeQuestion(confirmPrompt('Allow file write', 'warning'));
-    if (confirm.toLowerCase() === 'y') {
-      try {
-        fs.writeFileSync(trimmedPath, content);
-        return `Successfully saved changes to ${trimmedPath}`;
-      } catch (error) { return `Error writing file: ${error.message}`; }
-    }
-    return "Write blocked by user.";
+    const trimmedPath = typeof path === 'string' ? path.trim() : '';
+    if (!trimmedPath) return 'Error writing file: missing file path';
+    try {
+      const fileExists = fs.existsSync(trimmedPath);
+      const existingContent = fileExists ? fs.readFileSync(trimmedPath, 'utf8') : '';
+      const nextContent = String(content ?? '');
+
+      if (fileExists && existingContent === nextContent) {
+        return `No changes needed in ${trimmedPath}`;
+      }
+
+      return reviewCandidateFile({
+        filePath: trimmedPath,
+        originalContent: existingContent,
+        newContent: nextContent,
+        title: 'Write Review',
+        successMessage: `Successfully saved changes to ${trimmedPath}`,
+      });
+    } catch (error) { return `Error writing file: ${error.message}`; }
   },
   mkdir: (path) => {
+    const trimmedPath = typeof path === 'string' ? path.trim() : '';
+    if (!trimmedPath) return 'Error creating directory: missing directory path';
     try {
-      fs.mkdirSync(path.trim(), { recursive: true });
-      return `Directory created: ${path}`;
+      fs.mkdirSync(trimmedPath, { recursive: true });
+      return `Directory created: ${trimmedPath}`;
     } catch (error) { return `Error creating directory: ${error.message}`; }
   },
   shell: async (cmd) => {
+    const trimmedCmd = String(cmd ?? '').trim();
+    if (!trimmedCmd) return 'Error executing shell: missing command';
+
+    const sessionCommandResult = await handleShellSessionCommand(trimmedCmd);
+    if (sessionCommandResult !== null) {
+      return sessionCommandResult;
+    }
+
+    const backgroundEligible = shouldBackgroundShellCommand(trimmedCmd);
     console.log();
     console.log(box(
       `${keyValue('Directory', chalk.white(process.cwd()), 11)}\n` +
-      `${UI.slate('Command')}\n${chalk.white.bold(cmd)}`,
+      `${UI.slate('Command')}\n${chalk.white.bold(trimmedCmd)}\n` +
+      `${UI.slate('Type y to run, n to block, f for feedback, e for edit instructions, or write feedback directly.')}\n` +
+      `${UI.slate(backgroundEligible ? `Background handoff ${shellBackgroundMode()} after ${shellBackgroundAfterSeconds()}s if still running.` : 'This command will stay attached unless it exits quickly.')}`,
       'Shell Approval', 'red'
     ));
-    const confirm = await safeQuestion(confirmPrompt('Run shell command', 'error'));
-    if (confirm.toLowerCase() === 'y') {
-      return new Promise((resolve) => {
-        const useShell = cmd.includes('&&') || cmd.includes('|') || cmd.includes('cd ') || cmd.includes('>') || cmd.includes('<');
-        console.log(chalk.cyan(`\n[RUNNING] ${cmd}\n`));
-        const proc = spawn('sh', ['-c', cmd], { 
-          cwd: process.cwd()
-        });
-        let output = '';
-        proc.stdout.on('data', (data) => { 
-          const text = data.toString();
-          output += text;
-          process.stdout.write(text); // Still show to user in real-time
-        });
-        proc.stderr.on('data', (data) => { 
-          const text = data.toString();
-          output += text;
-          process.stderr.write(text); // Still show errors to user
-        });
-        proc.on('close', (code) => {
-          // Crucial: give control back to Node
-          if (process.stdin.isTTY) {
-            try { process.stdin.setRawMode(false); } catch (e) {}
-          }
-          // Delay slightly to let terminal settle
-          setTimeout(() => {
-            recreateReadline();
-            // Return actual output to AI, truncated if too long
-            const maxOutput = 10000;
-            let result = output.trim();
-            if (result.length > maxOutput) {
-              result = result.substring(0, maxOutput) + '\n... (output truncated)';
+    while (true) {
+      const confirmInput = await safeQuestion(confirmPrompt('Run shell command', 'error', '[y/N/f/e or text] '));
+      const confirmRaw = String(confirmInput ?? '').trim();
+      const confirm = confirmRaw.toLowerCase();
+
+      if (['y', 'yes'].includes(confirm)) {
+        return new Promise((resolve) => {
+          console.log(chalk.cyan(`\n[RUNNING] ${trimmedCmd}\n`));
+          const proc = spawn('sh', ['-c', trimmedCmd], {
+            cwd: process.cwd()
+          });
+          const session = createShellSession(trimmedCmd, process.cwd(), proc);
+          let resolved = false;
+          let backgroundTimer = null;
+
+          const finish = (result) => {
+            if (resolved) return;
+            resolved = true;
+            if (backgroundTimer) {
+              clearTimeout(backgroundTimer);
+              backgroundTimer = null;
             }
-            resolve(result || `Command completed with exit code ${code}`);
-          }, 200);
+            resolve(result);
+          };
+
+          if (backgroundEligible) {
+            backgroundTimer = setTimeout(() => {
+              if (resolved || session.completed) return;
+              session.backgrounded = true;
+              session.liveEchoEnabled = false;
+              showStreamPhase(`Shell command still running. Background session ${session.id} is active...`, 'warning');
+              finish(buildShellSessionResult(session, {
+                includeOutput: shellStreamToModelEnabled(),
+                onlyNewOutput: false,
+                markReported: shellStreamToModelEnabled(),
+                backgroundHandoff: true,
+              }));
+            }, shellBackgroundAfterSeconds() * 1000);
+          }
+
+          proc.stdout.on('data', (data) => { 
+            const text = data.toString();
+            appendShellSessionOutput(session, text);
+            if (session.liveEchoEnabled) {
+              process.stdout.write(text);
+            }
+          });
+          proc.stderr.on('data', (data) => { 
+            const text = data.toString();
+            appendShellSessionOutput(session, text);
+            if (session.liveEchoEnabled) {
+              process.stderr.write(text);
+            }
+          });
+          proc.on('error', (error) => {
+            session.completed = true;
+            session.error = error.message;
+            session.exitCode = 1;
+            finish(`Shell command failed to start: ${error.message}`);
+          });
+          proc.on('close', (code, signal) => {
+            session.completed = true;
+            session.exitCode = code;
+            session.signal = signal;
+
+            if (resolved) {
+              return;
+            }
+
+            if (process.stdin.isTTY) {
+              try { process.stdin.setRawMode(false); } catch (e) {}
+            }
+
+            setTimeout(() => {
+              recreateReadline();
+              const maxOutput = 10000;
+              let result = session.output.trim();
+              if (result.length > maxOutput) {
+                result = result.substring(0, maxOutput) + '\n... (output truncated)';
+              }
+              finish(result || `Command completed with exit code ${code}`);
+            }, 200);
+          });
         });
+      }
+
+      if (['', 'n', 'no'].includes(confirm)) {
+        return "Command blocked by user.";
+      }
+
+      const approvalInstruction = await resolveApprovalInstruction(confirmRaw, {
+        feedbackPrompt: 'Feedback for this command: ',
+        editPrompt: 'Edit instruction for this command: ',
       });
+
+      if (approvalInstruction) {
+        if (!approvalInstruction.detail) {
+          console.log(UI.slate('Enter feedback or edit instructions for Sapper, or choose y/n.'));
+          continue;
+        }
+
+        const label = approvalInstruction.type === 'edit' ? 'User edit instruction' : 'User feedback';
+        return `Command blocked by user.\n${label}: ${approvalInstruction.detail}\nNo command was executed. Revise the command and ask again if needed.`;
+      }
+
+      return `Command blocked by user.\nUser feedback: ${confirmRaw}\nNo command was executed. Revise the command and ask again if needed.`;
     }
-    return "Command blocked by user.";
   },
   list: (path) => {
     try {
-      let dir = path.trim() || '.';
+      let dir = typeof path === 'string' ? path.trim() : '';
+      if (!dir) dir = '.';
       // If AI sends "/" (root), treat as current directory "."
       if (dir === '/') dir = '.';
       const entries = fs.readdirSync(dir);
@@ -2721,6 +3694,12 @@ async function runSapper() {
   const startupLines = [
     `${statusBadge('workspace', 'info')} ${chalk.white(`${workspaceFileCount} files`)} ${UI.slate('·')} ${chalk.white(`${workspaceSymbolCount} symbols`)} ${UI.slate('·')} ${UI.slate(`indexed ${workspaceAgeMinutes}m ago`)}`,
     `${statusBadge('memory', 'neutral')} ${chalk.white('.sapper/')} ${UI.slate('·')} ${UI.slate(`auto-attach ${sapperConfig.autoAttach ? 'on' : 'off'}`)}`,
+    `${statusBadge('prompt', hasCustomPromptConfig() ? 'warning' : 'neutral')} ${UI.slate(hasCustomPromptConfig() ? 'custom prompt on' : 'default prompt')}`,
+    `${statusBadge('thinking', 'neutral')} ${UI.slate(`mode ${thinkingMode()}`)}`,
+    `${statusBadge('tools', 'action')} ${UI.slate(`limit ${toolRoundLimit()} rounds`)}`,
+    `${statusBadge('shell', 'info')} ${UI.slate(`stream ${shellStreamToModelEnabled() ? 'on' : 'off'}`)} ${UI.slate('·')} ${UI.slate(`bg ${shellBackgroundMode()}`)} ${UI.slate('·')} ${UI.slate(`${activeShellSessionCount()} active`)}`,
+    `${statusBadge('stream', 'neutral')} ${UI.slate(`heartbeat ${streamHeartbeatEnabled() ? 'on' : 'off'}`)} ${UI.slate('·')} ${UI.slate(`phases ${streamPhaseStatusEnabled() ? 'on' : 'off'}`)}`,
+    `${statusBadge('summary', 'info')} ${UI.slate(`phases ${summaryPhasesEnabled() ? 'on' : 'off'}`)} ${UI.slate('·')} ${UI.slate(`trigger ${summaryTriggerPercent()}%`)}`,
     `${statusBadge('agents', 'action')} ${chalk.white(`${agentCount}`)} ${UI.slate('·')} ${statusBadge('skills', 'success')} ${chalk.white(`${skillCount}`)}`,
   ];
   if (newlyCreated > 0) {
@@ -2834,13 +3813,12 @@ async function runSapper() {
       type: 'function',
       function: {
         name: 'list_directory',
-        description: 'List the contents of a directory. Use "." for current directory.',
+        description: 'List the contents of a directory. If path is omitted, use the current directory ".".',
         parameters: {
           type: 'object',
           properties: {
             path: { type: 'string', description: 'Directory path to list' }
-          },
-          required: ['path']
+          }
         }
       }
     },
@@ -2921,7 +3899,7 @@ async function runSapper() {
       type: 'function',
       function: {
         name: 'run_shell',
-        description: 'Execute a shell command in the project directory',
+        description: 'Execute a shell command in the project directory. Special commands: __shell_list__, __shell_read__ <session_id>, __shell_stop__ <session_id>.',
         parameters: {
           type: 'object',
           properties: {
@@ -2950,12 +3928,24 @@ async function runSapper() {
   // Main conversation loop - never exits unless user types 'exit'
   while (true) {
     try {
+      const previousConfig = JSON.stringify(sapperConfig);
+      const reloadedConfig = loadConfig();
+      if (JSON.stringify(reloadedConfig) !== previousConfig) {
+        sapperConfig = reloadedConfig;
+        if (messages.length > 0 && messages[0]?.role === 'system') {
+          refreshSystemPrompt(messages);
+        }
+        console.log(chalk.gray(`↻ Reloaded ${CONFIG_FILE}`));
+        console.log(chalk.gray('   System prompt and runtime settings refreshed from config.'));
+      }
+
       // Context size check - auto-summarize when approaching effective context limit
-      const estimatedTokens = estimateMessagesTokens(messages);
+      let estimatedTokens = estimateMessagesTokens(messages);
       const ctxLen = effectiveContextLength();
-      const tokenThreshold = ctxLen ? Math.floor(ctxLen * 0.75) : 8000;
+      const tokenThreshold = summaryTokenThreshold(ctxLen);
       if (estimatedTokens > tokenThreshold) {
         messages = await autoSummarizeContext(messages, selectedModel);
+        estimatedTokens = estimateMessagesTokens(messages);
       }
       
       // Build prompt label with active agent/skills
@@ -2976,25 +3966,17 @@ async function runSapper() {
         ? `${meter(estimatedTokens, ctxLen, 24)} ${UI.slate(`${estimatedTokens.toLocaleString()}/${ctxLen.toLocaleString()} tokens`)}`
         : UI.slate(`${estimatedTokens.toLocaleString()} estimated tokens`);
 
-      const input = await safeQuestion(`\n${promptShell(promptParts.join(' '), promptDetail)}`);
+      const promptText = `\n${promptShell(promptParts.join(' '), promptDetail)}`;
+      const input = await safeQuestion(promptText);
+      clearPromptEcho(promptText, input);
       
       // Block empty prompts
       if (!input.trim()) {
         continue;
       }
 
-      // Clear readline echo to prevent duplicate display
-      {
-        const promptWidth = visibleLength(promptParts.join(' ')) + 4; // account for prompt chars
-        const totalLen = promptWidth + input.length;
-        const lines = Math.ceil(totalLen / (process.stdout.columns || 80));
-        for (let i = 0; i < lines; i++) {
-          process.stdout.write('\x1B[1A\x1B[2K');
-        }
-        // Reprint clean version
-        const preview = input.length > 120 ? input.substring(0, 120) + chalk.gray('...') : input;
-        console.log(UI.accent('› ') + chalk.white(preview));
-      }
+      const preview = input.length > 120 ? input.substring(0, 120) + chalk.gray('...') : input;
+      console.log(UI.accent('› ') + chalk.white(preview));
       
       if (input.toLowerCase() === 'exit') {
         const stats = getSessionStats();
@@ -3056,7 +4038,11 @@ async function runSapper() {
         console.log(commandRow('/fetch <url>', 'Fetch a web page into context'));
         console.log(commandRow('/reset /clear', 'Clear all current context'));
         console.log(commandRow('/prune', 'Summarize long context and store memory'));
-        console.log(commandRow('/context', 'Inspect token usage and model window'));
+        console.log(commandRow('/summary', 'Show or change auto-summary settings'));
+        console.log(commandRow('/shell', 'Inspect shell config and background sessions'));
+        console.log(commandRow('/shell read <id>', 'Read output from a tracked shell session'));
+        console.log(commandRow('/shell stop <id>', 'Stop a tracked shell session'));
+        console.log(commandRow('/context', 'Inspect token usage, summary trigger, and model window'));
         console.log(commandRow('/ctx <limit>', 'Set context window limit (e.g. /ctx 64k)'));
         console.log(commandRow('/debug', 'Toggle regex and tool debug output'));
         console.log(commandRow('/log', 'Show the session activity timeline'));
@@ -3064,6 +4050,13 @@ async function runSapper() {
         console.log(commandRow('/log file', 'Show log file path and history'));
         console.log(commandRow('/help', 'Open this command view again'));
         console.log(commandRow('exit', 'Quit Sapper'));
+        console.log(UI.slate('  Summary settings: /summary  |  /summary phases off  |  /summary trigger 60'));
+        console.log(UI.slate('  Tool config: .sapper/config.json -> toolRoundLimit (default 40)'));
+        console.log(UI.slate('  Shell config: .sapper/config.json -> shell.streamToModel, shell.backgroundMode [off|auto|on], shell.backgroundAfterSeconds, shell.outputChunkChars'));
+        console.log(UI.slate('  Want to see all live shell output? Set shell.backgroundMode to off. thinking.mode only controls model reasoning.'));
+        console.log(UI.slate('  Streaming config: .sapper/config.json -> streaming.showPhaseStatus, streaming.showHeartbeat, streaming.idleNoticeSeconds'));
+        console.log(UI.slate('  Thinking config: .sapper/config.json -> thinking.mode [auto|on|off]'));
+        console.log(UI.slate('  Prompt config: .sapper/config.json -> prompt.prepend, prompt.append, prompt.coreOverride'));
         console.log();
         console.log(sectionTitle('Agents', 'specialist modes and skills', 'cyan'));
         console.log(commandRow('/agents', 'List available agents'));
@@ -3288,20 +4281,112 @@ async function runSapper() {
         continue;
       }
 
+      if (input.toLowerCase().startsWith('/summary')) {
+        const arg = input.substring(8).trim();
+
+        if (!arg) {
+          const effective = effectiveContextLength();
+          const threshold = summaryTokenThreshold(effective);
+          const lines = [
+            `phases        ${summaryPhasesEnabled() ? chalk.green('ON') : chalk.red('OFF')}`,
+            `trigger       ${chalk.white.bold(summaryTriggerPercent() + '%')} ${UI.slate(`(~${threshold.toLocaleString()} tokens)`)}`,
+            `config file   ${chalk.white(CONFIG_FILE)}`,
+          ];
+          console.log();
+          console.log(box(lines.join('\n'), 'Summary Settings', 'cyan'));
+          console.log(UI.slate('  Usage: /summary phases [on|off]  |  /summary trigger <percent>  |  /summary reset'));
+          continue;
+        }
+
+        const [subcommandRaw, ...rest] = arg.split(/\s+/);
+        const subcommand = subcommandRaw.toLowerCase();
+        const value = rest.join(' ').trim();
+
+        if (subcommand === 'reset' || subcommand === 'default') {
+          sapperConfig.summaryPhases = DEFAULT_CONFIG.summaryPhases;
+          sapperConfig.summarizeTriggerPercent = DEFAULT_CONFIG.summarizeTriggerPercent;
+          saveConfig(sapperConfig);
+          console.log(chalk.green(`✅ Summary settings reset: phases ${summaryPhasesEnabled() ? 'ON' : 'OFF'}, trigger ${summaryTriggerPercent()}%`));
+          continue;
+        }
+
+        if (subcommand === 'phases' || subcommand === 'phase') {
+          let nextValue = null;
+
+          if (!value) {
+            nextValue = !summaryPhasesEnabled();
+          } else {
+            const normalized = value.toLowerCase();
+            if (['on', 'true', 'yes', '1', 'enable', 'enabled'].includes(normalized)) {
+              nextValue = true;
+            } else if (['off', 'false', 'no', '0', 'disable', 'disabled'].includes(normalized)) {
+              nextValue = false;
+            } else if (['toggle', 'flip'].includes(normalized)) {
+              nextValue = !summaryPhasesEnabled();
+            }
+          }
+
+          if (nextValue === null) {
+            console.log(chalk.yellow('Usage: /summary phases [on|off]'));
+            continue;
+          }
+
+          sapperConfig.summaryPhases = nextValue;
+          saveConfig(sapperConfig);
+          console.log(chalk.green(`✅ Summary phases: ${summaryPhasesEnabled() ? chalk.green('ON') : chalk.red('OFF')}`));
+          continue;
+        }
+
+        if (subcommand === 'trigger' || subcommand === 'percent' || subcommand === 'threshold') {
+          if (!value) {
+            console.log(chalk.yellow('Usage: /summary trigger <percent>'));
+            console.log(chalk.gray('  Examples: /summary trigger 65, /summary trigger 70%, /summary trigger 0.6'));
+            continue;
+          }
+
+          const parsedTrigger = parseSummaryTriggerInput(value);
+          if (parsedTrigger === null) {
+            console.log(chalk.yellow(`Invalid summary trigger: ${value}`));
+            console.log(chalk.gray('  Examples: /summary trigger 65, /summary trigger 70%, /summary trigger 0.6'));
+            continue;
+          }
+
+          sapperConfig.summarizeTriggerPercent = parsedTrigger;
+          saveConfig(sapperConfig);
+          const effective = effectiveContextLength();
+          const threshold = summaryTokenThreshold(effective);
+          console.log(chalk.green(`✅ Summary trigger set to ${chalk.white.bold(summaryTriggerPercent() + '%')}`));
+          console.log(chalk.gray(`   Auto-summary will start near ${threshold.toLocaleString()} tokens.`));
+          continue;
+        }
+
+        console.log(chalk.yellow(`Unknown summary option: ${subcommand}`));
+        console.log(chalk.gray('  Usage: /summary  |  /summary phases [on|off]  |  /summary trigger <percent>  |  /summary reset'));
+        continue;
+      }
+
       if (input.toLowerCase() === '/context') {
         const contextSize = JSON.stringify(messages).length;
         const estTokens = estimateMessagesTokens(messages);
         const ctxLen = effectiveContextLength();
+        const triggerPercent = summaryTriggerPercent();
+        const promptConfig = getPromptConfig();
         const contextLines = [
           `messages ${chalk.white(String(messages.length))} ${UI.slate('·')} raw ${chalk.white(Math.round(contextSize / 1024) + 'KB')} ${UI.slate('·')} tokens ${chalk.white('~' + estTokens.toLocaleString())}`,
         ];
+        contextLines.push(`prompt ${chalk.white(hasCustomPromptConfig() ? 'customized' : 'default')} ${UI.slate('·')} ${chalk.white(`prepend ${promptConfig.prepend.trim() ? 'yes' : 'no'}`)} ${UI.slate('·')} ${chalk.white(`append ${promptConfig.append.trim() ? 'yes' : 'no'}`)}`);
+        contextLines.push(`thinking ${chalk.white(thinkingMode())} ${UI.slate('·')} ${UI.slate(thinkingMode() === 'auto' ? 'simple prompts skip reasoning' : thinkingMode() === 'off' ? 'reasoning hidden for all prompts' : 'reasoning enabled for all prompts')}`);
+        contextLines.push(`tools ${chalk.white(`limit ${toolRoundLimit()} rounds`)} ${UI.slate('·')} ${UI.slate('per prompt turn')}`);
+        contextLines.push(`shell ${chalk.white(shellStreamToModelEnabled() ? 'stream on' : 'stream off')} ${UI.slate('·')} ${chalk.white(`bg ${shellBackgroundMode()}`)} ${UI.slate('·')} ${chalk.white(`after ${shellBackgroundAfterSeconds()}s`)} ${UI.slate('·')} ${chalk.white(`${activeShellSessionCount()} active`)}`);
+        contextLines.push(`stream ${chalk.white(streamHeartbeatEnabled() ? 'heartbeat on' : 'heartbeat off')} ${UI.slate('·')} ${chalk.white(streamPhaseStatusEnabled() ? 'phase status on' : 'phase status off')} ${UI.slate('·')} ${chalk.white(`idle ${streamIdleNoticeSeconds()}s`)}`);
         if (ctxLen) {
           const usagePercent = Math.round((estTokens / ctxLen) * 100);
-          const threshold = Math.floor(ctxLen * 0.75);
+          const threshold = summaryTokenThreshold(ctxLen);
           const limitLabel = sapperConfig.contextLimit
             ? `${ctxLen.toLocaleString()} tokens ${chalk.cyan('(custom)')}`
             : `${ctxLen.toLocaleString()} tokens`;
           contextLines.push(`limit ${chalk.white(limitLabel)} ${UI.slate('·')} usage ${chalk.white(usagePercent + '%')}`);
+          contextLines.push(`summary ${chalk.white(`trigger ${triggerPercent}%`)} ${UI.slate('·')} ${chalk.white(summaryPhasesEnabled() ? 'phases on' : 'phases off')}`);
           contextLines.push(`${meter(estTokens, ctxLen, 28)} ${UI.slate(`summarize near ${threshold.toLocaleString()} tokens`)}`);
         }
         if (lastPromptTokens > 0) {
@@ -3309,6 +4394,38 @@ async function runSapper() {
         }
         console.log();
         console.log(box(contextLines.join('\n'), 'Context', 'gray'));
+        continue;
+      }
+
+      if (input.toLowerCase().startsWith('/shell')) {
+        const arg = input.substring(6).trim();
+
+        if (!arg || ['sessions', 'session', 'list', 'ls', 'status'].includes(arg.toLowerCase())) {
+          console.log();
+          console.log(renderShellSessionsPanel());
+          console.log(UI.slate('  Usage: /shell  |  /shell sessions  |  /shell read <session_id>  |  /shell stop <session_id>'));
+          continue;
+        }
+
+        const [subcommandRaw, ...rest] = arg.split(/\s+/);
+        const subcommand = subcommandRaw.toLowerCase();
+        const sessionId = rest.join(' ').trim();
+
+        if (['read', 'show', 'tail'].includes(subcommand)) {
+          const result = await handleShellSessionCommand(`__shell_read__ ${sessionId}`);
+          console.log();
+          console.log(box(String(result), sessionId ? `Shell ${sessionId}` : 'Shell Read', 'cyan'));
+          continue;
+        }
+
+        if (['stop', 'kill', 'end'].includes(subcommand)) {
+          const result = await handleShellSessionCommand(`__shell_stop__ ${sessionId}`);
+          console.log();
+          console.log(box(String(result), sessionId ? `Shell ${sessionId}` : 'Shell Stop', 'red'));
+          continue;
+        }
+
+        console.log(chalk.yellow('Usage: /shell  |  /shell sessions  |  /shell read <session_id>  |  /shell stop <session_id>'));
         continue;
       }
       
@@ -3981,9 +5098,10 @@ async function runSapper() {
       } // End of if (!agentHandled)
 
       let toolRounds = 0; // Prevent infinite loops
-      const MAX_TOOL_ROUNDS = 20;
+      const MAX_TOOL_ROUNDS = toolRoundLimit();
       const patchFailures = {}; // Track consecutive PATCH failures per file: { path: count }
       const MAX_PATCH_RETRIES = 3;
+      const turnThinkingEnabled = shouldUseThinkingForInput(input);
       
       let active = true;
       while (active) {
@@ -3998,8 +5116,8 @@ async function runSapper() {
           if (effectiveContextLength()) {
             chatOpts.options = { num_ctx: effectiveContextLength() };
           }
-          // Enable thinking for reasoning models (deepseek-r1, qwq, etc.)
-          chatOpts.think = true;
+          // Thinking can be forced on, forced off, or auto-disabled for simple prompts.
+          chatOpts.think = turnThinkingEnabled;
           if (useNativeTools) {
             // Filter tool defs by agent restrictions if any
             if (currentAgentTools) {
@@ -4037,10 +5155,37 @@ async function runSapper() {
         let chunkPromptTokens = 0; // Track actual tokens from Ollama
         let chunkEvalTokens = 0;
         let isThinking = false; // Track if we're currently in thinking mode
+        let thinkingContinuationNeedsPrefix = false;
+        let lastThinkingIdleNoticeAt = 0;
         const genStartTime = Date.now(); // Track generation elapsed time
         let genTokenCount = 0; // Count response tokens as they stream
+        let lastVisibleActivityAt = Date.now();
+        let heartbeatInterval = null;
         
         console.log(sectionTitle('Sapper', selectedModel, 'cyan'));
+        if (streamHeartbeatEnabled()) {
+          heartbeatInterval = setInterval(() => {
+            if (abortStream) return;
+
+            if (isThinking) {
+              const idleSeconds = Math.max(0, Math.floor((Date.now() - lastVisibleActivityAt) / 1000));
+              const idleThreshold = streamIdleNoticeSeconds();
+              if (idleSeconds >= idleThreshold && Date.now() - lastThinkingIdleNoticeAt >= 5000) {
+                process.stdout.write(`\n${UI.slate('  │ ')}${UI.slate.italic(`... waiting ${idleSeconds}s for more reasoning`)}\n`);
+                thinkingContinuationNeedsPrefix = true;
+                lastThinkingIdleNoticeAt = Date.now();
+              }
+              return;
+            }
+
+            renderStreamingHeartbeat({
+              genTokenCount,
+              genStartTime,
+              lastVisibleActivityAt,
+              stage: genTokenCount > 0 ? 'generating' : 'waiting-first',
+            });
+          }, 1000);
+        }
         for await (const chunk of response) {
           // Check if user pressed Ctrl+C
           if (abortStream) {
@@ -4059,10 +5204,13 @@ async function runSapper() {
             // Live-stream thinking — dim italic, wrap at line breaks
             const lines = thinking.split('\n');
             for (let li = 0; li < lines.length; li++) {
-              if (li > 0) process.stdout.write(`\n${UI.slate('  │ ')}`);
+              if (li > 0 || thinkingContinuationNeedsPrefix) process.stdout.write(`\n${UI.slate('  │ ')}`);
+              thinkingContinuationNeedsPrefix = false;
               process.stdout.write(UI.slate.italic(lines[li]));
             }
             thinkMsg += thinking;
+            lastVisibleActivityAt = Date.now();
+            lastThinkingIdleNoticeAt = 0;
           }
           
           const content = chunk.message.content;
@@ -4073,10 +5221,13 @@ async function runSapper() {
             }
             msg += content;
             genTokenCount++;
-            // Show live progress with timer, tokens, and interrupt hint
-            const elapsed = ((Date.now() - genStartTime) / 1000).toFixed(1);
-            const tps = genTokenCount / Math.max((Date.now() - genStartTime) / 1000, 0.1);
-            process.stdout.write(`\r  ${UI.slate(`Generating... ${genTokenCount} tokens · ${elapsed}s · ${tps.toFixed(1)} t/s`)}  ${UI.slate.italic('Ctrl+C to stop')}`);
+            lastVisibleActivityAt = Date.now();
+            renderStreamingHeartbeat({
+              genTokenCount,
+              genStartTime,
+              lastVisibleActivityAt,
+              stage: 'generating',
+            });
           }
           
           // Capture token stats from the final chunk (done: true)
@@ -4112,9 +5263,19 @@ async function runSapper() {
             // Don't break - just warn. User can Ctrl+C if needed
           }
         }
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+          heartbeatInterval = null;
+        }
+        if (isThinking) {
+          isThinking = false;
+          process.stdout.write(`\n${UI.slate('  └─')}\n`);
+        }
         // Clear progress line and render formatted markdown
         process.stdout.write('\r\x1b[K');
+        showStreamPhase('Finalizing streamed response...');
         if (msg.trim()) {
+          showStreamPhase('Rendering markdown output...');
           console.log(renderMarkdown(msg));
         } else {
           console.log();
@@ -4179,6 +5340,8 @@ async function runSapper() {
             write_file: 'WRITE', patch_file: 'PATCH', create_directory: 'MKDIR', run_shell: 'SHELL'
           };
 
+          showStreamPhase(`Running ${nativeToolCalls.length} native tool call${nativeToolCalls.length === 1 ? '' : 's'}...`);
+
           for (const tc of nativeToolCalls) {
             const fn = tc.function;
             const toolType = nativeToolNameMap[fn.name] || fn.name.toUpperCase();
@@ -4202,8 +5365,8 @@ async function runSapper() {
             try {
               switch (fn.name) {
                 case 'list_directory':
-                  result = tools.list(args.path);
-                  logEntry('file', { action: 'list', path: args.path });
+                  result = tools.list(args.path ?? '.');
+                  logEntry('file', { action: 'list', path: args.path ?? '.' });
                   break;
                 case 'read_file':
                   result = tools.read(args.path);
@@ -4261,8 +5424,11 @@ async function runSapper() {
           fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
 
           if (hitToolLimit) {
+            showStreamPhase('Tool limit reached. Requesting final answer...');
             resetTerminal();
             messages.push({ role: 'user', content: 'STOP using tools now. Provide your analysis based on what you have.' });
+          } else {
+            showStreamPhase('Tool results ready. Continuing response generation...');
           }
           continue; // Loop back for AI to process tool results
         }
@@ -4330,6 +5496,8 @@ async function runSapper() {
             const lastAiLog = [...activityLog].reverse().find(e => e.type === 'ai');
             if (lastAiLog) lastAiLog.toolCount = toolMatches.length;
           }
+
+          showStreamPhase(`Running ${toolMatches.length} parsed tool call${toolMatches.length === 1 ? '' : 's'}...`);
 
           for (const match of toolMatches) {
             const [_, type, path, content] = match;
@@ -4428,11 +5596,14 @@ async function runSapper() {
           
           // If tool limit was reached, stop after processing this round
           if (hitToolLimit) {
+            showStreamPhase('Tool limit reached. Requesting final answer...');
             resetTerminal();
             messages.push({ 
               role: 'user', 
               content: 'STOP using tools now. You have enough information. Please provide your analysis based on what you have read.' 
             });
+          } else {
+            showStreamPhase('Tool results ready. Continuing response generation...');
           }
         } else {
           // No tools found - check if malformed command

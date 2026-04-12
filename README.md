@@ -13,6 +13,8 @@ Sapper is a command-line interface that connects to Ollama models to help you bu
 - 🎯 **Context-aware** - Automatically detects directory contents
 - ⚡ **Live streaming** - See AI responses in real-time
 - 🔒 **Security prompts** - Review commands before execution
+- ✍️ **Inline approval feedback** - Type feedback, or use `f` and `e` shortcuts at shell or file approval prompts, to make Sapper revise the command or change
+- 🧵 **Background shell sessions** - Long-running commands can hand off to tracked background sessions with chunked output inspection
 
 ## Installation
 
@@ -36,13 +38,17 @@ sapper
 
 - `/reset` or `/clear-session` - Start a new session
 - `/session-info` - Show current session details  
+- `/summary` - View or change auto-summary settings
+- `/shell` - Inspect shell config and tracked background sessions
+- `/shell read <id>` - Read output from a tracked shell session
+- `/shell stop <id>` - Stop a tracked shell session
 - `/step` - Toggle step-by-step mode
 - `/help` - Show command help
 - `exit` - Exit Sapper
 
 ### Example Interactions
 
-```
+```text
 > set up a React project in ./my-app
 > run the development server
 > create a login component with TypeScript
@@ -57,6 +63,59 @@ sapper
 4. **Review & approve** - Security prompts for shell commands
 5. **Context awareness** - Sapper understands your project structure
 
+## Config
+
+Sapper creates `.sapper/config.json` on first run. You can tune context behavior there.
+
+```json
+{
+  "autoAttach": true,
+  "contextLimit": null,
+  "toolRoundLimit": 40,
+  "summaryPhases": true,
+  "summarizeTriggerPercent": 65,
+  "shell": {
+    "streamToModel": true,
+    "backgroundMode": "auto",
+    "backgroundAfterSeconds": 8,
+    "outputChunkChars": 4000
+  },
+  "thinking": {
+    "mode": "auto"
+  },
+  "streaming": {
+    "showPhaseStatus": true,
+    "showHeartbeat": true,
+    "idleNoticeSeconds": 4
+  },
+  "prompt": {
+    "prepend": "",
+    "append": "Prefer concise answers.",
+    "coreOverride": ""
+  }
+}
+```
+
+- `toolRoundLimit`: maximum tool-call rounds Sapper will allow in one prompt loop before it forces a final answer. Default: `40`.
+- `summaryPhases`: show or hide the step-by-step auto-summary progress list.
+- `summarizeTriggerPercent`: start summarizing older context near this percentage of the active context window. Lower values summarize earlier and reduce large-context pauses.
+- `shell.streamToModel`: include shell output chunks in tool results when a command is handed off to a background session.
+- `shell.backgroundMode`: three modes: `off`, `auto`, or `on`. `off` keeps commands fully attached so you keep seeing live shell output in the terminal. `auto` backgrounds likely long-running commands like dev servers; `on` applies the timeout to every shell command.
+- `shell.backgroundAfterSeconds`: how long Sapper waits before handing an eligible running command off to a background shell session.
+- `shell.outputChunkChars`: maximum shell output chunk size returned to the model for background handoffs and session reads.
+- `thinking.mode`: three modes: `auto`, `on`, or `off`. `auto` skips long reasoning blocks for simple prompts, `on` always enables reasoning for every prompt, and `off` disables it for every prompt. This controls model reasoning visibility, not shell backgrounding.
+- `streaming.showPhaseStatus`: show short status lines when Sapper is finalizing output, executing tools, or looping for the next model turn.
+- `streaming.showHeartbeat`: keep updating the live progress line during quiet streamed phases instead of looking frozen.
+- `streaming.idleNoticeSeconds`: print an idle notice after this many seconds without visible streamed output.
+- `prompt.prepend`: insert custom instructions before the default Sapper prompt.
+- `prompt.append`: add custom instructions near the end of the system prompt.
+- `prompt.coreOverride`: replace the default Sapper core prompt block while keeping the tool, context, agent, and skill sections.
+
+You can also change these inside Sapper with `/summary`, for example `/summary phases off` or `/summary trigger 60`.
+Prompt config is read from `.sapper/config.json` and Sapper refreshes it on the next turn if you edit the file while it is running.
+Background shell sessions are controlled through `run_shell` with `__shell_list__`, `__shell_read__ <session_id>`, and `__shell_stop__ <session_id>`.
+You can also inspect them directly in Sapper with `/shell`, `/shell read <session_id>`, and `/shell stop <session_id>`.
+
 ## Supported Tools
 
 - `SHELL` - Execute terminal commands
@@ -69,12 +128,14 @@ sapper
 ## Examples
 
 **Create a Next.js project:**
-```
+
+```text
 > create a Next.js app with TypeScript and Tailwind in ./my-nextjs-app
 ```
 
 **Add features to existing project:**
-```
+
+```text
 > analyze the codebase in ./my-project
 > add a user authentication system
 > create API endpoints for user management
