@@ -121,15 +121,35 @@ You can also change these inside Sapper with `/summary`, for example `/summary p
 Prompt config is read from `.sapper/config.json` and Sapper refreshes it on the next turn if you edit the file while it is running.
 Background shell sessions are controlled through `run_shell` with `__shell_list__`, `__shell_read__ <session_id>`, and `__shell_stop__ <session_id>`.
 You can also inspect them directly in Sapper with `/shell`, `/shell read <session_id>`, and `/shell stop <session_id>`.
+Use `/tools` inside Sapper to inspect the built-in tool catalog and usage patterns.
+Use `/git` inside Sapper to inspect repository state and access git-specific shortcuts.
 
 ## Supported Tools
 
 - `SHELL` - Execute terminal commands
 - `READ` - Read file contents
+- `CAT`, `HEAD`, `TAIL` - Read full files or line windows
 - `WRITE` - Create/edit files
+- `PATCH` - Edit existing files with targeted replacement
 - `MKDIR` - Create directories
-- `LIST` - List directory contents
-- `SEARCH` - Search for text in files
+- `RMDIR` - Remove directories with approval
+- `LIST`, `LS` - List directory contents
+- `SEARCH`, `GREP` - Search for text in files
+- `FIND` - Find files and directories by name
+- `PWD`, `CD` - Inspect or change the tool working directory
+- `ASK` - Ask the user a clarifying question mid-task
+- `STATUS` - Show concise git status information
+- `BRANCH` - List, create, or switch branches with approval for changes
+- `COMMIT` - Create git commits with approval
+- `STASH` - List or manage git stashes with approval for state-changing actions
+- `TAG` - List, inspect, create, or delete git tags with approval for changes
+- `PUSH` - Push a branch to a remote with approval
+- `CHANGES` - Show git status and diffs
+- `FETCH` - Fetch web pages as readable text
+- `FETCH_MAIN` - Extract the main article or body content from a web page
+- `FETCH_MULTI` - Fetch multiple web pages in one call
+- `MEMORY` - Search saved conversation memory
+- `OPEN` - Open URLs in the default browser with approval
 
 ## Examples
 

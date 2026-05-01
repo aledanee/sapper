@@ -116,13 +116,17 @@ function getSapperIgnorePatterns() {
 }
 
 function ignorePatternToRegex(pattern) {
-  let p = pattern.replace(/\/+$/, '');
-  p = p.replace(/([.+^${}()|[\]\\])/g, '\\$1');
-  p = p.replace(/\*\*/g, '<<<GLOBSTAR>>>');
-  p = p.replace(/\*/g, '[^/]*');
-  p = p.replace(/<<<GLOBSTAR>>>/g, '.*');
-  p = p.replace(/\?/g, '[^/]');
-  return new RegExp(`(^|/)${p}($|/)`, 'i');
+  try {
+    let p = pattern.replace(/\/+$/, '');
+    p = p.replace(/([.+^${}()|[\]\\])/g, '\\$1');
+    p = p.replace(/\*\*/g, '<<<GLOBSTAR>>>');
+    p = p.replace(/\*/g, '[^/]*');
+    p = p.replace(/<<<GLOBSTAR>>>/g, '.*');
+    p = p.replace(/\?/g, '[^/]');
+    return new RegExp(`(^|/)${p}($|/)`, 'i');
+  } catch (e) {
+    return /^$/; // Return a regex that never matches on error
+  }
 }
 
 function shouldIgnore(nameOrPath) {
@@ -262,12 +266,30 @@ const tools = {
       for (const { pattern: p, negate } of getSapperIgnorePatterns()) {
         if (!negate && p.endsWith('/')) allIgnoreDirs.add(p.replace(/\/+$/, ''));
       }
-      const excludes = [...allIgnoreDirs].join(',');
-      const cmd = `grep -rEin "${pattern.replace(/"/g, '\\"')}" . --exclude-dir={${excludes}} --include="*.{js,ts,jsx,tsx,py,java,go,rs,rb,php,c,cpp,h,css,scss,html,json,md,txt,yml,yaml,toml,sh}" 2>/dev/null | head -50`;
-      const proc = spawn('sh', ['-c', cmd], { cwd: workingDir });
+      // Use args array to avoid command injection
+      const args = ['-rEin', pattern, '.'];
+      for (const dir of allIgnoreDirs) {
+        args.push(`--exclude-dir=${dir}`);
+      }
+      args.push('--include=*.js', '--include=*.ts', '--include=*.jsx', '--include=*.tsx',
+        '--include=*.py', '--include=*.java', '--include=*.go', '--include=*.rs',
+        '--include=*.rb', '--include=*.php', '--include=*.c', '--include=*.cpp',
+        '--include=*.h', '--include=*.css', '--include=*.scss', '--include=*.html',
+        '--include=*.json', '--include=*.md', '--include=*.txt', '--include=*.yml',
+        '--include=*.yaml', '--include=*.toml', '--include=*.sh');
+      const proc = spawn('grep', args, { cwd: workingDir });
       let out = '';
-      proc.stdout.on('data', d => out += d);
-      proc.stderr.on('data', d => out += d);
+      let lineCount = 0;
+      proc.stdout.on('data', d => {
+        const text = d.toString();
+        const lines = text.split('\n');
+        for (const line of lines) {
+          if (lineCount >= 50) { proc.kill(); return; }
+          if (line) { out += line + '\n'; lineCount++; }
+        }
+      });
+      proc.stderr.on('data', () => {});
+      proc.on('error', (err) => res(`Error searching: ${err.message}`));
       proc.on('close', () => res(out.trim() || `No matches for: ${pattern}`));
     });
   },
@@ -277,6 +299,9 @@ const tools = {
       let out = '';
       proc.stdout.on('data', d => out += d);
       proc.stderr.on('data', d => out += d);
+      proc.on('error', (err) => {
+        res(`Shell error: ${err.message}`);
+      });
       proc.on('close', code => {
         let result = out.trim();
         if (result.length > 10000) result = result.substring(0, 10000) + '\n...(truncated)';
@@ -297,7 +322,12 @@ async function executeTool(type, path, content, agentTools) {
   else if (t === 'mkdir') result = tools.mkdir(path);
   else if (t === 'write') result = tools.write(path, content || '');
   else if (t === 'patch') {
-    const parts = content?.split('|||');
+    // Use indexOf to split into exactly 2 parts, preserving ||| in content
+    const sepIdx = content?.indexOf('|||');
+    let parts = null;
+    if (sepIdx > -1) {
+      parts = [content.substring(0, sepIdx), content.substring(sepIdx + 3)];
+    }
     if (parts && parts.length === 2) result = tools.patch(path, parts[0], parts[1]);
     else result = 'Error: PATCH needs OLD_TEXT|||NEW_TEXT';
   }
@@ -501,9 +531,20 @@ function json(res, data, status = 200) {
 }
 
 function readBody(req) {
-  return new Promise((resolve) => {
+  const MAX_BODY_SIZE = 5 * 1024 * 1024; // 5MB limit
+  return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', c => body += c);
+    let size = 0;
+    req.on('data', c => {
+      size += c.length;
+      if (size > MAX_BODY_SIZE) {
+        req.destroy();
+        resolve({ _error: 'Request body too large' });
+        return;
+      }
+      body += c;
+    });
+    req.on('error', () => resolve({}));
     req.on('end', () => { try { resolve(JSON.parse(body)); } catch { resolve({}); } });
   });
 }
@@ -1566,7 +1607,7 @@ function replacePairs(text, marker, open, close) {
 
 function esc(s) {
   if (!s) return '';
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // ─── File Panel ────────────────────────────────────────────
@@ -1943,12 +1984,18 @@ const server = http.createServer(async (req, res) => {
 
     try {
       const stream = chatStream(serverMessages, serverModel, serverAgentTools);
+      let clientClosed = false;
+      res.on('close', () => { clientClosed = true; });
       for await (const evt of stream) {
+        if (clientClosed) break;
         const ok = res.write(`data: ${JSON.stringify(evt)}\n\n`);
-        if (!ok) await new Promise(r => res.once('drain', r));
+        if (!ok && !clientClosed) await new Promise(r => {
+          res.once('drain', r);
+          res.once('close', r);
+        });
       }
     } catch (e) {
-      res.write(`data: ${JSON.stringify({ type: 'system', data: 'Error: ' + e.message })}\n\n`);
+      try { res.write(`data: ${JSON.stringify({ type: 'system', data: 'Error: ' + e.message })}\n\n`); } catch {}
     }
     res.write('data: [DONE]\n\n');
     res.end();
@@ -1956,7 +2003,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── 404 ──
-  res.writeHead(404);
+  res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end('Not found');
 });
 

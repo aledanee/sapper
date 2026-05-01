@@ -6,9 +6,10 @@ import chalk from 'chalk';
 import ora from 'ora';
 import readline from 'readline';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, isAbsolute, resolve as pathResolve } from 'path';
 import { marked } from 'marked';
 import { markedTerminal } from 'marked-terminal';
+import { highlight as highlightCode } from 'cli-highlight';
 import * as acorn from 'acorn';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -44,7 +45,7 @@ process.on('SIGINT', () => {
   
   // Reset terminal immediately
   resetTerminal();
-  setTimeout(() => { ctrlCCount = 0; }, 2000); // Reset after 2 seconds
+  setTimeout(() => { ctrlCCount = 0; }, LIMITS.CTRL_C_RESET_MS);
 });
 
 // Reset terminal state - fixes "ghost input" after shell commands or AI streaming
@@ -81,6 +82,60 @@ const AGENTS_DIR = `${SAPPER_DIR}/agents`;
 const SKILLS_DIR = `${SAPPER_DIR}/skills`;
 const LOGS_DIR = `${SAPPER_DIR}/logs`;
 const SAPPERIGNORE_FILE = '.sapperignore';
+
+// ═══════════════════════════════════════════════════════════════
+// CENTRALIZED LIMITS & THRESHOLDS
+// ═══════════════════════════════════════════════════════════════
+const LIMITS = Object.freeze({
+  // Timeouts (milliseconds)
+  CTRL_C_RESET_MS:        2000,
+  FETCH_URL_TIMEOUT_MS:   15000,
+
+  // Context & summarization
+  CONTEXT_BYTE_FALLBACK:  32000,    // Byte threshold when token count unavailable
+  SUMMARY_RECENT_MSGS:    4,        // Recent messages preserved during summarization
+  MSG_TRUNCATION_CHARS:   1500,     // Max chars per message when building summary text
+  SUMMARY_MAX_WORDS:      800,      // Target word count for summary output
+
+  // Embeddings
+  EMBEDDINGS_MAX_TEXT:     2000,     // Max chars stored per embedding chunk
+  EMBEDDINGS_MAX_CHUNKS:  100,      // Max chunks kept in embeddings file
+  EMBEDDING_SIMILARITY:   0.5,      // Cosine similarity threshold for recall
+  EMBEDDING_TOP_K:        3,        // Default top-K results from memory search
+  EMBEDDING_MIN_TEXT:     50,       // Minimum text length to bother embedding
+
+  // Streaming & response
+  MAX_RESPONSE_LENGTH:    100000,   // 100KB hard cap on AI response size
+  REPETITION_WINDOW:      500,      // Chars to compare for loop detection
+  REPETITION_THRESHOLD:   10000,    // Min response length before checking for loops
+  REPETITION_COUNT:       3,        // Repeats before stopping
+
+  // Display
+  LOG_PREVIEW_CHARS:      500,      // Max chars in activity log preview
+  LOG_AI_PREVIEW_CHARS:   800,      // Max chars in AI response log preview
+  INPUT_PREVIEW_CHARS:    120,      // Max chars shown for user input preview
+  TERMINAL_WIDTH_MAX:     90,       // Max width for activity log box
+  SYMBOL_RESULTS_MAX:     15,       // Max results before "and N more" in /symbol
+  LOG_FILES_DISPLAY_MAX:  10,       // Max log files shown in /log list
+  MEMORY_PREVIEW_CHARS:   300,      // Chars shown in /recall results
+  DEBUG_TOOL_PREVIEW:     150,      // Chars shown in debug tool attempt
+
+  // Content limits
+  WEB_CONTENT_MAX_CHARS:  50000,    // Max chars from fetched web content
+  TOOL_WARN_THRESHOLD:    30,       // Tool calls per round before warning
+
+  // Shell
+  SHELL_MIN_BG_SECONDS:   2,       // Min seconds for background shell config
+  SHELL_MAX_BG_SECONDS:   120,     // Max seconds for background shell config
+  SHELL_MIN_CHUNK_CHARS:  400,     // Min chars for shell output chunk config
+  SHELL_MAX_CHUNK_CHARS:  12000,   // Max chars for shell output chunk config
+  SHELL_MAX_BUFFER:       50000,   // Max buffered shell output chars
+
+  // Workspace & scanning
+  WORKSPACE_FILES_PER_DIR: 10,     // Files shown per directory in workspace summary
+  WORKSPACE_RELATED_DEPTH: 5,      // Max related files from dependency graph
+  FILE_SUMMARY_PREVIEW:    150,    // Chars for file content summary
+});
 
 // ═══════════════════════════════════════════════════════════════
 // COMPREHENSIVE ACTIVITY LOGGER
@@ -145,7 +200,7 @@ function appendLogToFile(entry) {
         break;
       case 'user':
         line += `### 💬 User Input \`${time}\` _(+${elapsed})_\n`;
-        line += `\`\`\`\n${entry.message?.substring(0, 500)}${entry.message?.length > 500 ? '\n...' : ''}\n\`\`\`\n`;
+        line += `\`\`\`\n${entry.message?.substring(0, LIMITS.LOG_PREVIEW_CHARS)}${entry.message?.length > LIMITS.LOG_PREVIEW_CHARS ? '\n...' : ''}\n\`\`\`\n`;
         if (entry.attachments?.length > 0) {
           line += `📎 **Attached:** ${entry.attachments.join(', ')}\n`;
         }
@@ -159,7 +214,7 @@ function appendLogToFile(entry) {
         if (entry.interrupted) line += `- ⚠️ **Interrupted**\n`;
         if (entry.repetitionStopped) line += `- ⚠️ **Stopped: repetitive output**\n`;
         line += `\n<details><summary>Response preview</summary>\n\n`;
-        line += `${entry.preview?.substring(0, 800)}${entry.preview?.length > 800 ? '\n...' : ''}\n`;
+        line += `${entry.preview?.substring(0, LIMITS.LOG_AI_PREVIEW_CHARS)}${entry.preview?.length > LIMITS.LOG_AI_PREVIEW_CHARS ? '\n...' : ''}\n`;
         line += `\n</details>\n\n`;
         break;
       case 'tool':
@@ -531,11 +586,61 @@ const TOOL_NAME_MAP = {
   'edit': 'PATCH',
   'patch': 'PATCH',
   'list': 'LIST',
+  'ls': 'LS',
   'search': 'SEARCH',
+  'grep': 'GREP',
+  'find': 'FIND',
   'shell': 'SHELL',
   'mkdir': 'MKDIR',
+  'rmdir': 'RMDIR',
+  'cd': 'CD',
+  'pwd': 'PWD',
+  'cat': 'CAT',
+  'head': 'HEAD',
+  'tail': 'TAIL',
+  'changes': 'CHANGES',
+  'diff': 'CHANGES',
+  'git_changes': 'CHANGES',
+  'fetch': 'FETCH',
+  'web': 'FETCH',
+  'fetch_web': 'FETCH',
+  'memory': 'MEMORY',
+  'recall': 'MEMORY',
+  'recall_memory': 'MEMORY',
+  'open': 'OPEN',
+  'browser': 'OPEN',
+  'open_url': 'OPEN',
   'todo': 'LIST',   // alias — list tasks
 };
+
+const TOOL_ALLOWED_BY = {
+  READ: ['READ', 'CAT', 'HEAD', 'TAIL'],
+  CAT: ['READ', 'CAT', 'HEAD', 'TAIL'],
+  HEAD: ['READ', 'CAT', 'HEAD', 'TAIL'],
+  TAIL: ['READ', 'CAT', 'HEAD', 'TAIL'],
+  LIST: ['LIST', 'LS'],
+  LS: ['LIST', 'LS'],
+  SEARCH: ['SEARCH', 'GREP'],
+  GREP: ['SEARCH', 'GREP'],
+  FIND: ['FIND'],
+  WRITE: ['WRITE'],
+  PATCH: ['PATCH'],
+  MKDIR: ['MKDIR'],
+  RMDIR: ['RMDIR', 'SHELL'],
+  PWD: ['PWD', 'SHELL'],
+  CD: ['CD', 'SHELL'],
+  CHANGES: ['CHANGES', 'SHELL'],
+  FETCH: ['FETCH', 'SHELL'],
+  MEMORY: ['MEMORY'],
+  OPEN: ['OPEN', 'SHELL'],
+  SHELL: ['SHELL'],
+};
+
+function normalizeToolName(toolName = '') {
+  const normalized = String(toolName ?? '').trim();
+  if (!normalized) return '';
+  return TOOL_NAME_MAP[normalized.toLowerCase()] || normalized.toUpperCase();
+}
 
 function normalizeToolList(toolsValue) {
   if (!toolsValue) return null; // null = all tools allowed
@@ -543,11 +648,45 @@ function normalizeToolList(toolsValue) {
     toolsValue = toolsValue.split(',').map(s => s.trim());
   }
   if (!Array.isArray(toolsValue)) return null;
-  return toolsValue.map(t => TOOL_NAME_MAP[t.toLowerCase()] || t.toUpperCase()).filter(Boolean);
+  return Array.from(new Set(toolsValue.map(normalizeToolName).filter(Boolean)));
+}
+
+function isToolAllowedForAgent(allowedTools, toolName) {
+  if (!allowedTools || allowedTools.length === 0) return true;
+  const normalized = normalizeToolName(toolName);
+  const allowedBy = TOOL_ALLOWED_BY[normalized] || [normalized];
+  return allowedBy.some(candidate => allowedTools.includes(candidate));
+}
+
+// ── Memoized loaders (avoid re-scanning filesystem every prompt turn) ──
+const _loaderCache = { agents: null, agentsAt: 0, skills: null, skillsAt: 0 };
+const LOADER_CACHE_TTL = 5000; // 5s TTL — balances freshness vs disk I/O
+
+function loadAgents() {
+  const now = Date.now();
+  if (_loaderCache.agents && now - _loaderCache.agentsAt < LOADER_CACHE_TTL) return _loaderCache.agents;
+  const result = _loadAgentsFromDisk();
+  _loaderCache.agents = result;
+  _loaderCache.agentsAt = now;
+  return result;
+}
+
+function loadSkills() {
+  const now = Date.now();
+  if (_loaderCache.skills && now - _loaderCache.skillsAt < LOADER_CACHE_TTL) return _loaderCache.skills;
+  const result = _loadSkillsFromDisk();
+  _loaderCache.skills = result;
+  _loaderCache.skillsAt = now;
+  return result;
+}
+
+function invalidateLoaderCache(which = 'both') {
+  if (which === 'both' || which === 'agents') { _loaderCache.agents = null; _loaderCache.agentsAt = 0; }
+  if (which === 'both' || which === 'skills') { _loaderCache.skills = null; _loaderCache.skillsAt = 0; }
 }
 
 // Load all agents from .sapper/agents/*.md (with frontmatter support)
-function loadAgents() {
+function _loadAgentsFromDisk() {
   ensureAgentsDirs();
   const agents = {};
   try {
@@ -573,7 +712,7 @@ function loadAgents() {
 }
 
 // Load all skills from .sapper/skills/*.md (with frontmatter support)
-function loadSkills() {
+function _loadSkillsFromDisk() {
   ensureAgentsDirs();
   const skills = {};
   try {
@@ -604,27 +743,48 @@ function createDefaultAgentsAndSkills() {
   const defaultAgents = {
     'sapper-it': `---
 name: "Sapper IT"
-description: "Expert full-stack coding agent — handles web dev, architecture, debugging, DevOps, databases, APIs, and performance. Use for any coding task."
-tools: [read, edit, write, list, search, shell]
+description: "General software development agent — implementation, debugging, refactoring, architecture, testing, tooling, automation, and release workflows across languages and stacks. Use for coding or technical problem-solving."
+argument-hint: "Describe the feature, bug, refactor, architecture, or development task to work on."
 ---
 
-# Sapper IT - Coding Agent
+# Sapper IT - Development Agent
 
-You are Sapper IT, an expert full-stack coding agent working within Sapper.
+You are Sapper IT, a senior software development agent working within Sapper.
 
-## Your Expertise
-- Full-stack web development (frontend + backend)
-- System architecture and design patterns
-- Debugging, refactoring, and code review
-- DevOps, CI/CD, and deployment
-- Database design and optimization
-- API development (REST, GraphQL)
-- Performance optimization and security best practices
+  You have access to all available Sapper tools unless the session applies a separate restriction.
 
-## Behavior
-When the user asks for help, dive into the codebase using Sapper's tools. Read files, understand the structure, then make precise changes.
+## Mission
 
-Be technical, thorough, and code-first. Always verify your changes work by running tests or builds.`,
+Help users move software projects forward across different languages, frameworks, and codebases.
+Do not assume a specific stack, architecture, or workflow before inspecting the repository.
+
+Adapt to the project that exists, not a hard-coded template of technologies.
+
+## What You Handle
+
+- Feature implementation and bug fixing
+- Refactoring and code cleanup
+- Architecture and system design decisions
+- Tooling, build, automation, and developer workflow improvements
+- Tests, validation, and release-readiness checks
+- Performance, reliability, and maintainability problems
+- APIs, data flow, storage, and integration work when the codebase requires it
+
+## Working Style
+
+- Understand the request and inspect the relevant code before proposing or making changes.
+- Prefer the smallest change that solves the root problem cleanly.
+- Match the repository's existing conventions, abstractions, and naming.
+- Use tools proactively: read code, search broadly, edit precisely, and run shell commands when they help verify behavior.
+- Verify work proportionally with checks, builds, tests, or direct inspection when feasible.
+- Be concise, technical, and practical. Explain tradeoffs only when they matter.
+
+## Decision Rules
+
+- If the task is ambiguous, gather context first instead of guessing.
+- If multiple approaches are possible, choose the one with the best balance of correctness, simplicity, and fit for the current codebase.
+- If asked for a review, prioritize bugs, risks, regressions, and missing validation ahead of style commentary.
+- If a request spans unfamiliar technologies, infer behavior from the actual project files rather than generic assumptions.`,
 
     'writer': `---
 name: "Technical Writer"
@@ -842,12 +1002,23 @@ RULES:
 
 TOOLS:
 You have function-calling tools available. Call them directly — do NOT use [TOOL:...] text markers.
-Available tools: list_directory, read_file, search_files, write_file, patch_file, create_directory, run_shell.
+Available tools: list_directory, read_file, search_files, write_file, patch_file, create_directory, ls, cat, head, tail, grep, find, pwd, cd, rmdir, changes, fetch_web, recall_memory, open_url, run_shell.
 
 PATCH TIPS:
 - For patch_file, set old_text to "LINE:<number>" to replace a specific line by number (most reliable).
 - Always read_file first to see exact content before using patch_file.
 - If a patch fails, do NOT retry with slight variations. Switch to LINE:number mode or use write_file instead.
+
+EXTRA TOOL TIPS:
+- ls lists directory contents using the current tool working directory when path is omitted.
+- cat reads a full file, while head and tail read the first or last N lines.
+- grep searches file contents, and find searches file or directory names.
+- pwd shows the current tool working directory, and cd changes it for later tool calls.
+- rmdir removes a directory recursively and always asks for approval.
+- changes shows git status and diff output for the current repository or an optional path.
+- fetch_web fetches a web page and returns readable text content.
+- recall_memory searches Sapper's saved conversation memory.
+- open_url opens a URL in the default browser and always asks for approval.
 
 SHELL TIPS:
 - run_shell may keep long-running commands in a background session depending on config.
@@ -858,11 +1029,24 @@ SHELL TIPS:
 
 TOOL SYNTAX (use these to interact with files and system):
 - [TOOL:LIST]dir[/TOOL] - List directory contents
+- [TOOL:LS]dir[/TOOL] - Alias for LIST
 - [TOOL:READ]file_path[/TOOL] - Read file contents
+- [TOOL:CAT]file_path[/TOOL] - Alias for READ
+- [TOOL:HEAD]file_path:::20[/TOOL] - Read the first N lines of a file (default 20)
+- [TOOL:TAIL]file_path:::20[/TOOL] - Read the last N lines of a file (default 20)
 - [TOOL:SEARCH]pattern[/TOOL] - Search files for pattern
+- [TOOL:GREP]pattern[/TOOL] - Alias for SEARCH
+- [TOOL:FIND]name_or_fragment[/TOOL] - Find files and directories by name
 - [TOOL:WRITE]path:::content[/TOOL] - Create/overwrite file
 - [TOOL:PATCH]path:::old|||new[/TOOL] - Edit existing file (exact match, trimmed, or fuzzy)
 - [TOOL:PATCH]path:::LINE:number|||new text[/TOOL] - Replace a specific line by number (PREFERRED — more reliable)
+- [TOOL:PWD][/TOOL] - Show the current tool working directory
+- [TOOL:CD]dir[/TOOL] - Change the tool working directory for later tool calls
+- [TOOL:RMDIR]dir[/TOOL] - Remove a directory recursively (asks for approval)
+- [TOOL:CHANGES]path[/TOOL] - Show git status and diffs for the repository or a path
+- [TOOL:FETCH]https://example.com[/TOOL] - Fetch a web page and return readable content
+- [TOOL:MEMORY]query[/TOOL] - Search saved conversation memory
+- [TOOL:OPEN]https://example.com[/TOOL] - Open a URL in the default browser (asks for approval)
 - [TOOL:SHELL]command[/TOOL] - Run shell command
 
 PATCH TIPS:
@@ -923,9 +1107,16 @@ let currentAgentTools = null; // null = all tools allowed, or array of allowed t
 let loadedSkills = []; // array of skill names currently loaded
 
 const DEFAULT_CONFIG = Object.freeze({
+  defaultModel: null,
+  defaultAgent: null,
   autoAttach: true,
+  debug: false,
   contextLimit: null,
   toolRoundLimit: 40,
+  patchRetries: 3,
+  maxFileSize: 100000,
+  maxScanSize: 1000000,
+  maxUrlSize: 200000,
   summaryPhases: true,
   summarizeTriggerPercent: 65,
   shell: Object.freeze({
@@ -1079,9 +1270,16 @@ function normalizePromptConfig(promptConfig = {}) {
 function normalizeConfig(config = {}) {
   return {
     ...config,
+    defaultModel: typeof config.defaultModel === 'string' && config.defaultModel.trim() ? config.defaultModel.trim() : null,
+    defaultAgent: typeof config.defaultAgent === 'string' && config.defaultAgent.trim() ? config.defaultAgent.trim() : null,
     autoAttach: normalizeBoolean(config.autoAttach, DEFAULT_CONFIG.autoAttach),
+    debug: normalizeBoolean(config.debug, DEFAULT_CONFIG.debug),
     contextLimit: normalizeContextLimit(config.contextLimit),
     toolRoundLimit: normalizeToolRoundLimit(config.toolRoundLimit),
+    patchRetries: normalizeIntegerInRange(config.patchRetries, DEFAULT_CONFIG.patchRetries, 1, 20),
+    maxFileSize: normalizeIntegerInRange(config.maxFileSize, DEFAULT_CONFIG.maxFileSize, 10000, 10000000),
+    maxScanSize: normalizeIntegerInRange(config.maxScanSize, DEFAULT_CONFIG.maxScanSize, 100000, 50000000),
+    maxUrlSize: normalizeIntegerInRange(config.maxUrlSize, DEFAULT_CONFIG.maxUrlSize, 10000, 10000000),
     summaryPhases: normalizeBoolean(config.summaryPhases, DEFAULT_CONFIG.summaryPhases),
     summarizeTriggerPercent: normalizeSummarizeTriggerPercent(config.summarizeTriggerPercent),
     shell: normalizeShellConfig(config.shell),
@@ -1321,6 +1519,68 @@ function resolveActiveAgentContent() {
   return allAgents[currentAgent]?.content || null;
 }
 
+function getActiveAgentMeta() {
+  if (!currentAgent) return null;
+  const allAgents = loadAgents();
+  const agent = allAgents[currentAgent];
+  return {
+    key: currentAgent,
+    name: agent?.name || currentAgent,
+    description: agent?.description || '',
+    tools: agent?.tools || currentAgentTools,
+  };
+}
+
+function getLoadedSkillMetaList() {
+  const allSkills = loadSkills();
+  return loadedSkills.map(skillName => {
+    const skill = allSkills[skillName];
+    return {
+      key: skillName,
+      name: skill?.name || skillName,
+      description: skill?.description || '',
+    };
+  });
+}
+
+function summarizeModeNames(names = [], maxVisible = 3) {
+  const normalized = names.map(name => String(name ?? '').trim()).filter(Boolean);
+  if (normalized.length === 0) return '';
+  if (normalized.length <= maxVisible) return normalized.join(', ');
+  return `${normalized.slice(0, maxVisible).join(', ')}, +${normalized.length - maxVisible} more`;
+}
+
+function activeModeSummary({ includeAgent = true, maxSkills = 3 } = {}) {
+  const parts = [];
+  const activeAgent = getActiveAgentMeta();
+  const activeSkills = getLoadedSkillMetaList();
+
+  if (includeAgent && activeAgent) {
+    const agentName = activeAgent.name || currentAgent;
+    const agentSuffix = currentAgent && agentName !== currentAgent ? ` (/${currentAgent})` : currentAgent ? ` /${currentAgent}` : '';
+    parts.push(`agent ${agentName}${agentSuffix}`);
+  }
+
+  if (activeSkills.length > 0) {
+    parts.push(`skills ${summarizeModeNames(activeSkills.map(skill => skill.name || skill.key), maxSkills)}`);
+  }
+
+  return parts.join(' · ');
+}
+
+function activeAgentPromptBadge() {
+  const activeAgent = getActiveAgentMeta();
+  if (!activeAgent) return statusBadge('default', 'neutral');
+  return statusBadge(`agent:${ellipsis(activeAgent.name || currentAgent, 20)}`, 'info');
+}
+
+function activeSkillsPromptBadge() {
+  const activeSkills = getLoadedSkillMetaList();
+  if (activeSkills.length === 0) return null;
+  const prefix = activeSkills.length === 1 ? 'skill:' : 'skills:';
+  return statusBadge(`${prefix}${ellipsis(summarizeModeNames(activeSkills.map(skill => skill.name || skill.key), 2), 22)}`, 'success');
+}
+
 function refreshSystemPrompt(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return;
   messages[0] = {
@@ -1448,7 +1708,7 @@ async function buildWorkspaceGraph(showProgress = true) {
           
           try {
             const stats = fs.statSync(fullPath);
-            if (stats.size > MAX_FILE_SIZE) continue;
+            if (stats.size > getMaxFileSize()) continue;
             
             const content = fs.readFileSync(fullPath, 'utf8');
             const deps = extractDependencies(content, fullPath);
@@ -1530,12 +1790,12 @@ function formatWorkspaceSummary(workspace) {
   
   for (const [dir, files] of Object.entries(byDir)) {
     output += `📁 ${dir}/\n`;
-    for (const f of files.slice(0, 10)) { // Limit per directory
+    for (const f of files.slice(0, LIMITS.WORKSPACE_FILES_PER_DIR)) { // Limit per directory
       const name = f.path.split('/').pop();
       const exportList = f.exports?.length ? ` [${f.exports.slice(0, 3).join(', ')}${f.exports.length > 3 ? '...' : ''}]` : '';
       output += `   📄 ${name}${exportList}\n`;
     }
-    if (files.length > 10) output += `   ... and ${files.length - 10} more\n`;
+    if (files.length > LIMITS.WORKSPACE_FILES_PER_DIR) output += `   ... and ${files.length - LIMITS.WORKSPACE_FILES_PER_DIR} more\n`;
     output += '\n';
   }
   
@@ -1846,13 +2106,13 @@ async function addToEmbeddings(text, embeddings) {
   const embedding = await getEmbedding(text);
   if (embedding) {
     embeddings.chunks.push({
-      text: text.substring(0, 2000), // Limit stored text
+      text: text.substring(0, LIMITS.EMBEDDINGS_MAX_TEXT), // Limit stored text
       embedding,
       timestamp: Date.now()
     });
-    // Keep only last 100 chunks
-    if (embeddings.chunks.length > 100) {
-      embeddings.chunks = embeddings.chunks.slice(-100);
+    // Keep only last N chunks
+    if (embeddings.chunks.length > LIMITS.EMBEDDINGS_MAX_CHUNKS) {
+      embeddings.chunks = embeddings.chunks.slice(-LIMITS.EMBEDDINGS_MAX_CHUNKS);
     }
     saveEmbeddings(embeddings);
   }
@@ -1862,23 +2122,54 @@ async function addToEmbeddings(text, embeddings) {
 // SMART CONTEXT SUMMARIZATION
 // ═══════════════════════════════════════════════════════════════
 
-async function autoSummarizeContext(messages, model, force = false) {
-  // Use real token-based threshold if we know the model's context length
+// Check whether context is large enough to need summarization
+function needsSummarize(messages) {
   const estimatedTokens = estimateMessagesTokens(messages);
   const contextSize = JSON.stringify(messages).length;
-  
-  // Summarize when we hit the configured share of the effective context window
   const ctxLen = effectiveContextLength();
   const tokenThreshold = summaryTokenThreshold(ctxLen);
-  // Also keep the old byte-based check as a fallback
   const shouldSummarize = (ctxLen && estimatedTokens > tokenThreshold) || 
-                          (!ctxLen && contextSize > 32000);
+                          (!ctxLen && contextSize > LIMITS.CONTEXT_BYTE_FALLBACK);
+  return { shouldSummarize, estimatedTokens, contextSize, ctxLen, tokenThreshold };
+}
+
+// Save old messages into the embedding store for later recall
+async function saveOldMessagesToEmbeddings(oldMessages) {
+  const embeddings = loadEmbeddings();
+  const textToEmbed = oldMessages
+    .filter(m => m.role !== 'system')
+    .map(m => m.content.substring(0, LIMITS.LOG_PREVIEW_CHARS))
+    .join('\n---\n');
+
+  if (textToEmbed.length > LIMITS.EMBEDDING_MIN_TEXT) {
+    try {
+      const embedding = await getEmbedding(textToEmbed);
+      if (embedding) {
+        embeddings.chunks.push({
+          text: textToEmbed.substring(0, LIMITS.EMBEDDINGS_MAX_TEXT),
+          embedding,
+          timestamp: Date.now()
+        });
+        if (embeddings.chunks.length > LIMITS.EMBEDDINGS_MAX_CHUNKS) {
+          embeddings.chunks = embeddings.chunks.slice(-LIMITS.EMBEDDINGS_MAX_CHUNKS);
+        }
+        saveEmbeddings(embeddings);
+      }
+    } catch (e) {
+      // Silently skip embedding if model not available
+    }
+  }
+  return embeddings;
+}
+
+async function autoSummarizeContext(messages, model, force = false) {
+  const { shouldSummarize, estimatedTokens, contextSize, ctxLen, tokenThreshold } = needsSummarize(messages);
   
   if ((!force && !shouldSummarize) || messages.length <= 5) return messages;
 
   const usagePercent = ctxLen 
     ? Math.round((estimatedTokens / ctxLen) * 100)
-    : Math.round((contextSize / 32000) * 100);
+    : Math.round((contextSize / LIMITS.CONTEXT_BYTE_FALLBACK) * 100);
 
   console.log();
   const summaryIntroLines = [
@@ -1900,7 +2191,7 @@ async function autoSummarizeContext(messages, model, force = false) {
 
   // Separate: system prompt, messages to summarize, recent messages to keep
   const systemPrompt = messages[0];
-  const recentCount = 4;
+  const recentCount = LIMITS.SUMMARY_RECENT_MSGS;
   let recentMessages = messages.slice(-recentCount);
   let oldMessages = messages.slice(1, -recentCount);
 
@@ -1943,8 +2234,8 @@ async function autoSummarizeContext(messages, model, force = false) {
     .map(m => {
       const role = m.role === 'user' ? 'User' : 'Assistant';
       // Truncate very long messages (file contents, scan results, etc.)
-      const text = m.content.length > 1500
-        ? m.content.substring(0, 1500) + '\n... [truncated]'
+      const text = m.content.length > LIMITS.MSG_TRUNCATION_CHARS
+        ? m.content.substring(0, LIMITS.MSG_TRUNCATION_CHARS) + '\n... [truncated]'
         : m.content;
       return `${role}: ${text}`;
     })
@@ -1962,7 +2253,7 @@ async function autoSummarizeContext(messages, model, force = false) {
 - Important code changes or bugs found
 - Any pending tasks or open questions
 - Technical details that would be needed to continue the conversation
-- Which tools were used (LIST, READ, WRITE, PATCH, SHELL, SEARCH) and on what files
+- Which tools were used (LIST, READ, WRITE, PATCH, SHELL, SEARCH, CHANGES, FETCH, MEMORY, OPEN) and on what files or URLs
 - The active agent role (if any) and loaded skills
 - Any tool usage patterns or workflows that were established
 
@@ -1997,30 +2288,7 @@ Output ONLY the summary, no preamble. Keep it under 800 words. Use bullet points
 
     // Save old messages to embeddings before discarding
     summarySpinner.text = summaryPhaseText(3, `Saving compressed context and memory (${elapsedSummaryTime()} elapsed)`);
-    const embeddings = loadEmbeddings();
-    const textToEmbed = oldMessages
-      .filter(m => m.role !== 'system')
-      .map(m => m.content.substring(0, 500))
-      .join('\n---\n');
-
-    if (textToEmbed.length > 50) {
-      try {
-        const embedding = await getEmbedding(textToEmbed);
-        if (embedding) {
-          embeddings.chunks.push({
-            text: textToEmbed.substring(0, 2000),
-            embedding,
-            timestamp: Date.now()
-          });
-          if (embeddings.chunks.length > 100) {
-            embeddings.chunks = embeddings.chunks.slice(-100);
-          }
-          saveEmbeddings(embeddings);
-        }
-      } catch (e) {
-        // Silently skip embedding if model not available
-      }
-    }
+    const embeddings = await saveOldMessagesToEmbeddings(oldMessages);
 
     // Build agent role reminder if an agent is active
     const agentReminder = currentAgent ? `\nNote: You are currently operating as the "${currentAgent}" agent. Stay in character.` : '';
@@ -2031,13 +2299,13 @@ Output ONLY the summary, no preamble. Keep it under 800 words. Use bullet points
       systemPrompt,
       {
         role: 'user',
-        content: `[CONVERSATION SUMMARY - auto-generated]\n${summary}\n[END SUMMARY]\n\nUse this summary as context for our ongoing conversation. Continue using your tools (LIST, READ, WRITE, PATCH, SHELL, SEARCH) as needed.${agentReminder}${skillReminder}`
+        content: `[CONVERSATION SUMMARY - auto-generated]\n${summary}\n[END SUMMARY]\n\nUse this summary as context for our ongoing conversation. Continue using your tools (LIST, READ, WRITE, PATCH, SHELL, SEARCH, CHANGES, FETCH, MEMORY, OPEN) as needed.${agentReminder}${skillReminder}`
       },
       {
         role: 'assistant',
         content: _useNativeToolsFlag
-          ? `Understood. I have the conversation summary and will continue helping you. I'll use my tools (list_directory, read_file, write_file, patch_file, search_files, run_shell) as needed.\n\nWhat would you like me to do next?`
-          : `Understood. I have the conversation summary and will continue helping you. I'll keep using my tools to explore files, make changes, and run commands as needed:\n- [TOOL:LIST] to browse directories\n- [TOOL:READ] to read files\n- [TOOL:WRITE] to create/overwrite files\n- [TOOL:PATCH] to edit existing files\n- [TOOL:SEARCH] to find patterns\n- [TOOL:SHELL] to run commands\n\nWhat would you like me to do next?`
+          ? `Understood. I have the conversation summary and will continue helping you. I'll use my tools (list_directory, read_file, write_file, patch_file, search_files, changes, fetch_web, recall_memory, open_url, run_shell) as needed.\n\nWhat would you like me to do next?`
+          : `Understood. I have the conversation summary and will continue helping you. I'll keep using my tools to explore files, inspect changes, fetch references, recall memory, open URLs when needed, make edits, and run commands as needed:\n- [TOOL:LIST] to browse directories\n- [TOOL:READ] to read files\n- [TOOL:WRITE] to create/overwrite files\n- [TOOL:PATCH] to edit existing files\n- [TOOL:SEARCH] to find patterns\n- [TOOL:CHANGES] to inspect git changes\n- [TOOL:FETCH] to read web pages\n- [TOOL:MEMORY] to search saved memory\n- [TOOL:OPEN] to open URLs with approval\n- [TOOL:SHELL] to run commands\n\nWhat would you like me to do next?`
       },
       ...recentMessages
     ];
@@ -2199,6 +2467,22 @@ function commandRow(command, description, width = 18) {
   return `${padAnsi(UI.accent(command), width)} ${UI.slate('—')} ${UI.ink(description)}`;
 }
 
+function renderViewport(content, { verticalAlign = 'top', minTopPadding = 0 } = {}) {
+  const text = String(content ?? '').replace(/\n+$/, '');
+  const rows = Math.max(12, process.stdout.rows || 24);
+  const lineCount = text ? text.split('\n').length : 0;
+  const centeredPadding = verticalAlign === 'center'
+    ? Math.max(0, Math.floor((rows - lineCount) / 2))
+    : 0;
+  const topPadding = Math.max(minTopPadding, centeredPadding);
+
+  console.clear();
+  if (topPadding > 0) {
+    process.stdout.write('\n'.repeat(topPadding));
+  }
+  process.stdout.write(`${text}\n`);
+}
+
 function meter(current = 0, total = 0, width = 20) {
   if (!total || total <= 0) return UI.slate('░'.repeat(width));
 
@@ -2334,6 +2618,18 @@ function createShellSession(command, cwd, proc) {
   };
   shellSessions.set(id, session);
   return session;
+}
+
+// Prune completed shell sessions to prevent memory leaks (keep last 20)
+function pruneCompletedShellSessions() {
+  const completed = Array.from(shellSessions.entries()).filter(([, s]) => s.completed);
+  const MAX_COMPLETED = 20;
+  if (completed.length > MAX_COMPLETED) {
+    completed
+      .sort((a, b) => a[1].startedAt - b[1].startedAt)
+      .slice(0, completed.length - MAX_COMPLETED)
+      .forEach(([id]) => shellSessions.delete(id));
+  }
 }
 
 function activeShellSessionCount() {
@@ -2517,9 +2813,15 @@ function renderShellSessionsPanel() {
   return box(lines.join('\n'), 'Shell Sessions', 'cyan');
 }
 
-// Configure marked with terminal renderer
+// ─── Markdown terminal rendering ───────────────────────────────────
+// Dynamic width helper (recalculated on every render)
+function mdWidth() {
+  return Math.min(process.stdout.columns || 80, 120);
+}
+
+// Base marked-terminal config (tables, emoji, reflow, text styles)
 marked.use(markedTerminal({
-    code: chalk.cyan,
+    code: chalk.cyan,            // fallback when highlight fails
     blockquote: chalk.gray.italic,
     html: chalk.gray,
     heading: chalk.bold.cyan,
@@ -2541,10 +2843,151 @@ marked.use(markedTerminal({
     del: chalk.strikethrough,
     link: chalk.underline.blue,
     href: chalk.gray,
-    showSectionPrefix: true,
+    showSectionPrefix: false,
     reflowText: true,
-    width: Math.min(process.stdout.columns || 80, 120)
+    emoji: true,
+    tab: 2,
+    width: 120, // overridden dynamically below
 }));
+
+// ─── Enhanced renderers (override marked-terminal defaults) ────────
+const HEADING_STYLES = [
+  chalk.hex('#7cc4ff').bold.underline,   // h1 – bright cyan underline
+  chalk.hex('#7cc4ff').bold,             // h2 – bright cyan bold
+  chalk.hex('#9bbcff').bold,             // h3 – soft blue bold
+  chalk.hex('#b8d9ff'),                  // h4 – light blue
+  chalk.hex('#8a95a6').bold,             // h5 – slate bold
+  chalk.hex('#8a95a6'),                  // h6 – slate
+];
+const HEADING_PREFIX = ['◆', '◇', '▸', '▹', '·', '·'];
+
+function syntaxHighlight(code, lang) {
+  try {
+    if (!lang) return chalk.hex('#e6ebf2')(code);
+    return highlightCode(code, { language: lang, ignoreIllegals: true });
+  } catch {
+    return chalk.hex('#e6ebf2')(code);
+  }
+}
+
+function framedCodeBlock(code, lang) {
+  const width = mdWidth();
+  const innerWidth = Math.max(20, width - 6);  // "  │ " prefix = 4, " │" suffix = 2
+  const highlighted = syntaxHighlight(code, lang);
+  const lines = highlighted.split('\n');
+
+  // Top rule with optional language label
+  let topRule;
+  if (lang) {
+    const label = ` ${chalk.hex('#8a95a6').italic(lang)} `;
+    const labelLen = lang.length + 2;  // visible length of " lang "
+    const preDashes = 2;
+    const postDashes = Math.max(0, innerWidth + 2 - preDashes - labelLen);
+    topRule = chalk.hex('#3d4f5f')('  ┌' + '─'.repeat(preDashes)) + label + chalk.hex('#3d4f5f')('─'.repeat(postDashes) + '┐');
+  } else {
+    topRule = chalk.hex('#3d4f5f')('  ┌' + '─'.repeat(innerWidth + 2) + '┐');
+  }
+
+  // Code lines with left+right border
+  const framedLines = lines.map(line => {
+    const visLen = stripAnsi(line).length;
+    const pad = Math.max(0, innerWidth - visLen);
+    return chalk.hex('#3d4f5f')('  │ ') + line + ' '.repeat(pad) + chalk.hex('#3d4f5f')(' │');
+  });
+
+  // Bottom rule
+  const bottomRule = chalk.hex('#3d4f5f')('  └' + '─'.repeat(innerWidth + 2) + '┘');
+
+  return '\n' + topRule + '\n' + framedLines.join('\n') + '\n' + bottomRule + '\n';
+}
+
+const LIST_BULLETS = ['●', '○', '◦', '·'];
+
+marked.use({
+  renderer: {
+    // ── Fenced code blocks: framed box with syntax highlighting ──
+    code({ text, lang }) {
+      return framedCodeBlock(text, lang || '');
+    },
+
+    // ── Headings: level-aware icons + color gradient ──
+    heading({ tokens, depth }) {
+      const text = this.parser.parseInline(tokens);
+      const level = Math.max(0, Math.min(depth - 1, 5));
+      const style = HEADING_STYLES[level];
+      const prefix = HEADING_PREFIX[level];
+      const plain = stripAnsi(text);
+      const underChar = level === 0 ? '═' : level === 1 ? '─' : '';
+      const underline = underChar ? '\n  ' + chalk.hex('#3d4f5f')(underChar.repeat(Math.min(plain.length + 4, mdWidth() - 4))) : '';
+      return `\n  ${chalk.hex('#3d4f5f')(prefix)} ${style(plain)}${underline}\n`;
+    },
+
+    // ── Blockquotes: thick left bar with dimmed styling ──
+    blockquote({ tokens }) {
+      const body = this.parser.parse(tokens);
+      const lines = body.split('\n').filter(l => l.trim() !== '');
+      const bar = chalk.hex('#5a7a9a')('▌');
+      const textStyle = chalk.hex('#9aafcc').italic;
+      return '\n' + lines.map(line => {
+        const clean = stripAnsi(line).trim();
+        return `  ${bar} ${textStyle(clean)}`;
+      }).join('\n') + '\n';
+    },
+
+    // ── Lists: modern bullets ──
+    list({ items, ordered }) {
+      const result = items.map((item, i) => {
+        // Parse inline tokens to properly render codespan, strong, em, etc.
+        let body = '';
+        for (const tok of item.tokens) {
+          if (tok.tokens) {
+            body += this.parser.parseInline(tok.tokens);
+          } else if (tok.type === 'space') {
+            body += '';
+          } else {
+            body += tok.text || '';
+          }
+        }
+        body = body.replace(/\n+$/, '');
+        const lines = body.split('\n');
+        if (ordered) {
+          const num = chalk.hex('#7cc4ff')(`${i + 1}.`);
+          const prefix = `  ${num} `;
+          return lines.map((line, li) => {
+            return li === 0 ? `${prefix}${line.trim()}` : `     ${line.trim()}`;
+          }).join('\n');
+        }
+        const bullet = chalk.hex('#5a7a9a')(LIST_BULLETS[Math.min(item.depth || 0, LIST_BULLETS.length - 1)] || '●');
+        const prefix = `  ${bullet} `;
+        return lines.map((line, li) => {
+          return li === 0 ? `${prefix}${line.trim()}` : `    ${line.trim()}`;
+        }).join('\n');
+      }).join('\n');
+      return '\n' + result + '\n';
+    },
+
+    // ── Horizontal rules: themed divider ──
+    hr() {
+      const w = Math.max(20, mdWidth() - 4);
+      return '\n  ' + chalk.hex('#3d4f5f')('─'.repeat(w)) + '\n';
+    },
+
+    // ── Inline code: highlighted background effect ──
+    codespan({ text }) {
+      return chalk.bgHex('#1a2733').hex('#7cc4ff')(` ${text} `);
+    },
+
+    // ── Links: visible URL with icon ──
+    link({ href, tokens }) {
+      const text = this.parser.parseInline(tokens);
+      const plain = stripAnsi(text);
+      if (plain === href) {
+        return chalk.hex('#7cc4ff').underline(href);
+      }
+      return `${chalk.hex('#7cc4ff').underline(plain)} ${chalk.hex('#8a95a6')('→')} ${chalk.hex('#5a7a9a').underline(href)}`;
+    },
+  }
+});
 
 // Render markdown to terminal
 function renderMarkdown(text) {
@@ -2556,7 +2999,7 @@ function renderMarkdown(text) {
 }
 
 let stepMode = false;
-let debugMode = false; // Toggle with /debug command
+let debugMode = sapperConfig.debug || false; // Toggle with /debug command, or set in config
 let abortStream = false; // Flag to interrupt AI response
 
 // ═══════════════════════════════════════════════════════════════
@@ -2810,9 +3253,11 @@ const CODE_EXTENSIONS = new Set([
 ]);
 
 // Max file size to include (skip large files like bundled/minified)
-const MAX_FILE_SIZE = 100000; // 100KB per file
-const MAX_TOTAL_SCAN_SIZE = 1000000; // 1000KB total scan limit
-const MAX_URL_SIZE = 200000; // 200KB max for fetched web pages
+// File limits — configurable via .sapper/config.json
+function getMaxFileSize() { return sapperConfig.maxFileSize || DEFAULT_CONFIG.maxFileSize; }
+function getMaxScanSize() { return sapperConfig.maxScanSize || DEFAULT_CONFIG.maxScanSize; }
+function getMaxUrlSize() { return sapperConfig.maxUrlSize || DEFAULT_CONFIG.maxUrlSize; }
+function getPatchRetries() { return sapperConfig.patchRetries || DEFAULT_CONFIG.patchRetries; }
 
 // ═══════════════════════════════════════════════════════════════
 // URL FETCHING — Read web pages and learn from them
@@ -2821,7 +3266,7 @@ import https from 'https';
 import http from 'http';
 
 // Fetch a URL and return extracted text content
-function fetchUrl(url, timeout = 15000) {
+function fetchUrl(url, timeout = LIMITS.FETCH_URL_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith('https') ? https : http;
     const req = lib.get(url, { 
@@ -2846,9 +3291,9 @@ function fetchUrl(url, timeout = 15000) {
       let size = 0;
       res.on('data', (chunk) => {
         size += chunk.length;
-        if (size > MAX_URL_SIZE) {
+        if (size > getMaxUrlSize()) {
           res.destroy();
-          reject(new Error(`Page too large (>${Math.round(MAX_URL_SIZE/1024)}KB)`));
+          reject(new Error(`Page too large (>${Math.round(getMaxUrlSize()/1024)}KB)`));
           return;
         }
         data += chunk;
@@ -2883,8 +3328,8 @@ function htmlToText(html) {
   text = text.replace(/\n\s*\n/g, '\n\n');
   text = text.trim();
   // Limit to reasonable size
-  if (text.length > 50000) {
-    text = text.substring(0, 50000) + '\n\n[... content truncated at 50KB ...]';
+  if (text.length > LIMITS.WEB_CONTENT_MAX_CHARS) {
+    text = text.substring(0, LIMITS.WEB_CONTENT_MAX_CHARS) + '\n\n[... content truncated at 50KB ...]';
   }
   return text;
 }
@@ -2964,6 +3409,20 @@ function shouldIgnore(nameOrPath) {
   return ignored;
 }
 
+// Format file attachments into a decorated string block for context messages
+function formatFileAttachments(fileAttachments) {
+  let s = '\n\n══════════════════════════════════════\n';
+  s += `📎 ATTACHED FILES (${fileAttachments.length})\n`;
+  s += '══════════════════════════════════════\n\n';
+  for (const file of fileAttachments) {
+    s += `┌─── ${file.path} ───\n`;
+    s += file.content;
+    if (!file.content.endsWith('\n')) s += '\n';
+    s += `└─── END ${file.path} ───\n\n`;
+  }
+  return s;
+}
+
 // Scan entire codebase and return summary
 function scanCodebase(dir = '.', depth = 0, maxDepth = 5) {
   if (depth > maxDepth) return { files: [], totalSize: 0 };
@@ -2993,11 +3452,11 @@ function scanCodebase(dir = '.', depth = 0, maxDepth = 5) {
         
         try {
           const stats = fs.statSync(fullPath);
-          if (stats.size > MAX_FILE_SIZE) {
+          if (stats.size > getMaxFileSize()) {
             files.push({ path: fullPath, size: stats.size, skipped: true, reason: 'too large' });
             continue;
           }
-          if (totalSize + stats.size > MAX_TOTAL_SCAN_SIZE) {
+          if (totalSize + stats.size > getMaxScanSize()) {
             files.push({ path: fullPath, size: stats.size, skipped: true, reason: 'total limit reached' });
             continue;
           }
@@ -3218,18 +3677,19 @@ async function pickModel(models) {
 
   const render = () => {
     const current = models[cursor];
-    console.clear();
-    console.log(BANNER);
-    console.log(`${UI.slate(process.cwd())} ${UI.slate('·')} ${UI.slate(`v${CURRENT_VERSION}`)}`);
-    console.log(divider());
-    console.log(sectionTitle('Model selection', 'use ↑↓ or j/k, enter to confirm', 'cyan'));
-    console.log();
+    const lines = [
+      BANNER,
+      `${UI.slate(process.cwd())} ${UI.slate('·')} ${UI.slate(`v${CURRENT_VERSION}`)}`,
+      divider(),
+      sectionTitle('Model selection', 'use ↑↓ or j/k, enter to confirm', 'cyan'),
+      ''
+    ];
 
     const startIdx = Math.max(0, Math.min(cursor - Math.floor(pageSize / 2), models.length - pageSize));
     const endIdx = Math.min(startIdx + pageSize, models.length);
 
     if (startIdx > 0) {
-      console.log(UI.slate('  ↑ more models'));
+      lines.push(UI.slate('  ↑ more models'));
     }
 
     for (let i = startIdx; i < endIdx; i++) {
@@ -3244,20 +3704,20 @@ async function pickModel(models) {
         model.details?.parameter_size || null,
       ].filter(Boolean).join(' · ');
 
-      console.log(`${marker} ${index}  ${name}`);
+      lines.push(`${marker} ${index}  ${name}`);
       if (meta) {
-        console.log(`     ${UI.slate(meta)}`);
+        lines.push(`     ${UI.slate(meta)}`);
       }
     }
 
     if (endIdx < models.length) {
-      console.log(UI.slate('  ↓ more models'));
+      lines.push(UI.slate('  ↓ more models'));
     }
 
     const family = current.details?.family || current.details?.format || current.details?.parameter_size || 'local model';
     const quant = current.details?.quantization_level || current.details?.quantization || 'default';
-    console.log();
-    console.log(box(
+    lines.push('');
+    lines.push(box(
       `${keyValue('Selected', chalk.white.bold(current.name), 10)}\n` +
       `${keyValue('Footprint', UI.ink(current.size ? formatBytes(current.size) : 'unknown'), 10)}\n` +
       `${keyValue('Updated', UI.ink(current.modified_at ? formatRelativeTime(current.modified_at) : 'unknown'), 10)}\n` +
@@ -3265,6 +3725,8 @@ async function pickModel(models) {
       `${keyValue('Quant', UI.ink(quant), 10)}`,
       'Preview', 'gray'
     ));
+
+    renderViewport(lines.join('\n'), { verticalAlign: 'center' });
   };
 
   return new Promise((resolve) => {
@@ -3299,11 +3761,11 @@ async function pickModel(models) {
         render();
       } else if (key.name === 'return') {
         cleanup();
-        console.log(UI.slate(`\nUsing ${models[cursor].name}`));
+        console.clear();
         resolve(models[cursor].name);
       } else if (key.name === 'escape' || key.name === 'q' || (key.ctrl && key.name === 'c')) {
         cleanup();
-        console.log(UI.slate(`\nUsing ${models[cursor].name}`));
+        console.clear();
         resolve(models[cursor].name);
       }
     };
@@ -3312,11 +3774,249 @@ async function pickModel(models) {
   });
 }
 
+let toolWorkingDirectory = process.cwd();
+
+function getToolWorkingDirectory() {
+  return toolWorkingDirectory || process.cwd();
+}
+
+function resolveToolPath(pathValue = '.', { allowEmpty = false } = {}) {
+  let rawPath = typeof pathValue === 'string' ? pathValue.trim() : '';
+  // Strip surrounding quotes that models sometimes add
+  if ((rawPath.startsWith('"') && rawPath.endsWith('"')) || (rawPath.startsWith("'") && rawPath.endsWith("'"))) {
+    rawPath = rawPath.slice(1, -1).trim();
+  }
+  if (!rawPath) {
+    return allowEmpty ? '' : getToolWorkingDirectory();
+  }
+  if (rawPath === '/') {
+    return getToolWorkingDirectory();
+  }
+  const resolved = isAbsolute(rawPath) ? rawPath : pathResolve(getToolWorkingDirectory(), rawPath);
+  // Prevent path traversal outside the project directory
+  const projectRoot = process.cwd();
+  if (!resolved.startsWith(projectRoot + '/') && resolved !== projectRoot) {
+    return projectRoot; // Fall back to project root for paths that escape sandbox
+  }
+  return resolved;
+}
+
+function resolveLineWindowCount(value, fallback = 20) {
+  return normalizeIntegerInRange(value, fallback, 1, 400);
+}
+
+function readFileLineWindow(pathValue, mode = 'head', countValue = 20) {
+  const trimmedPath = typeof pathValue === 'string' ? pathValue.trim() : '';
+  if (!trimmedPath) return 'Error reading file: missing file path';
+
+  try {
+    const resolvedPath = resolveToolPath(trimmedPath);
+    const rawContent = fs.readFileSync(resolvedPath, 'utf8');
+    const lines = rawContent === '' ? [] : rawContent.split('\n');
+    const requestedCount = resolveLineWindowCount(countValue, 20);
+
+    if (lines.length === 0) {
+      return `${mode === 'tail' ? 'Last' : 'First'} 0 lines of ${trimmedPath}:\n(empty file)`;
+    }
+
+    const slice = mode === 'tail'
+      ? lines.slice(-requestedCount)
+      : lines.slice(0, requestedCount);
+    const shownCount = slice.length;
+    const lineLabel = shownCount === 1 ? 'line' : 'lines';
+    const descriptor = mode === 'tail' ? 'last' : 'first';
+
+    return `Showing the ${descriptor} ${shownCount} ${lineLabel} of ${trimmedPath}:\n${slice.join('\n')}`;
+  } catch (error) {
+    return `Error reading file: ${error.message}`;
+  }
+}
+
+function findPathsByName(patternValue, startPathValue = '.') {
+  const pattern = String(patternValue ?? '').trim();
+  const startPath = typeof startPathValue === 'string' ? startPathValue.trim() : '';
+  if (!pattern) return 'Error finding files: missing search pattern';
+
+  const resolvedStartPath = resolveToolPath(startPath || '.');
+  if (!fs.existsSync(resolvedStartPath)) {
+    return `Error finding files: ${startPath || '.'} does not exist`;
+  }
+
+  let startStats;
+  try {
+    startStats = fs.statSync(resolvedStartPath);
+  } catch (error) {
+    return `Error finding files: ${error.message}`;
+  }
+
+  if (!startStats.isDirectory()) {
+    return `Error finding files: ${startPath || '.'} is not a directory`;
+  }
+
+  const matches = [];
+  const maxResults = 100;
+  const patternLower = pattern.toLowerCase();
+
+  const visit = (dirPath, displayPrefix = '') => {
+    if (matches.length >= maxResults) return;
+
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (matches.length >= maxResults) return;
+      if (entry.name.startsWith('.')) continue;
+      if (shouldIgnore(entry.name)) continue;
+
+      const fullPath = join(dirPath, entry.name);
+      const relativePath = displayPrefix ? `${displayPrefix}/${entry.name}` : entry.name;
+      if (shouldIgnore(relativePath) || shouldIgnore(fullPath)) continue;
+
+      const displayPath = entry.isDirectory() ? `${relativePath}/` : relativePath;
+      if (entry.name.toLowerCase().includes(patternLower) || relativePath.toLowerCase().includes(patternLower)) {
+        matches.push(displayPath);
+      }
+
+      if (entry.isDirectory()) {
+        visit(fullPath, relativePath);
+      }
+    }
+  };
+
+  visit(resolvedStartPath);
+
+  if (matches.length === 0) {
+    return `No files or directories found matching: ${pattern}`;
+  }
+
+  const header = `Found ${matches.length} matching path${matches.length === 1 ? '' : 's'} for: ${pattern}`;
+  const body = matches.join('\n');
+  const truncated = matches.length >= maxResults ? '\n... (results truncated)' : '';
+  return `${header}\n${body}${truncated}`;
+}
+
+function truncateToolText(textValue = '', maxChars = 24000) {
+  const text = String(textValue ?? '').trim();
+  if (!text) return '';
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n... (output truncated at ${maxChars.toLocaleString()} chars)`;
+}
+
+function shellQuote(value = '') {
+  return `'${String(value ?? '').replace(/'/g, `'\\''`)}'`;
+}
+
+function runCapturedCommand(command, { cwd = getToolWorkingDirectory(), timeoutMs = 12000, maxOutput = 24000 } = {}) {
+  return new Promise((resolve) => {
+    const proc = spawn('sh', ['-c', command], { cwd });
+    let stdout = '';
+    let stderr = '';
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
+    let finished = false;
+
+    const appendLimited = (existing, chunkText, maxChars, setTruncated) => {
+      if (existing.length >= maxChars) {
+        setTruncated(true);
+        return existing;
+      }
+      const remaining = maxChars - existing.length;
+      if (chunkText.length > remaining) {
+        setTruncated(true);
+        return existing + chunkText.slice(0, remaining);
+      }
+      return existing + chunkText;
+    };
+
+    const finish = (result) => {
+      if (finished) return;
+      finished = true;
+      if (timer) clearTimeout(timer);
+      const finalStdout = stdoutTruncated
+        ? `${stdout}\n... (stdout truncated at ${maxOutput.toLocaleString()} chars)`
+        : stdout;
+      const finalStderr = stderrTruncated
+        ? `${stderr}\n... (stderr truncated at ${maxOutput.toLocaleString()} chars)`
+        : stderr;
+      resolve({ ...result, stdout: finalStdout, stderr: finalStderr });
+    };
+
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          try { proc.kill('SIGTERM'); } catch (e) {}
+          finish({ exitCode: 124, stdout, stderr: `${stderr}\nCommand timed out after ${timeoutMs}ms`.trim(), timedOut: true });
+        }, timeoutMs)
+      : null;
+
+    proc.stdout.on('data', (data) => {
+      stdout = appendLimited(stdout, data.toString(), maxOutput, (value) => { stdoutTruncated = value; });
+    });
+    proc.stderr.on('data', (data) => {
+      stderr = appendLimited(stderr, data.toString(), maxOutput, (value) => { stderrTruncated = value; });
+    });
+
+    proc.on('error', (error) => {
+      finish({ exitCode: 1, stdout, stderr: `${stderr}\n${error.message}`.trim(), timedOut: false });
+    });
+    proc.on('close', (code) => {
+      finish({ exitCode: code ?? 0, stdout, stderr, timedOut: false });
+    });
+  });
+}
+
+function normalizeFetchedWebContent(rawContent = '') {
+  const trimmed = String(rawContent ?? '').trim();
+  if (!trimmed) return '';
+
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      return JSON.stringify(JSON.parse(trimmed), null, 2);
+    } catch (error) {
+      return trimmed;
+    }
+  }
+
+  if (trimmed.startsWith('<') || trimmed.toLowerCase().includes('<html')) {
+    return htmlToText(trimmed);
+  }
+
+  return trimmed;
+}
+
+function keywordRecallMemory(query, embeddings, topK = 3) {
+  const queryText = String(query ?? '').trim().toLowerCase();
+  if (!queryText || !embeddings?.chunks?.length) return [];
+
+  const queryWords = Array.from(new Set(
+    queryText.split(/[^a-z0-9_]+/i).map(word => word.trim()).filter(word => word.length >= 2)
+  ));
+  const maxScore = Math.max(1, 4 + queryWords.length);
+
+  return embeddings.chunks
+    .map((chunk) => {
+      const text = String(chunk?.text ?? '');
+      const lowered = text.toLowerCase();
+      let score = 0;
+      if (lowered.includes(queryText)) score += 4;
+      for (const word of queryWords) {
+        if (lowered.includes(word)) score += 1;
+      }
+      return { ...chunk, score: Math.min(1, score / maxScore) };
+    })
+    .filter(chunk => chunk.score > 0)
+    .sort((a, b) => b.score - a.score || (b.timestamp || 0) - (a.timestamp || 0))
+    .slice(0, topK);
+}
+
 const tools = {
   read: (path) => {
     const trimmedPath = typeof path === 'string' ? path.trim() : '';
     if (!trimmedPath) return 'Error reading file: missing file path';
-    try { return fs.readFileSync(trimmedPath, 'utf8'); } 
+    try { return fs.readFileSync(resolveToolPath(trimmedPath), 'utf8'); } 
     catch (error) { return `Error reading file: ${error.message}`; }
   },
   patch: async (path, oldText, newText) => {
@@ -3326,7 +4026,8 @@ const tools = {
       return 'Error patching file: missing old_text or new_text';
     }
     try {
-      const content = fs.readFileSync(trimmedPath, 'utf8');
+      const resolvedPath = resolveToolPath(trimmedPath);
+      const content = fs.readFileSync(resolvedPath, 'utf8');
 
       // --- Line-number mode: LINE:15|||new text ---
       const lineMatch = oldText.match(/^LINE:(\d+)$/);
@@ -3343,7 +4044,7 @@ const tools = {
         }
 
         return reviewCandidateFile({
-          filePath: trimmedPath,
+          filePath: resolvedPath,
           originalContent: content,
           newContent,
           title: 'Patch Review',
@@ -3412,7 +4113,7 @@ const tools = {
       }
 
       return reviewCandidateFile({
-        filePath: trimmedPath,
+        filePath: resolvedPath,
         originalContent: content,
         newContent,
         title: 'Patch Review',
@@ -3424,8 +4125,9 @@ const tools = {
     const trimmedPath = typeof path === 'string' ? path.trim() : '';
     if (!trimmedPath) return 'Error writing file: missing file path';
     try {
-      const fileExists = fs.existsSync(trimmedPath);
-      const existingContent = fileExists ? fs.readFileSync(trimmedPath, 'utf8') : '';
+      const resolvedPath = resolveToolPath(trimmedPath);
+      const fileExists = fs.existsSync(resolvedPath);
+      const existingContent = fileExists ? fs.readFileSync(resolvedPath, 'utf8') : '';
       const nextContent = String(content ?? '');
 
       if (fileExists && existingContent === nextContent) {
@@ -3433,7 +4135,7 @@ const tools = {
       }
 
       return reviewCandidateFile({
-        filePath: trimmedPath,
+        filePath: resolvedPath,
         originalContent: existingContent,
         newContent: nextContent,
         title: 'Write Review',
@@ -3445,9 +4147,196 @@ const tools = {
     const trimmedPath = typeof path === 'string' ? path.trim() : '';
     if (!trimmedPath) return 'Error creating directory: missing directory path';
     try {
-      fs.mkdirSync(trimmedPath, { recursive: true });
+      fs.mkdirSync(resolveToolPath(trimmedPath), { recursive: true });
       return `Directory created: ${trimmedPath}`;
     } catch (error) { return `Error creating directory: ${error.message}`; }
+  },
+  pwd: () => getToolWorkingDirectory(),
+  cd: (path) => {
+    const trimmedPath = typeof path === 'string' ? path.trim() : '';
+    if (!trimmedPath) return 'Error changing directory: missing directory path';
+    try {
+      const resolvedPath = resolveToolPath(trimmedPath);
+      const stats = fs.statSync(resolvedPath);
+      if (!stats.isDirectory()) {
+        return `Error changing directory: ${trimmedPath} is not a directory`;
+      }
+      toolWorkingDirectory = resolvedPath;
+      return `Working directory changed to ${toolWorkingDirectory}`;
+    } catch (error) {
+      return `Error changing directory: ${error.message}`;
+    }
+  },
+  rmdir: async (path) => {
+    const trimmedPath = typeof path === 'string' ? path.trim() : '';
+    if (!trimmedPath) return 'Error removing directory: missing directory path';
+    if (['.', '..', '/'].includes(trimmedPath)) {
+      return `Error removing directory: refusing to remove ${trimmedPath}`;
+    }
+
+    try {
+      const resolvedPath = resolveToolPath(trimmedPath);
+      if (!fs.existsSync(resolvedPath)) {
+        return `Error removing directory: ${trimmedPath} does not exist`;
+      }
+      const stats = fs.statSync(resolvedPath);
+      if (!stats.isDirectory()) {
+        return `Error removing directory: ${trimmedPath} is not a directory`;
+      }
+
+      console.log();
+      console.log(box(
+        `${keyValue('Directory', chalk.white(trimmedPath), 11)}\n` +
+        `${keyValue('Action', chalk.white('remove recursively'), 11)}\n` +
+        `${UI.slate('This will permanently delete the directory and its contents.')}`,
+        'Directory Removal', 'red'
+      ));
+      const confirm = await safeQuestion(confirmPrompt('Remove directory', 'error'));
+      if (!['y', 'yes'].includes(String(confirm ?? '').trim().toLowerCase())) {
+        return 'Directory removal blocked by user.';
+      }
+
+      fs.rmSync(resolvedPath, { recursive: true, force: false });
+      return `Directory removed: ${trimmedPath}`;
+    } catch (error) {
+      return `Error removing directory: ${error.message}`;
+    }
+  },
+  ls: (path) => tools.list(path),
+  cat: (path) => tools.read(path),
+  head: (path, lines) => readFileLineWindow(path, 'head', lines),
+  tail: (path, lines) => readFileLineWindow(path, 'tail', lines),
+  grep: (pattern) => tools.search(pattern),
+  find: (pattern, startPath) => findPathsByName(pattern, startPath),
+  changes: async (path) => {
+    const trimmedPath = typeof path === 'string' ? path.trim() : '';
+    const cwd = getToolWorkingDirectory();
+    const quotedPath = trimmedPath ? ` -- ${shellQuote(trimmedPath)}` : '';
+
+    const repoCheck = await runCapturedCommand('git rev-parse --show-toplevel', {
+      cwd,
+      timeoutMs: 5000,
+      maxOutput: 4000,
+    });
+    if (repoCheck.exitCode !== 0) {
+      return 'Error: current tool working directory is not inside a git repository';
+    }
+
+    const statusCmd = trimmedPath
+      ? `git --no-pager status --short ${quotedPath}`
+      : 'git --no-pager status --short --branch';
+    const [statusResult, unstagedResult, stagedResult] = await Promise.all([
+      runCapturedCommand(statusCmd, { cwd, timeoutMs: 8000, maxOutput: 12000 }),
+      runCapturedCommand(`git --no-pager diff --no-ext-diff --minimal${quotedPath}`, { cwd, timeoutMs: 8000, maxOutput: 20000 }),
+      runCapturedCommand(`git --no-pager diff --cached --no-ext-diff --minimal${quotedPath}`, { cwd, timeoutMs: 8000, maxOutput: 20000 }),
+    ]);
+
+    if (statusResult.exitCode !== 0) {
+      return `Error reading git changes: ${statusResult.stderr.trim() || 'git status failed'}`;
+    }
+
+    const parts = [];
+    const scopeLabel = trimmedPath ? ` for ${trimmedPath}` : '';
+    parts.push(`Git changes${scopeLabel}:`);
+    parts.push(statusResult.stdout.trim() || 'No changed files in working tree.');
+
+    const unstagedDiff = unstagedResult.stdout.trim();
+    const stagedDiff = stagedResult.stdout.trim();
+
+    if (unstagedDiff) {
+      parts.push(`Unstaged diff:\n${unstagedDiff}`);
+    }
+    if (stagedDiff) {
+      parts.push(`Staged diff:\n${stagedDiff}`);
+    }
+    if (!unstagedDiff && !stagedDiff) {
+      parts.push('No staged or unstaged diff output.');
+    }
+
+    return truncateToolText(parts.join('\n\n'), 28000);
+  },
+  fetch_web: async (url) => {
+    const trimmedUrl = String(url ?? '').trim();
+    if (!trimmedUrl) return 'Error fetching web page: missing URL';
+    if (!/^https?:\/\//i.test(trimmedUrl)) {
+      return 'Error fetching web page: URL must start with http:// or https://';
+    }
+
+    try {
+      const rawContent = await fetchUrl(trimmedUrl);
+      const text = normalizeFetchedWebContent(rawContent);
+      if (!text) return `No readable content found at ${trimmedUrl}`;
+      return `Fetched ${trimmedUrl}:\n\n${truncateToolText(text, 28000)}`;
+    } catch (error) {
+      return `Error fetching web page: ${error.message}`;
+    }
+  },
+  recall_memory: async (query) => {
+    const trimmedQuery = String(query ?? '').trim();
+    if (!trimmedQuery) return 'Error searching memory: missing query';
+
+    const embeddings = loadEmbeddings();
+    if (!embeddings.chunks.length) {
+      return 'No saved memory yet. Use /prune or continue working so Sapper can store conversation memory.';
+    }
+
+    let relevant = await findRelevantContext(trimmedQuery, embeddings, 3);
+    if (!relevant.length) {
+      relevant = keywordRecallMemory(trimmedQuery, embeddings, 3);
+    }
+    if (!relevant.length) {
+      return `No relevant memories found for: ${trimmedQuery}`;
+    }
+
+    const formatted = relevant.map((chunk, index) => {
+      const timestamp = chunk.timestamp ? new Date(chunk.timestamp).toISOString() : 'unknown time';
+      const score = typeof chunk.score === 'number'
+        ? `${Math.round(chunk.score * 100)}%`
+        : 'n/a';
+      const text = truncateToolText(chunk.text || '', 1200);
+      return `[${index + 1}] ${timestamp} · relevance ${score}\n${text}`;
+    }).join('\n\n');
+
+    return `Found ${relevant.length} memory match${relevant.length === 1 ? '' : 'es'} for: ${trimmedQuery}\n\n${formatted}`;
+  },
+  open_url: async (url) => {
+    const trimmedUrl = String(url ?? '').trim();
+    if (!trimmedUrl) return 'Error opening URL: missing URL';
+    if (!/^(https?:|file:)/i.test(trimmedUrl)) {
+      return 'Error opening URL: URL must start with http://, https://, or file:';
+    }
+
+    console.log();
+    console.log(box(
+      `${keyValue('URL', chalk.white(trimmedUrl), 11)}\n` +
+      `${UI.slate('This will open the URL in your default browser.')}`,
+      'Open URL', 'red'
+    ));
+    const confirm = await safeQuestion(confirmPrompt('Open URL in browser', 'error'));
+    if (!['y', 'yes'].includes(String(confirm ?? '').trim().toLowerCase())) {
+      return 'Open URL blocked by user.';
+    }
+
+    try {
+      let command = 'open';
+      let args = [trimmedUrl];
+      if (process.platform === 'win32') {
+        command = 'cmd';
+        args = ['/c', 'start', '', trimmedUrl];
+      } else if (process.platform !== 'darwin') {
+        command = 'xdg-open';
+        args = [trimmedUrl];
+      }
+
+      const proc = spawn(command, args, {
+        detached: true,
+        stdio: 'ignore'
+      });
+      proc.unref();
+      return `Opened URL in default browser: ${trimmedUrl}`;
+    } catch (error) {
+      return `Error opening URL: ${error.message}`;
+    }
   },
   shell: async (cmd) => {
     const trimmedCmd = String(cmd ?? '').trim();
@@ -3461,7 +4350,7 @@ const tools = {
     const backgroundEligible = shouldBackgroundShellCommand(trimmedCmd);
     console.log();
     console.log(box(
-      `${keyValue('Directory', chalk.white(process.cwd()), 11)}\n` +
+      `${keyValue('Directory', chalk.white(getToolWorkingDirectory()), 11)}\n` +
       `${UI.slate('Command')}\n${chalk.white.bold(trimmedCmd)}\n` +
       `${UI.slate('Type y to run, n to block, f for feedback, e for edit instructions, or write feedback directly.')}\n` +
       `${UI.slate(backgroundEligible ? `Background handoff ${shellBackgroundMode()} after ${shellBackgroundAfterSeconds()}s if still running.` : 'This command will stay attached unless it exits quickly.')}`,
@@ -3476,9 +4365,9 @@ const tools = {
         return new Promise((resolve) => {
           console.log(chalk.cyan(`\n[RUNNING] ${trimmedCmd}\n`));
           const proc = spawn('sh', ['-c', trimmedCmd], {
-            cwd: process.cwd()
+            cwd: getToolWorkingDirectory()
           });
-          const session = createShellSession(trimmedCmd, process.cwd(), proc);
+          const session = createShellSession(trimmedCmd, getToolWorkingDirectory(), proc);
           let resolved = false;
           let backgroundTimer = null;
 
@@ -3525,12 +4414,14 @@ const tools = {
             session.completed = true;
             session.error = error.message;
             session.exitCode = 1;
+            pruneCompletedShellSessions();
             finish(`Shell command failed to start: ${error.message}`);
           });
           proc.on('close', (code, signal) => {
             session.completed = true;
             session.exitCode = code;
             session.signal = signal;
+            pruneCompletedShellSessions();
 
             if (resolved) {
               return;
@@ -3581,7 +4472,7 @@ const tools = {
       if (!dir) dir = '.';
       // If AI sends "/" (root), treat as current directory "."
       if (dir === '/') dir = '.';
-      const entries = fs.readdirSync(dir);
+      const entries = fs.readdirSync(resolveToolPath(dir));
       // Filter out ignored files/directories (respects .sapperignore)
       const filtered = entries.filter(entry => {
         if (shouldIgnore(entry)) return false;
@@ -3599,16 +4490,35 @@ const tools = {
       for (const { pattern: p, negate } of getSapperIgnorePatterns()) {
         if (!negate && p.endsWith('/')) allIgnoreDirs.add(p.replace(/\/+$/, ''));
       }
-      const excludeDirs = Array.from(allIgnoreDirs).join(',');
-      // Use grep to search for pattern, excluding ignored directories
-      const cmd = `grep -rEin "${pattern.replace(/"/g, '\\"')}" . --exclude-dir={${excludeDirs}} --include="*.{js,ts,jsx,tsx,py,java,go,rs,rb,php,c,cpp,h,css,scss,html,json,md,txt,yml,yaml,toml,sh}" 2>/dev/null | head -50`;
+      // Use grep with args array to avoid command injection
+      const args = ['-rEin', pattern, '.'];
+      for (const dir of allIgnoreDirs) {
+        args.push(`--exclude-dir=${dir}`);
+      }
+      args.push('--include=*.js', '--include=*.ts', '--include=*.jsx', '--include=*.tsx',
+        '--include=*.py', '--include=*.java', '--include=*.go', '--include=*.rs',
+        '--include=*.rb', '--include=*.php', '--include=*.c', '--include=*.cpp',
+        '--include=*.h', '--include=*.css', '--include=*.scss', '--include=*.html',
+        '--include=*.json', '--include=*.md', '--include=*.txt', '--include=*.yml',
+        '--include=*.yaml', '--include=*.toml', '--include=*.sh');
       
-      const proc = spawn('sh', ['-c', cmd], { cwd: process.cwd() });
+      const proc = spawn('grep', args, { cwd: getToolWorkingDirectory() });
       let output = '';
+      let lineCount = 0;
       
-      proc.stdout.on('data', (data) => { output += data.toString(); });
-      proc.stderr.on('data', (data) => { output += data.toString(); });
+      proc.stdout.on('data', (data) => {
+        const text = data.toString();
+        const lines = text.split('\n');
+        for (const line of lines) {
+          if (lineCount >= 50) { proc.kill(); return; }
+          if (line) { output += line + '\n'; lineCount++; }
+        }
+      });
+      proc.stderr.on('data', () => {}); // ignore stderr
       
+      proc.on('error', (err) => {
+        resolve(`Error searching: ${err.message}`);
+      });
       proc.on('close', () => {
         if (output.trim()) {
           resolve(`Found matches:\n${output.trim()}`);
@@ -3753,7 +4663,15 @@ async function runSapper() {
     process.exit(1);
   }
   
-  const selectedModel = await pickModel(localModels.models) || localModels.models[0].name;
+  // Use defaultModel from config if available and exists in local models
+  let selectedModel;
+  const configModel = sapperConfig.defaultModel;
+  if (configModel && localModels.models.some(m => m.name === configModel)) {
+    selectedModel = configModel;
+    console.log(UI.slate(`  Using configured model: ${configModel}`));
+  } else {
+    selectedModel = await pickModel(localModels.models) || localModels.models[0].name;
+  }
 
   // ─── Detect model capabilities & context window ───────────────────
   let useNativeTools = false;
@@ -3898,6 +4816,186 @@ async function runSapper() {
     {
       type: 'function',
       function: {
+        name: 'ls',
+        description: 'List directory contents. If path is omitted, use the current tool working directory.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Directory path to list' }
+          }
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'cat',
+        description: 'Read the full contents of a file.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path to read' }
+          },
+          required: ['path']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'head',
+        description: 'Read the first lines of a file.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path to read' },
+            lines: { type: 'number', description: 'How many lines to show (default 20)' }
+          },
+          required: ['path']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'tail',
+        description: 'Read the last lines of a file.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path to read' },
+            lines: { type: 'number', description: 'How many lines to show (default 20)' }
+          },
+          required: ['path']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'grep',
+        description: 'Search for matching text across project files.',
+        parameters: {
+          type: 'object',
+          properties: {
+            pattern: { type: 'string', description: 'Search pattern (text or regex)' }
+          },
+          required: ['pattern']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'find',
+        description: 'Find files or directories by name.',
+        parameters: {
+          type: 'object',
+          properties: {
+            pattern: { type: 'string', description: 'Name fragment to search for' },
+            path: { type: 'string', description: 'Directory to search from (default current tool working directory)' }
+          },
+          required: ['pattern']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'pwd',
+        description: 'Show the current tool working directory.',
+        parameters: {
+          type: 'object',
+          properties: {}
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'cd',
+        description: 'Change the tool working directory for later tool calls.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Directory path to switch to' }
+          },
+          required: ['path']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'rmdir',
+        description: 'Remove a directory recursively after approval.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Directory path to remove' }
+          },
+          required: ['path']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'changes',
+        description: 'Show git status and diffs for the current repository or an optional file/directory path.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Optional file or directory path to scope the diff output' }
+          }
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'fetch_web',
+        description: 'Fetch a web page and return readable text content.',
+        parameters: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'URL to fetch, starting with http:// or https://' }
+          },
+          required: ['url']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'recall_memory',
+        description: 'Search Sapper\'s saved conversation memory for relevant prior context.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Memory search query' }
+          },
+          required: ['query']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'open_url',
+        description: 'Open a URL in the default browser after approval.',
+        parameters: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'URL to open, usually http://, https://, or file:' }
+          },
+          required: ['url']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
         name: 'run_shell',
         description: 'Execute a shell command in the project directory. Special commands: __shell_list__, __shell_read__ <session_id>, __shell_stop__ <session_id>.',
         parameters: {
@@ -3916,6 +5014,20 @@ async function runSapper() {
       role: 'system',
       content: buildSystemPrompt()
     }];
+  }
+
+  // Auto-load defaultAgent from config if set
+  if (!currentAgent && sapperConfig.defaultAgent) {
+    const agents = loadAgents();
+    const agentKey = sapperConfig.defaultAgent.toLowerCase();
+    if (agents[agentKey]) {
+      currentAgent = agentKey;
+      currentAgentTools = agents[agentKey].tools || null;
+      if (messages.length > 0 && messages[0]?.role === 'system') {
+        messages[0].content = buildSystemPrompt(agents[agentKey].content);
+      }
+      console.log(UI.slate(`  Using configured agent: ${agents[agentKey].name}`));
+    }
   }
 
   // Log session start
@@ -3952,19 +5064,26 @@ async function runSapper() {
       const contextPercent = ctxLen ? Math.round((estimatedTokens / ctxLen) * 100) : null;
       const promptParts = [
         statusBadge(selectedModel.split(':')[0] || selectedModel, 'action'),
-        currentAgent ? statusBadge(`/${currentAgent}`, 'info') : statusBadge('default', 'neutral'),
+        activeAgentPromptBadge(),
       ];
-      if (loadedSkills.length > 0) {
-        promptParts.push(statusBadge(`${loadedSkills.length} skill${loadedSkills.length !== 1 ? 's' : ''}`, 'success'));
+      const skillsBadge = activeSkillsPromptBadge();
+      if (skillsBadge) {
+        promptParts.push(skillsBadge);
       }
       if (contextPercent !== null) {
         const tone = contextPercent >= 85 ? 'error' : contextPercent >= 65 ? 'warning' : 'neutral';
         promptParts.push(statusBadge(`${contextPercent}% ctx`, tone));
       }
 
-      const promptDetail = ctxLen
+      const promptDetailLines = [ctxLen
         ? `${meter(estimatedTokens, ctxLen, 24)} ${UI.slate(`${estimatedTokens.toLocaleString()}/${ctxLen.toLocaleString()} tokens`)}`
-        : UI.slate(`${estimatedTokens.toLocaleString()} estimated tokens`);
+        : UI.slate(`${estimatedTokens.toLocaleString()} estimated tokens`)
+      ];
+      const modeSummary = activeModeSummary({ includeAgent: true, maxSkills: 3 });
+      if (modeSummary) {
+        promptDetailLines.push(UI.slate(modeSummary));
+      }
+      const promptDetail = promptDetailLines.join('\n');
 
       const promptText = `\n${promptShell(promptParts.join(' '), promptDetail)}`;
       const input = await safeQuestion(promptText);
@@ -3975,7 +5094,7 @@ async function runSapper() {
         continue;
       }
 
-      const preview = input.length > 120 ? input.substring(0, 120) + chalk.gray('...') : input;
+      const preview = input.length > LIMITS.INPUT_PREVIEW_CHARS ? input.substring(0, LIMITS.INPUT_PREVIEW_CHARS) + chalk.gray('...') : input;
       console.log(UI.accent('› ') + chalk.white(preview));
       
       if (input.toLowerCase() === 'exit') {
@@ -4134,8 +5253,8 @@ async function runSapper() {
           console.log(`     ${chalk.gray(sym.file)}:${chalk.cyan(sym.line)}`);
         }
         
-        if (results.length > 15) {
-          console.log(chalk.gray(`\n   ... and ${results.length - 15} more`));
+        if (results.length > LIMITS.SYMBOL_RESULTS_MAX) {
+          console.log(chalk.gray(`\n   ... and ${results.length - LIMITS.SYMBOL_RESULTS_MAX} more`));
         }
         
         // Offer to add file to context
@@ -4204,7 +5323,7 @@ async function runSapper() {
             let contextContent = `\n📄 ${matchingFile}:\n`;
             contextContent += fs.readFileSync(matchingFile, 'utf8');
             
-            for (const relFile of related.slice(0, 5)) { // Limit to 5 related
+            for (const relFile of related.slice(0, LIMITS.WORKSPACE_RELATED_DEPTH)) { // Limit to N related
               try {
                 contextContent += `\n\n📄 ${relFile} (related):\n`;
                 contextContent += fs.readFileSync(relFile, 'utf8');
@@ -4457,14 +5576,14 @@ async function runSapper() {
             const logFiles = fs.readdirSync(LOGS_DIR).filter(f => f.endsWith('.md')).sort().reverse();
             if (logFiles.length > 0) {
               console.log(chalk.cyan(`\n📋 All session logs:`));
-              logFiles.slice(0, 10).forEach((f, i) => {
+              logFiles.slice(0, LIMITS.LOG_FILES_DISPLAY_MAX).forEach((f, i) => {
                 const stats = fs.statSync(`${LOGS_DIR}/${f}`);
                 const isCurrent = f === `session-${sessionId}.md`;
                 const label = isCurrent ? chalk.green(' ← current') : '';
                 console.log(chalk.gray(`   ${i + 1}. `) + chalk.white(f) + chalk.gray(` (${Math.round(stats.size / 1024)}KB)`) + label);
               });
-              if (logFiles.length > 10) {
-                console.log(chalk.gray(`   ... and ${logFiles.length - 10} more`));
+              if (logFiles.length > LIMITS.LOG_FILES_DISPLAY_MAX) {
+                console.log(chalk.gray(`   ... and ${logFiles.length - LIMITS.LOG_FILES_DISPLAY_MAX} more`));
               }
             }
           } catch (e) {}
@@ -4564,6 +5683,7 @@ async function runSapper() {
         const agentMd = `---\nname: "${agentTitle}"\ndescription: "${description || agentTitle + ' assistant'}"\ntools: [read, edit, write, list, search, shell]\n---\n\n# ${agentTitle}\n\nYou are a ${agentTitle} AI assistant working within Sapper.\n${description ? `Your role: ${description}\n` : ''}\nAdapt your responses to match this role. Use Sapper's tools (file read/write, shell commands, search) when needed to assist the user.\n`;
         
         fs.writeFileSync(agentFile, agentMd);
+        invalidateLoaderCache('agents');
         console.log(chalk.green(`\n✅ Agent "${agentName}" created!`));
         console.log(chalk.gray(`   File: ${agentFile}`));
         console.log(chalk.cyan(`   Use it: /${agentName} <your prompt>`));
@@ -4685,13 +5805,14 @@ async function runSapper() {
         const agentTitle = await safeQuestion(chalk.cyan('Agent title/role: '));
         const agentExpertise = await safeQuestion(chalk.cyan('Areas of expertise (comma-separated): '));
         const agentStyle = await safeQuestion(chalk.cyan('Communication style (e.g., professional, casual, technical): '));
-        const agentToolsInput = await safeQuestion(chalk.cyan('Allowed tools (comma-sep, or Enter for all): ') + chalk.gray('read,edit,write,list,search,shell: '));
+        const agentToolsInput = await safeQuestion(chalk.cyan('Allowed tools (comma-sep, or Enter for all): ') + chalk.gray('read,edit,write,list,ls,search,grep,find,shell,mkdir,rmdir,pwd,cd,cat,head,tail,changes,fetch,memory,open: '));
         
         const expertiseList = agentExpertise.split(',').map(e => `- ${e.trim()}`).join('\n');
         const toolsLine = agentToolsInput.trim() ? `tools: [${agentToolsInput.trim()}]` : 'tools: [read, edit, write, list, search, shell]';
         const agentMd = `---\nname: "${agentTitle.trim() || agentName}"\ndescription: "${agentExpertise.trim() || agentTitle.trim() || agentName}"\n${toolsLine}\n---\n\n# ${agentTitle.trim() || agentName}\n\nYou are a ${agentTitle.trim() || agentName} AI assistant working within Sapper.\n\n## Your Expertise\n${expertiseList}\n\n## Communication Style\n${agentStyle.trim() || 'Professional and helpful'}.\n\nWhen the user asks for help, leverage your expertise and Sapper's tools to provide comprehensive assistance.\n`;
         
         fs.writeFileSync(agentFile, agentMd);
+        invalidateLoaderCache('agents');
         console.log(chalk.green(`\n✅ Agent "${agentName}" created!`));
         console.log(chalk.gray(`   File: ${agentFile}`));
         console.log(chalk.cyan(`   Use it: /${agentName} <your prompt>`));
@@ -4732,6 +5853,7 @@ async function runSapper() {
           : `---\nname: ${skillTitle.trim() || skillName}\ndescription: "${descLine}"${argHintLine}\n---\n\n# ${skillTitle.trim() || skillName}\n\nBest practices and knowledge for ${skillTitle.trim() || skillName}:\n- [Add your knowledge points here]\n- [Add patterns and conventions]\n- [Add common solutions]\n\n## Commands Reference\n| User says | Action |\n|-----------|--------|\n| "example command" | What the AI should do |\n\n## Procedures\n- [Add step-by-step procedures here]\n`;
         
         fs.writeFileSync(skillFile, skillMd);
+        invalidateLoaderCache('skills');
         console.log(chalk.green(`\n✅ Skill "${skillName}" created!`));
         console.log(chalk.gray(`   File: ${skillFile}`));
         console.log(chalk.cyan(`   Load it: /use ${skillName}`));
@@ -4849,7 +5971,7 @@ async function runSapper() {
           console.log(chalk.green(`Found ${relevant.length} relevant memories:\n`));
           relevant.forEach((chunk, i) => {
             console.log(box(
-              chalk.gray(chunk.text.substring(0, 300) + '...') + '\n' +
+              chalk.gray(chunk.text.substring(0, LIMITS.MEMORY_PREVIEW_CHARS) + '...') + '\n' +
               chalk.cyan(`Similarity: ${(chunk.score * 100).toFixed(1)}%`),
               `Memory ${i + 1}`, 'magenta'
             ));
@@ -4919,12 +6041,12 @@ async function runSapper() {
               continue;
             }
             const stats = fs.statSync(filePath);
-            if (stats.size > MAX_FILE_SIZE) {
+            if (stats.size > getMaxFileSize()) {
               console.log(chalk.red.bold(`\n╔══════════════════════════════════════════════════════════╗`));
               console.log(chalk.red.bold(`║  ⛔ FILE TOO LARGE — Cannot attach                       ║`));
               console.log(chalk.red.bold(`╚══════════════════════════════════════════════════════════╝`));
               console.log(chalk.yellow(`   File: ${filePath}`));
-              console.log(chalk.yellow(`   Size: ${Math.round(stats.size/1024)}KB (limit: ${Math.round(MAX_FILE_SIZE/1024)}KB)`));
+              console.log(chalk.yellow(`   Size: ${Math.round(stats.size/1024)}KB (limit: ${Math.round(getMaxFileSize()/1024)}KB)`));
               console.log(chalk.gray(`   Tip: Use a smaller file or increase limit in .sapper/config.json\n`));
               continue;
             }
@@ -4948,16 +6070,7 @@ async function runSapper() {
         }
         
         // Build message with attachments
-        let attachedContent = '\n\n══════════════════════════════════════\n';
-        attachedContent += `📎 ATTACHED FILES (${fileAttachments.length})\n`;
-        attachedContent += '══════════════════════════════════════\n\n';
-        
-        for (const file of fileAttachments) {
-          attachedContent += `┌─── ${file.path} ───\n`;
-          attachedContent += file.content;
-          if (!file.content.endsWith('\n')) attachedContent += '\n';
-          attachedContent += `└─── END ${file.path} ───\n\n`;
-        }
+        const attachedContent = formatFileAttachments(fileAttachments);
         
         messages.push({ role: 'user', content: prompt + attachedContent });
         // Continue to AI response (don't use 'continue' here)
@@ -4979,11 +6092,11 @@ async function runSapper() {
             }
             const stats = fs.statSync(filePath);
             if (stats.isFile()) {
-              if (stats.size > MAX_FILE_SIZE) {
+              if (stats.size > getMaxFileSize()) {
                 console.log(chalk.red.bold(`\n╔══════════════════════════════════════════════════════════╗`));
                 console.log(chalk.red.bold(`║  ⛔ FILE TOO LARGE — Cannot attach @${filePath.padEnd(22).slice(0, 22)}║`));
                 console.log(chalk.red.bold(`╚══════════════════════════════════════════════════════════╝`));
-                console.log(chalk.yellow(`   Size: ${Math.round(stats.size/1024)}KB — exceeds ${Math.round(MAX_FILE_SIZE/1024)}KB limit`));
+                console.log(chalk.yellow(`   Size: ${Math.round(stats.size/1024)}KB — exceeds ${Math.round(getMaxFileSize()/1024)}KB limit`));
                 console.log(chalk.gray(`   Tip: Use a smaller file or increase limit in .sapper/config.json\n`));
               } else {
                 const content = fs.readFileSync(filePath, 'utf8');
@@ -4997,7 +6110,7 @@ async function runSapper() {
                   try {
                     if (!fileAttachments.some(f => f.path === relFile)) {
                       const relStats = fs.statSync(relFile);
-                      if (relStats.size <= MAX_FILE_SIZE) {
+                      if (relStats.size <= getMaxFileSize()) {
                         const relContent = fs.readFileSync(relFile, 'utf8');
                         fileAttachments.push({ path: relFile, content: relContent, size: relStats.size, related: true });
                         console.log(chalk.gray(`   ↳ +${relFile} (related)`));
@@ -5018,16 +6131,7 @@ async function runSapper() {
       
       // Build the final message with attachments
       if (fileAttachments.length > 0) {
-        let attachedContent = '\n\n══════════════════════════════════════\n';
-        attachedContent += `📎 ATTACHED FILES (${fileAttachments.length})\n`;
-        attachedContent += '══════════════════════════════════════\n\n';
-        
-        for (const file of fileAttachments) {
-          attachedContent += `┌─── ${file.path} ───\n`;
-          attachedContent += file.content;
-          if (!file.content.endsWith('\n')) attachedContent += '\n';
-          attachedContent += `└─── END ${file.path} ───\n\n`;
-        }
+        const attachedContent = formatFileAttachments(fileAttachments);
         
         processedInput = input + attachedContent;
       }
@@ -5100,7 +6204,25 @@ async function runSapper() {
       let toolRounds = 0; // Prevent infinite loops
       const MAX_TOOL_ROUNDS = toolRoundLimit();
       const patchFailures = {}; // Track consecutive PATCH failures per file: { path: count }
-      const MAX_PATCH_RETRIES = 3;
+      const MAX_PATCH_RETRIES = getPatchRetries();
+
+      // Unified patch-with-retry logic used by both native and text-marker tool handlers
+      async function patchWithRetry(filePath, oldText, newText) {
+        const key = filePath.trim();
+        if (patchFailures[key] >= MAX_PATCH_RETRIES) {
+          return { result: `Error: PATCH failed ${MAX_PATCH_RETRIES} times on ${key}. STOP retrying PATCH on this file. Instead, READ the file to see exact content, then use LINE:number mode or WRITE to rewrite the file.`, success: false };
+        }
+        const result = await tools.patch(filePath, oldText, newText);
+        if (result.includes('Successfully')) {
+          patchFailures[key] = 0;
+          return { result, success: true };
+        }
+        if (result.startsWith('Error:')) {
+          patchFailures[key] = (patchFailures[key] || 0) + 1;
+          return { result: result + `\n(Attempt ${patchFailures[key]}/${MAX_PATCH_RETRIES})`, success: false };
+        }
+        return { result, success: true };
+      }
       const turnThinkingEnabled = shouldUseThinkingForInput(input);
       
       let active = true;
@@ -5123,10 +6245,13 @@ async function runSapper() {
             if (currentAgentTools) {
               const toolNameMap = {
                 list_directory: 'LIST', read_file: 'READ', search_files: 'SEARCH',
-                write_file: 'WRITE', patch_file: 'PATCH', create_directory: 'MKDIR', run_shell: 'SHELL'
+                write_file: 'WRITE', patch_file: 'PATCH', create_directory: 'MKDIR',
+                ls: 'LS', cat: 'CAT', head: 'HEAD', tail: 'TAIL', grep: 'GREP', find: 'FIND',
+                pwd: 'PWD', cd: 'CD', rmdir: 'RMDIR', changes: 'CHANGES',
+                fetch_web: 'FETCH', recall_memory: 'MEMORY', open_url: 'OPEN', run_shell: 'SHELL'
               };
               chatOpts.tools = nativeToolDefs.filter(t => 
-                currentAgentTools.includes(toolNameMap[t.function.name])
+                isToolAllowedForAgent(currentAgentTools, toolNameMap[t.function.name])
               );
             } else {
               chatOpts.tools = nativeToolDefs;
@@ -5144,7 +6269,7 @@ async function runSapper() {
 
         let msg = '';
         let thinkMsg = ''; // Thinking/reasoning content from thinking models
-        const MAX_RESPONSE_LENGTH = 100000; // 100KB - allow long code generation
+        const MAX_RESPONSE_LENGTH = LIMITS.MAX_RESPONSE_LENGTH;
         let lastChunkTime = Date.now();
         let repetitionCount = 0;
         let lastContent = '';
@@ -5162,7 +6287,18 @@ async function runSapper() {
         let lastVisibleActivityAt = Date.now();
         let heartbeatInterval = null;
         
-        console.log(sectionTitle('Sapper', selectedModel, 'cyan'));
+        const activeAgent = getActiveAgentMeta();
+        const responseTitle = activeAgent ? activeAgent.name || currentAgent : 'Sapper';
+        const responseSubtitleParts = [selectedModel];
+        if (activeAgent && currentAgent) {
+          responseSubtitleParts.push(`/${currentAgent}`);
+        }
+        console.log(sectionTitle(responseTitle, responseSubtitleParts.join(' · '), activeAgent ? 'magenta' : 'cyan'));
+        const responseModeSummary = activeModeSummary({ includeAgent: !activeAgent, maxSkills: 4 });
+        if (responseModeSummary) {
+          console.log(UI.slate(responseModeSummary));
+        }
+        const MAX_THINKING_IDLE_SECONDS = 300; // Abort if model stalls in thinking >5min
         if (streamHeartbeatEnabled()) {
           heartbeatInterval = setInterval(() => {
             if (abortStream) return;
@@ -5170,6 +6306,11 @@ async function runSapper() {
             if (isThinking) {
               const idleSeconds = Math.max(0, Math.floor((Date.now() - lastVisibleActivityAt) / 1000));
               const idleThreshold = streamIdleNoticeSeconds();
+              if (idleSeconds >= MAX_THINKING_IDLE_SECONDS) {
+                process.stdout.write(`\n${UI.slate('  │ ')}${chalk.yellow(`⚠ thinking stalled ${idleSeconds}s — aborting stream`)}\n`);
+                abortStream = true;
+                return;
+              }
               if (idleSeconds >= idleThreshold && Date.now() - lastThinkingIdleNoticeAt >= 5000) {
                 process.stdout.write(`\n${UI.slate('  │ ')}${UI.slate.italic(`... waiting ${idleSeconds}s for more reasoning`)}\n`);
                 thinkingContinuationNeedsPrefix = true;
@@ -5186,6 +6327,8 @@ async function runSapper() {
             });
           }, 1000);
         }
+        let streamErrored = null;
+        try {
         for await (const chunk of response) {
           // Check if user pressed Ctrl+C
           if (abortStream) {
@@ -5240,14 +6383,14 @@ async function runSapper() {
           }
           
           // Smart loop detection: check for repetitive content patterns
-          if (msg.length > 10000) {
-            const recentContent = msg.slice(-500);
-            const previousContent = msg.slice(-1000, -500);
+          if (msg.length > LIMITS.REPETITION_THRESHOLD) {
+            const recentContent = msg.slice(-LIMITS.REPETITION_WINDOW);
+            const previousContent = msg.slice(-LIMITS.REPETITION_WINDOW * 2, -LIMITS.REPETITION_WINDOW);
             
             // If last 500 chars are very similar to previous 500, might be looping
             if (recentContent === previousContent) {
               repetitionCount++;
-              if (repetitionCount > 3) {
+              if (repetitionCount > LIMITS.REPETITION_COUNT) {
                 console.log(chalk.red('\n\n⚠️ REPETITIVE OUTPUT DETECTED: Stopping to prevent loop.'));
                 wasRepetitionStopped = true;
                 break;
@@ -5263,9 +6406,24 @@ async function runSapper() {
             // Don't break - just warn. User can Ctrl+C if needed
           }
         }
-        if (heartbeatInterval) {
-          clearInterval(heartbeatInterval);
-          heartbeatInterval = null;
+        } catch (streamErr) {
+          streamErrored = streamErr;
+        } finally {
+          if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+            heartbeatInterval = null;
+          }
+        }
+        if (streamErrored) {
+          if (isThinking) {
+            isThinking = false;
+            process.stdout.write(`\n${UI.slate('  └─')}\n`);
+          }
+          process.stdout.write('\r\x1b[K');
+          console.error(chalk.red(`\n❌ Stream error: ${streamErrored.message || streamErrored}`));
+          logEntry('error', { message: `Stream error: ${streamErrored.message || streamErrored}` });
+          active = false;
+          continue;
         }
         if (isThinking) {
           isThinking = false;
@@ -5337,7 +6495,10 @@ async function runSapper() {
           // Map native function names to tool executors
           const nativeToolNameMap = {
             list_directory: 'LIST', read_file: 'READ', search_files: 'SEARCH',
-            write_file: 'WRITE', patch_file: 'PATCH', create_directory: 'MKDIR', run_shell: 'SHELL'
+            write_file: 'WRITE', patch_file: 'PATCH', create_directory: 'MKDIR',
+            ls: 'LS', cat: 'CAT', head: 'HEAD', tail: 'TAIL', grep: 'GREP', find: 'FIND',
+            pwd: 'PWD', cd: 'CD', rmdir: 'RMDIR', changes: 'CHANGES',
+            fetch_web: 'FETCH', recall_memory: 'MEMORY', open_url: 'OPEN', run_shell: 'SHELL'
           };
 
           showStreamPhase(`Running ${nativeToolCalls.length} native tool call${nativeToolCalls.length === 1 ? '' : 's'}...`);
@@ -5348,13 +6509,13 @@ async function runSapper() {
             const args = fn.arguments || {};
 
             // Enforce agent tool restrictions
-            if (currentAgentTools && !currentAgentTools.includes(toolType)) {
+            if (currentAgentTools && !isToolAllowedForAgent(currentAgentTools, toolType)) {
               console.log(chalk.yellow(`\n⚠️  Tool ${toolType} blocked — not in agent's allowed tools`));
               messages.push({ role: 'tool', content: `Error: Tool ${toolType} is not allowed for the current agent.`, tool_name: fn.name });
               continue;
             }
 
-            const displayPath = args.path || args.pattern || args.command || '';
+            const displayPath = args.path || args.pattern || args.url || args.query || args.command || '';
             console.log();
             console.log(statusBadge(toolType, 'action') + chalk.gray(' → ') + chalk.white(displayPath));
 
@@ -5381,25 +6542,65 @@ async function runSapper() {
                   logEntry('file', { action: 'write', path: args.path, size: args.content?.length || 0, userApproved: result.includes('Successfully') });
                   break;
                 case 'patch_file': {
-                  const patchKey = args.path?.trim();
-                  if (patchFailures[patchKey] >= MAX_PATCH_RETRIES) {
-                    result = `Error: PATCH failed ${MAX_PATCH_RETRIES} times on ${patchKey}. Use read_file to see exact content, then try write_file instead.`;
-                    toolSuccess = false;
-                  } else {
-                    result = await tools.patch(args.path, args.old_text, args.new_text);
-                    if (result.includes('Successfully')) {
-                      patchFailures[patchKey] = 0;
-                    } else if (result.startsWith('Error:')) {
-                      patchFailures[patchKey] = (patchFailures[patchKey] || 0) + 1;
-                      result += `\n(Attempt ${patchFailures[patchKey]}/${MAX_PATCH_RETRIES})`;
-                    }
-                  }
-                  logEntry('file', { action: 'patch', path: args.path, userApproved: result.includes('Successfully') });
+                  const pr = await patchWithRetry(args.path, args.old_text, args.new_text);
+                  result = pr.result;
+                  toolSuccess = pr.success;
+                  logEntry('file', { action: 'patch', path: args.path, userApproved: pr.success });
                   break;
                 }
                 case 'create_directory':
                   result = tools.mkdir(args.path);
                   logEntry('file', { action: 'mkdir', path: args.path });
+                  break;
+                case 'ls':
+                  result = tools.ls(args.path ?? '.');
+                  logEntry('file', { action: 'list', path: args.path ?? '.' });
+                  break;
+                case 'cat':
+                  result = tools.cat(args.path);
+                  logEntry('file', { action: 'read', path: args.path, size: result?.length || 0 });
+                  break;
+                case 'head':
+                  result = tools.head(args.path, args.lines);
+                  logEntry('file', { action: 'read', path: args.path, size: result?.length || 0 });
+                  break;
+                case 'tail':
+                  result = tools.tail(args.path, args.lines);
+                  logEntry('file', { action: 'read', path: args.path, size: result?.length || 0 });
+                  break;
+                case 'grep':
+                  result = await tools.grep(args.pattern);
+                  logEntry('tool', { toolType: 'GREP', path: args.pattern, duration: Date.now() - toolStart, success: true, resultSize: result?.length });
+                  break;
+                case 'find':
+                  result = tools.find(args.pattern, args.path ?? '.');
+                  logEntry('tool', { toolType: 'FIND', path: args.pattern, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+                  break;
+                case 'pwd':
+                  result = tools.pwd();
+                  break;
+                case 'cd':
+                  result = tools.cd(args.path);
+                  break;
+                case 'rmdir':
+                  result = await tools.rmdir(args.path);
+                  logEntry('file', { action: 'rmdir', path: args.path, userApproved: !String(result).includes('blocked') });
+                  break;
+                case 'changes':
+                  result = await tools.changes(args.path);
+                  logEntry('tool', { toolType: 'CHANGES', path: args.path ?? '.', duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+                  break;
+                case 'fetch_web':
+                  result = await tools.fetch_web(args.url);
+                  logEntry('tool', { toolType: 'FETCH', path: args.url, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+                  break;
+                case 'recall_memory':
+                  result = await tools.recall_memory(args.query);
+                  logEntry('tool', { toolType: 'MEMORY', path: args.query, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+                  break;
+                case 'open_url':
+                  result = await tools.open_url(args.url);
+                  logEntry('tool', { toolType: 'OPEN', path: args.url, duration: Date.now() - toolStart, success: String(result).startsWith('Opened URL'), resultSize: result?.length });
                   break;
                 case 'run_shell':
                   result = await tools.shell(args.command);
@@ -5474,7 +6675,7 @@ async function runSapper() {
             const toolAttempt = msg.match(/\[TOOL:[^\]]*\][^\[]{0,100}/s);
             if (toolAttempt) {
               console.log(chalk.yellow(`  Raw tool attempt (first 150 chars):`));
-              console.log(chalk.gray(`  "${toolAttempt[0].substring(0, 150)}..."`));
+              console.log(chalk.gray(`  "${toolAttempt[0].substring(0, LIMITS.DEBUG_TOOL_PREVIEW)}..."`));
             }
           }
           console.log(chalk.magenta('═══════════════════════════════\n'));
@@ -5503,7 +6704,7 @@ async function runSapper() {
             const [_, type, path, content] = match;
             
             // Enforce tool restrictions from active agent
-            if (currentAgentTools && !currentAgentTools.includes(type.toUpperCase())) {
+            if (currentAgentTools && !isToolAllowedForAgent(currentAgentTools, type)) {
               console.log();
               console.log(chalk.yellow(`⚠️  Tool ${type.toUpperCase()} blocked — not in agent's allowed tools: [${currentAgentTools.join(', ')}]`));
               const result = `Error: Tool ${type.toUpperCase()} is not allowed for the current agent. Allowed tools: ${currentAgentTools.join(', ')}. Use only the allowed tools.`;
@@ -5522,13 +6723,39 @@ async function runSapper() {
               result = tools.list(path);
               logEntry('file', { action: 'list', path });
             }
+            else if (type.toLowerCase() === 'ls') {
+              result = tools.ls(path);
+              logEntry('file', { action: 'list', path: path || '.' });
+            }
             else if (type.toLowerCase() === 'read') {
               result = tools.read(path);
+              logEntry('file', { action: 'read', path, size: result?.length || 0 });
+            }
+            else if (type.toLowerCase() === 'cat') {
+              result = tools.cat(path);
+              logEntry('file', { action: 'read', path, size: result?.length || 0 });
+            }
+            else if (type.toLowerCase() === 'head') {
+              result = tools.head(path, content);
+              logEntry('file', { action: 'read', path, size: result?.length || 0 });
+            }
+            else if (type.toLowerCase() === 'tail') {
+              result = tools.tail(path, content);
               logEntry('file', { action: 'read', path, size: result?.length || 0 });
             }
             else if (type.toLowerCase() === 'mkdir') {
               result = tools.mkdir(path);
               logEntry('file', { action: 'mkdir', path });
+            }
+            else if (type.toLowerCase() === 'rmdir') {
+              result = await tools.rmdir(path);
+              logEntry('file', { action: 'rmdir', path, userApproved: !String(result).includes('blocked') });
+            }
+            else if (type.toLowerCase() === 'pwd') {
+              result = tools.pwd();
+            }
+            else if (type.toLowerCase() === 'cd') {
+              result = tools.cd(path);
             }
             else if (type.toLowerCase() === 'write') {
               if (!content || content.trim() === '') {
@@ -5543,36 +6770,54 @@ async function runSapper() {
             else if (type.toLowerCase() === 'patch') {
               // PATCH format: [TOOL:PATCH]path:::OLD_TEXT|||NEW_TEXT[/TOOL]
               // Also supports line mode: [TOOL:PATCH]path:::LINE:15|||new text[/TOOL]
-              const patchKey = path.trim();
-              if (patchFailures[patchKey] >= MAX_PATCH_RETRIES) {
-                result = `Error: PATCH failed ${MAX_PATCH_RETRIES} times on ${patchKey}. STOP retrying PATCH on this file. Instead, use [TOOL:READ]${patchKey}[/TOOL] to see exact content, then either use LINE:number mode (e.g. [TOOL:PATCH]${patchKey}:::LINE:42|||new text[/TOOL]) or use [TOOL:WRITE] to rewrite the file.`;
-                toolSuccess = false;
-                logEntry('file', { action: 'patch', path, userApproved: false });
+              // Accept ||| as primary separator, ||: as fallback (small models sometimes mistype)
+              let parts = null;
+              const sepIdx = content?.indexOf('|||');
+              if (sepIdx > -1) {
+                parts = [content.substring(0, sepIdx), content.substring(sepIdx + 3)];
               } else {
-                // Accept ||| as primary separator, ||: as fallback (small models sometimes mistype)
-                let parts = content?.split('|||');
-                if (!parts || parts.length !== 2) {
-                  parts = content?.split('||:');
+                const sepIdx2 = content?.indexOf('||:');
+                if (sepIdx2 > -1) {
+                  parts = [content.substring(0, sepIdx2), content.substring(sepIdx2 + 3)];
                 }
-                if (parts && parts.length === 2) {
-                  result = await tools.patch(path, parts[0], parts[1]);
-                  const approved = result.includes('Successfully');
-                  if (!approved && result.startsWith('Error:')) {
-                    patchFailures[patchKey] = (patchFailures[patchKey] || 0) + 1;
-                    result += `\n(Attempt ${patchFailures[patchKey]}/${MAX_PATCH_RETRIES} — after ${MAX_PATCH_RETRIES} failures, PATCH will be blocked on this file)`;
-                  } else if (approved) {
-                    patchFailures[patchKey] = 0; // Reset on success
-                  }
-                  logEntry('file', { action: 'patch', path, userApproved: approved });
-                } else {
-                  result = 'Error: PATCH requires format [TOOL:PATCH]path:::OLD_TEXT|||NEW_TEXT[/TOOL] or [TOOL:PATCH]path:::LINE:number|||NEW_TEXT[/TOOL]';
-                  toolSuccess = false;
-                }
+              }
+              if (parts && parts.length === 2) {
+                const pr = await patchWithRetry(path, parts[0], parts[1]);
+                result = pr.result;
+                toolSuccess = pr.success;
+                logEntry('file', { action: 'patch', path, userApproved: pr.success });
+              } else {
+                result = 'Error: PATCH requires format [TOOL:PATCH]path:::OLD_TEXT|||NEW_TEXT[/TOOL] or [TOOL:PATCH]path:::LINE:number|||NEW_TEXT[/TOOL]';
+                toolSuccess = false;
               }
             }
             else if (type.toLowerCase() === 'search') {
               result = await tools.search(path);
               logEntry('tool', { toolType: 'SEARCH', path, duration: Date.now() - toolStart, success: true, resultSize: result?.length });
+            }
+            else if (type.toLowerCase() === 'grep') {
+              result = await tools.grep(path);
+              logEntry('tool', { toolType: 'GREP', path, duration: Date.now() - toolStart, success: true, resultSize: result?.length });
+            }
+            else if (type.toLowerCase() === 'find') {
+              result = tools.find(path, content);
+              logEntry('tool', { toolType: 'FIND', path, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+            }
+            else if (type.toLowerCase() === 'changes') {
+              result = await tools.changes(path);
+              logEntry('tool', { toolType: 'CHANGES', path: path || '.', duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+            }
+            else if (type.toLowerCase() === 'fetch') {
+              result = await tools.fetch_web(path);
+              logEntry('tool', { toolType: 'FETCH', path, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+            }
+            else if (type.toLowerCase() === 'memory') {
+              result = await tools.recall_memory(path);
+              logEntry('tool', { toolType: 'MEMORY', path, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+            }
+            else if (type.toLowerCase() === 'open') {
+              result = await tools.open_url(path);
+              logEntry('tool', { toolType: 'OPEN', path, duration: Date.now() - toolStart, success: String(result).startsWith('Opened URL'), resultSize: result?.length });
             }
             else if (type.toLowerCase() === 'shell') {
               result = await tools.shell(path);
@@ -5581,7 +6826,7 @@ async function runSapper() {
             }
 
             // Log tool execution (for non-shell, non-file specific ones)
-            if (!['list', 'read', 'mkdir', 'write', 'patch', 'search', 'shell'].includes(type.toLowerCase())) {
+            if (!['list', 'ls', 'read', 'cat', 'head', 'tail', 'mkdir', 'rmdir', 'pwd', 'cd', 'write', 'patch', 'search', 'grep', 'find', 'changes', 'fetch', 'memory', 'open', 'shell'].includes(type.toLowerCase())) {
               logEntry('tool', { toolType: type.toUpperCase(), path, duration: Date.now() - toolStart, success: toolSuccess, resultSize: result?.length, error: toolSuccess ? undefined : result });
             }
 
@@ -5590,7 +6835,7 @@ async function runSapper() {
           ensureSapperDir();
           fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
           
-          if (toolMatches.length > 30) {
+          if (toolMatches.length > LIMITS.TOOL_WARN_THRESHOLD) {
             console.log(chalk.yellow('\n⚠️  Reading 30+ files! This might take time.'));
           }
           
