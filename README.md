@@ -13,6 +13,7 @@ Sapper is a Node.js CLI that connects to locally running Ollama models and acts 
 
 ## Table of Contents
 
+- [Terminal Interface](#terminal-interface)
 - [Architecture](#architecture)
 - [Features](#features)
 - [Prerequisites](#prerequisites)
@@ -26,6 +27,103 @@ Sapper is a Node.js CLI that connects to locally running Ollama models and acts 
 - [Session Memory](#session-memory)
 - [Development](#development)
 - [License](#license)
+
+---
+
+## Terminal Interface
+
+Sapper presents three distinct screens during a session, each with a focused purpose.
+
+### Startup — Session Dashboard
+
+When Sapper launches it immediately displays the full state of the current working directory before asking for any input.
+
+```
+Sapper  terminal workspace
+Local models, live tools, and focused coding in one loop
+/your/project  ·  v1.1.38
+
+Quick start  @file attach  ·  /help commands  ·  /agents modes
+
+┌──────────────────────────────────────────────────────────────┐
+│ [workspace]  5 files  ·  0 symbols  ·  indexed 36103m ago    │
+│ [memory]     .sapper/  ·  auto-attach on                     │
+│ [prompt]     default prompt                                   │
+│ [thinking]   mode auto                                        │
+│ [tools]      limit 40 rounds                                  │
+│ [shell]      stream on  ·  bg auto  ·  0 active              │
+│ [stream]     heartbeat on  ·  phases on                       │
+│ [summary]    phases on  ·  trigger 65%                        │
+│ [agents]     3  ·  [skills]  2                                │
+└──────────────────────────────────────────────────────────────┘
+
+Previous session found in .sapper/context.json
+Resume session? [y/N]
+```
+
+The dashboard shows workspace indexing state, memory configuration, active agents and skills count, shell mode, and context summarization trigger. If a previous session exists, Sapper offers to resume it.
+
+---
+
+### Model Selection — Interactive Picker
+
+Before each session, Sapper reads the locally available Ollama models and presents an interactive picker. Models are listed with their disk footprint and last-used time.
+
+```
+Model selection  use ↑↓ or j/k, enter to confirm
+
+> 01  gemma4:e4b-mlx-bf16              14.9 GB  ·  54m ago
+  02  qwen3.6:35b-a3b-coding-nvfp4    20.4 GB  ·  9d ago
+  03  gemma-4-E4B-it-heretic-GGUF      7.48 GB  ·  13d ago  ·  7.5B
+  04  qwen3-14b-abliterated:q8_0      14.6 GB  ·  13d ago  ·  14.8B
+  05  qwen3.5:4b-mlx-bf16              8.47 GB  ·  18d ago
+
+Preview
+  Selected   gemma4:e4b-mlx-bf16
+  Footprint  14.9 GB
+  Updated    54m ago
+  Profile    safetensors
+  Quant      default
+```
+
+Keyboard controls: `↑` `↓` or `j` / `k` to navigate, `Enter` to confirm. A live preview panel shows model metadata before committing.
+
+---
+
+### Active Session — Context Bar
+
+Once a model is selected the prompt loop begins. A persistent context bar at the bottom of each turn shows token consumption against the configured limit.
+
+```
+Session
+
+  [model]    gemma4:e4b-mlx-bf16
+  [tools]    native tool calling
+  [context]  35,000 tokens  (custom limit, model: 131,072)
+
+  [gemma4] [default] [2% ctx]
+  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  765 / 35,000 tokens
+  >
+```
+
+The bar updates after every turn. When usage approaches the configured `summarizeTriggerPercent` threshold, Sapper automatically compresses older turns into a summary and continues without interruption.
+
+---
+
+### .sapper/ Data Folder
+
+All persistent state is isolated inside `.sapper/` at the root of each project, keeping your workspace clean.
+
+```
+.sapper/
+├── config.json       runtime configuration (hot-reload)
+├── context.json      conversation history for session resume
+├── embeddings.json   semantic vector memory, cosine similarity recall
+├── workspace.json    file index and dependency graph
+├── agents/           custom agent definitions (.md + YAML frontmatter)
+├── skills/           reusable instruction blocks (.md + YAML frontmatter)
+└── logs/             per-session activity audit logs (.md)
+```
 
 ---
 
