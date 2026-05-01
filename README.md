@@ -1,20 +1,96 @@
 # Sapper
 
-🚀 **AI-powered development assistant that executes commands and builds projects**
+[![npm version](https://img.shields.io/npm/v/sapper-iq.svg?style=flat-square)](https://www.npmjs.com/package/sapper-iq)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D16.0.0-brightgreen?style=flat-square)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+[![npm downloads](https://img.shields.io/npm/dm/sapper-iq?style=flat-square)](https://www.npmjs.com/package/sapper-iq)
 
-Sapper is a command-line interface that connects to Ollama models to help you build, manage, and execute development tasks through natural language conversations.
+**Terminal-first AI coding assistant for real developer workflows.**
+
+Sapper is a Node.js CLI that connects to locally running Ollama models and acts as an autonomous development agent — reading, writing, searching, running shell commands, managing git, and browsing the web, all from a single conversational interface in your terminal.
+
+---
+
+## Table of Contents
+
+- [Architecture](#architecture)
+- [Features](#features)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [How It Works](#how-it-works)
+- [Commands](#commands)
+- [Tool Catalog](#tool-catalog)
+- [Agents and Skills](#agents-and-skills)
+- [Configuration](#configuration)
+- [Session Memory](#session-memory)
+- [Development](#development)
+- [License](#license)
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         SAPPER CLI                          │
+│                                                             │
+│   User Input  ──►  Prompt Builder  ──►  Ollama API         │
+│                         │                    │             │
+│                    Context / Memory      Streaming         │
+│                    Embeddings            Response          │
+│                    Agent / Skills            │             │
+│                         │                    ▼             │
+│                    Tool Parser  ◄────  AI Response         │
+│                         │                                   │
+│         ┌───────────────┼───────────────────┐              │
+│         ▼               ▼                   ▼              │
+│    File System       Shell               Git / Web         │
+│  READ WRITE PATCH   SHELL SHELL(bg)   COMMIT PUSH FETCH    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+```
+.sapper/
+├── config.json        ← Runtime configuration
+├── context.json       ← Conversation history
+├── embeddings.json    ← Vector memory store
+├── workspace.json     ← Project dependency graph
+├── agents/            ← Custom agent definitions (.md)
+├── skills/            ← Reusable skill definitions (.md)
+└── logs/              ← Per-session activity logs (.md)
+```
+
+---
 
 ## Features
 
-- 🤖 **AI-powered assistance** - Chat with local Ollama models
-- 🛠️ **Multi-tool execution** - File operations, shell commands, directory management
-- 💬 **Conversational interface** - Natural language project management
-- 🔄 **Session persistence** - Resume previous conversations
-- 🎯 **Context-aware** - Automatically detects directory contents
-- ⚡ **Live streaming** - See AI responses in real-time
-- 🔒 **Security prompts** - Review commands before execution
-- ✍️ **Inline approval feedback** - Type feedback, or use `f` and `e` shortcuts at shell or file approval prompts, to make Sapper revise the command or change
-- 🧵 **Background shell sessions** - Long-running commands can hand off to tracked background sessions with chunked output inspection
+| Area | Capability |
+|---|---|
+| AI Integration | Connects to any local Ollama model; model picker on startup |
+| Tool Execution | 28 built-in tools covering files, shell, git, and web |
+| Context Management | Auto-summarization when context window approaches limit |
+| Session Memory | Embedding-based semantic memory with cosine similarity recall |
+| Agents & Skills | Custom `.md` agent files with YAML frontmatter and tool restrictions |
+| Background Shell | Long-running commands hand off to tracked background sessions |
+| Approval Gate | Prompted approval with inline feedback for shell and write operations |
+| Activity Logging | Every tool call and AI turn is logged to `.sapper/logs/` |
+| AST Parsing | Symbol extraction (functions, classes) with `/symbol` search |
+| Streaming | Live token-by-token output with heartbeat and phase status |
+
+---
+
+## Prerequisites
+
+- [Node.js](https://nodejs.org) >= 16.0.0
+- [Ollama](https://ollama.ai) installed and running locally
+- At least one model pulled, for example:
+
+```bash
+ollama pull llama3
+```
+
+---
 
 ## Installation
 
@@ -22,56 +98,184 @@ Sapper is a command-line interface that connects to Ollama models to help you bu
 npm install -g sapper-iq
 ```
 
-Then run:
+---
+
+## Quick Start
 
 ```bash
 sapper
 ```
 
-## Prerequisites
+Sapper will prompt you to select a model, then you can start conversing immediately.
 
-- Node.js 16+
-- [Ollama](https://ollama.ai/) installed and running
-- At least one Ollama model downloaded
+```
+  Model: llama3
+  Working directory: /your/project
 
-## Usage
-
-```bash
-sapper
+> analyze this project and list what it does
+> add a REST endpoint for user authentication
+> run the tests and fix any failures
+> commit the changes with a descriptive message
 ```
 
-### Commands
-
-- `/reset` or `/clear-session` - Start a new session
-- `/session-info` - Show current session details  
-- `/summary` - View or change auto-summary settings
-- `/shell` - Inspect shell config and tracked background sessions
-- `/shell read <id>` - Read output from a tracked shell session
-- `/shell stop <id>` - Stop a tracked shell session
-- `/step` - Toggle step-by-step mode
-- `/help` - Show command help
-- `exit` - Exit Sapper
-
-### Example Interactions
-
-```text
-> set up a React project in ./my-app
-> run the development server
-> create a login component with TypeScript
-> add Tailwind CSS styling
-```
+---
 
 ## How It Works
 
-1. **Connect to Ollama** - Choose from your available local models
-2. **Natural conversation** - Describe what you want to build or do
-3. **AI executes tools** - Creates files, runs commands, manages projects
-4. **Review & approve** - Security prompts for shell commands
-5. **Context awareness** - Sapper understands your project structure
+```
+User prompt
+    │
+    ▼
+┌──────────────────────────────────────┐
+│  1. Build system prompt              │
+│     - Core instructions              │
+│     - Active agent / skills          │
+│     - Workspace context              │
+│     - Conversation history           │
+│     - Semantic memory recall         │
+└──────────────────┬───────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────┐
+│  2. Stream response from Ollama      │
+│     - Parse tool calls in real time  │
+│     - Execute tools as they arrive   │
+│     - Feed results back to model     │
+└──────────────────┬───────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────┐
+│  3. Tool execution loop              │
+│     - Approval prompts for           │
+│       shell / write operations       │
+│     - Inline feedback to revise      │
+│     - Loop until no more tool calls  │
+└──────────────────┬───────────────────┘
+                   │
+                   ▼
+          Final answer rendered
+          to terminal with syntax
+          highlighting and markdown
+```
 
-## Config
+---
 
-Sapper creates `.sapper/config.json` on first run. You can tune context behavior there.
+## Commands
+
+Run these inside Sapper at the prompt:
+
+| Command | Description |
+|---|---|
+| `/help` | Show all available commands |
+| `/reset` | Start a new conversation session |
+| `/clear-session` | Alias for `/reset` |
+| `/session-info` | Display current session metadata |
+| `/summary` | View or change auto-summarization settings |
+| `/summary phases off` | Hide summarization step list |
+| `/summary trigger 60` | Set summarization trigger to 60 % of context |
+| `/shell` | Inspect shell config and list tracked background sessions |
+| `/shell read <id>` | Read buffered output from a background session |
+| `/shell stop <id>` | Stop a tracked background shell session |
+| `/step` | Toggle step-by-step tool approval mode |
+| `/tools` | Browse the built-in tool catalog |
+| `/git` | Inspect repository state and git shortcuts |
+| `/symbol <name>` | Search for a code symbol via AST index |
+| `/recall <query>` | Search semantic memory for past context |
+| `/log` | View the current session activity log |
+| `/attach <file>` | Attach a file to the next prompt |
+| `exit` | Exit Sapper |
+
+---
+
+## Tool Catalog
+
+### File System
+
+| Tool | Description |
+|---|---|
+| `READ` | Read a file's full contents |
+| `CAT` | Alias for READ |
+| `HEAD` | Read the first N lines of a file |
+| `TAIL` | Read the last N lines of a file |
+| `WRITE` | Create or overwrite a file |
+| `PATCH` | Replace a specific block of text inside an existing file |
+| `MKDIR` | Create a directory tree |
+| `RMDIR` | Remove a directory (requires user approval) |
+| `LIST` / `LS` | List directory contents |
+| `FIND` | Find files and directories by name pattern |
+| `SEARCH` / `GREP` | Search file contents with regex |
+| `PWD` | Show the current tool working directory |
+| `CD` | Change the tool working directory |
+
+### Shell
+
+| Tool | Description |
+|---|---|
+| `SHELL` | Execute a terminal command, with optional background handoff |
+
+### Git
+
+| Tool | Description |
+|---|---|
+| `STATUS` | Show concise git status |
+| `CHANGES` | Show git status and diffs |
+| `BRANCH` | List, create, or switch branches (changes require approval) |
+| `COMMIT` | Create a git commit (requires approval) |
+| `STASH` | List or apply/drop stashes (state changes require approval) |
+| `TAG` | List, inspect, create, or delete tags (changes require approval) |
+| `PUSH` | Push a branch to a remote (requires approval) |
+
+### Web
+
+| Tool | Description |
+|---|---|
+| `FETCH` | Fetch a web page as plain readable text |
+| `FETCH_MAIN` | Extract main article body from a web page |
+| `FETCH_MULTI` | Fetch multiple URLs in one call |
+| `OPEN` | Open a URL in the default browser (requires approval) |
+
+### Interaction
+
+| Tool | Description |
+|---|---|
+| `ASK` | Pause and ask the user a clarifying question mid-task |
+| `MEMORY` | Search saved semantic memory from past sessions |
+
+---
+
+## Agents and Skills
+
+Sapper supports custom agents and reusable skills defined as Markdown files with YAML frontmatter, stored in `.sapper/agents/` and `.sapper/skills/`.
+
+**Example agent** — `.sapper/agents/backend.md`:
+
+```markdown
+---
+name: Backend Engineer
+description: Focused on API design, database queries, and server-side code
+tools: [read, write, patch, shell, search, find, git]
+---
+
+You are a senior backend engineer. Prefer typed interfaces, validate inputs at boundaries,
+and write efficient SQL. Always check existing patterns before introducing new abstractions.
+```
+
+Frontmatter fields:
+
+| Field | Description |
+|---|---|
+| `name` | Display name for the agent |
+| `description` | Short description shown in the agent picker |
+| `tools` | Comma-separated list of allowed tools (restricts the default set) |
+| `model` | Override the active Ollama model for this agent |
+
+Skills follow the same format and are injected into the system prompt as reusable instruction blocks.
+
+---
+
+## Configuration
+
+Sapper writes `.sapper/config.json` on first run. All fields are optional; missing values use the defaults shown below.
 
 ```json
 {
@@ -96,91 +300,76 @@ Sapper creates `.sapper/config.json` on first run. You can tune context behavior
   },
   "prompt": {
     "prepend": "",
-    "append": "Prefer concise answers.",
+    "append": "",
     "coreOverride": ""
   }
 }
 ```
 
-- `toolRoundLimit`: maximum tool-call rounds Sapper will allow in one prompt loop before it forces a final answer. Default: `40`.
-- `summaryPhases`: show or hide the step-by-step auto-summary progress list.
-- `summarizeTriggerPercent`: start summarizing older context near this percentage of the active context window. Lower values summarize earlier and reduce large-context pauses.
-- `shell.streamToModel`: include shell output chunks in tool results when a command is handed off to a background session.
-- `shell.backgroundMode`: three modes: `off`, `auto`, or `on`. `off` keeps commands fully attached so you keep seeing live shell output in the terminal. `auto` backgrounds likely long-running commands like dev servers; `on` applies the timeout to every shell command.
-- `shell.backgroundAfterSeconds`: how long Sapper waits before handing an eligible running command off to a background shell session.
-- `shell.outputChunkChars`: maximum shell output chunk size returned to the model for background handoffs and session reads.
-- `thinking.mode`: three modes: `auto`, `on`, or `off`. `auto` skips long reasoning blocks for simple prompts, `on` always enables reasoning for every prompt, and `off` disables it for every prompt. This controls model reasoning visibility, not shell backgrounding.
-- `streaming.showPhaseStatus`: show short status lines when Sapper is finalizing output, executing tools, or looping for the next model turn.
-- `streaming.showHeartbeat`: keep updating the live progress line during quiet streamed phases instead of looking frozen.
-- `streaming.idleNoticeSeconds`: print an idle notice after this many seconds without visible streamed output.
-- `prompt.prepend`: insert custom instructions before the default Sapper prompt.
-- `prompt.append`: add custom instructions near the end of the system prompt.
-- `prompt.coreOverride`: replace the default Sapper core prompt block while keeping the tool, context, agent, and skill sections.
+| Key | Default | Description |
+|---|---|---|
+| `autoAttach` | `true` | Automatically include directory contents in context |
+| `contextLimit` | `null` | Override the model's context window size in tokens |
+| `toolRoundLimit` | `40` | Maximum tool-call rounds before forcing a final answer |
+| `summaryPhases` | `true` | Show step list during auto-summarization |
+| `summarizeTriggerPercent` | `65` | Summarize when context reaches this % of the window |
+| `shell.streamToModel` | `true` | Stream shell output chunks back to the model in background mode |
+| `shell.backgroundMode` | `"auto"` | `off` — always attached; `auto` — background long commands; `on` — background everything |
+| `shell.backgroundAfterSeconds` | `8` | Seconds before a running command is handed off to a background session |
+| `shell.outputChunkChars` | `4000` | Max chars per background shell output chunk returned to the model |
+| `thinking.mode` | `"auto"` | `auto` / `on` / `off` — controls model reasoning block visibility |
+| `streaming.showPhaseStatus` | `true` | Show status lines during tool execution and model turns |
+| `streaming.showHeartbeat` | `true` | Update progress line during quiet streaming phases |
+| `streaming.idleNoticeSeconds` | `4` | Print an idle notice after N seconds of no visible output |
+| `prompt.prepend` | `""` | Inject custom instructions before the default system prompt |
+| `prompt.append` | `""` | Inject custom instructions after the default system prompt |
+| `prompt.coreOverride` | `""` | Replace the core prompt block entirely (tool and context sections are preserved) |
 
-You can also change these inside Sapper with `/summary`, for example `/summary phases off` or `/summary trigger 60`.
-Prompt config is read from `.sapper/config.json` and Sapper refreshes it on the next turn if you edit the file while it is running.
-Background shell sessions are controlled through `run_shell` with `__shell_list__`, `__shell_read__ <session_id>`, and `__shell_stop__ <session_id>`.
-You can also inspect them directly in Sapper with `/shell`, `/shell read <session_id>`, and `/shell stop <session_id>`.
-Use `/tools` inside Sapper to inspect the built-in tool catalog and usage patterns.
-Use `/git` inside Sapper to inspect repository state and access git-specific shortcuts.
+Configuration is hot-reloaded — edit the file while Sapper is running and changes take effect on the next prompt turn.
 
-## Supported Tools
+---
 
-- `SHELL` - Execute terminal commands
-- `READ` - Read file contents
-- `CAT`, `HEAD`, `TAIL` - Read full files or line windows
-- `WRITE` - Create/edit files
-- `PATCH` - Edit existing files with targeted replacement
-- `MKDIR` - Create directories
-- `RMDIR` - Remove directories with approval
-- `LIST`, `LS` - List directory contents
-- `SEARCH`, `GREP` - Search for text in files
-- `FIND` - Find files and directories by name
-- `PWD`, `CD` - Inspect or change the tool working directory
-- `ASK` - Ask the user a clarifying question mid-task
-- `STATUS` - Show concise git status information
-- `BRANCH` - List, create, or switch branches with approval for changes
-- `COMMIT` - Create git commits with approval
-- `STASH` - List or manage git stashes with approval for state-changing actions
-- `TAG` - List, inspect, create, or delete git tags with approval for changes
-- `PUSH` - Push a branch to a remote with approval
-- `CHANGES` - Show git status and diffs
-- `FETCH` - Fetch web pages as readable text
-- `FETCH_MAIN` - Extract the main article or body content from a web page
-- `FETCH_MULTI` - Fetch multiple web pages in one call
-- `MEMORY` - Search saved conversation memory
-- `OPEN` - Open URLs in the default browser with approval
+## Session Memory
 
-## Examples
+Sapper maintains two layers of memory per project:
 
-**Create a Next.js project:**
-
-```text
-> create a Next.js app with TypeScript and Tailwind in ./my-nextjs-app
+```
+┌─────────────────────────────────────────────────────┐
+│  Short-term  →  .sapper/context.json                │
+│  Full conversation history for the current session  │
+│  Auto-summarized as the context window fills up     │
+├─────────────────────────────────────────────────────┤
+│  Long-term   →  .sapper/embeddings.json             │
+│  Chunked text embedded with cosine similarity       │
+│  Recalled automatically on relevant prompts         │
+│  Searchable manually with /recall <query>           │
+└─────────────────────────────────────────────────────┘
 ```
 
-**Add features to existing project:**
+All activity is also written to `.sapper/logs/session-<timestamp>.md` for auditing.
 
-```text
-> analyze the codebase in ./my-project
-> add a user authentication system
-> create API endpoints for user management
-```
+---
 
 ## Development
 
 ```bash
-git clone https://github.com/yourusername/sapper
+git clone https://github.com/aledanee/sapper.git
 cd sapper
 npm install
 chmod +x sapper.mjs
-./sapper.mjs
+node sapper.mjs
 ```
+
+CI runs automatically on push to `main` across Node.js 16, 18, and 20.
+
+---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE)
 
-## Author
+---
 
-Ibrahim Ihsan
+**Author:** Ibrahim Ihsan  
+**Package:** [sapper-iq on npm](https://www.npmjs.com/package/sapper-iq)  
+**Repository:** [github.com/aledanee/sapper](https://github.com/aledanee/sapper)
