@@ -2871,6 +2871,8 @@ const COMMAND_GROUPS = Object.freeze([
     subtitle: 'memory and visibility',
     tone: 'cyan',
     rows: [
+      ['/model', 'Open model picker to switch AI mid-session'],
+      ['/model <name>', 'Switch directly to a named model (e.g. /model llama3.2)'],
       ['/recall', 'Search memory for relevant context'],
       ['/memory', 'Manage markdown long-memory notes and patterns'],
       ['/memory add title ::: note', 'Save a durable note to .sapper/long-memory.md'],
@@ -5858,6 +5860,37 @@ async function runSapper() {
         continue;
       }
       
+      // Handle model switch command
+      if (input.toLowerCase().startsWith('/model')) {
+        const arg = input.slice(6).trim();
+        const modelList = await ollama.list();
+        if (!modelList.models || modelList.models.length === 0) {
+          console.log(chalk.red('No local models found. Pull one with: ollama pull <model>'));
+        } else if (arg) {
+          // Direct name — try exact match then prefix
+          const match = modelList.models.find(m => m.name === arg) ||
+                        modelList.models.find(m => m.name.startsWith(arg));
+          if (match) {
+            selectedModel = match.name;
+            sapperConfig.defaultModel = selectedModel;
+            saveConfig(sapperConfig);
+            console.log(chalk.green(`✅ Switched to ${chalk.bold(selectedModel)}`));
+          } else {
+            console.log(chalk.red(`Model "${arg}" not found locally.`));
+            console.log(chalk.gray('Available: ' + modelList.models.map(m => m.name).join(', ')));
+          }
+        } else {
+          const picked = await pickModel(modelList.models);
+          if (picked) {
+            selectedModel = picked;
+            sapperConfig.defaultModel = selectedModel;
+            saveConfig(sapperConfig);
+            console.log(chalk.green(`\n✅ Switched to ${chalk.bold(selectedModel)}\n`));
+          }
+        }
+        continue;
+      }
+
       // Handle help command
       if (input.toLowerCase() === '/help' || input.toLowerCase() === '/commands' || input.toLowerCase() === '/cmd') {
         console.log();
