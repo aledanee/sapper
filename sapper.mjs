@@ -1935,6 +1935,27 @@ function saveWorkspaceGraph(workspace) {
   fs.writeFileSync(WORKSPACE_FILE, JSON.stringify(workspace, null, 2));
 }
 
+async function buildWorkspaceGraph(dir = '.') {
+  const scanResult = scanCodebase(dir);
+  const files = {};
+  const graph = {};
+
+  for (const file of scanResult.files) {
+    if (file.skipped || !file.content) continue;
+
+    const symbols = extractSymbolsWithRegex(file.content, file.path);
+    const deps = extractDependencies(file.content, file.path);
+    const exports = extractExports(file.content, file.path);
+
+    files[file.path] = { symbols, exports, size: file.size };
+    graph[file.path] = deps;
+  }
+
+  const workspace = { indexed: new Date().toISOString(), files, graph };
+  saveWorkspaceGraph(workspace);
+  return workspace;
+}
+
 // Extract imports/requires from file content
 function extractDependencies(content, filePath) {
   const deps = new Set();
