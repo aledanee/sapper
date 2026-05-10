@@ -39,11 +39,11 @@ Sapper presents three distinct screens during a session, each with a focused pur
 When Sapper launches it immediately displays the full state of the current working directory before asking for any input.
 
 ```
-Sapper  terminal workspace
+Sapper  terminal coding workspace
 Local models, live tools, and focused coding in one loop
 /your/project  ·  v1.1.38
 
-Quick start  @file attach  ·  /help commands  ·  /agents modes
+Quick start  @file attach  ·  /commands palette  ·  /agents modes
 
 ┌──────────────────────────────────────────────────────────────┐
 │ [workspace]  5 files  ·  0 symbols  ·  indexed 36103m ago    │
@@ -264,13 +264,20 @@ Run these inside Sapper at the prompt:
 
 | Command | Description |
 |---|---|
-| `/help` | Show all available commands |
+| `/help` | Show the full command palette |
+| `/commands` | Alias for `/help` |
+| `Tab` | Autocomplete slash commands while typing |
 | `/reset` | Start a new conversation session |
 | `/clear-session` | Alias for `/reset` |
 | `/session-info` | Display current session metadata |
 | `/summary` | View or change auto-summarization settings |
 | `/summary phases off` | Hide summarization step list |
 | `/summary trigger 60` | Set summarization trigger to 60 % of context |
+| `/ui` | Show current frontend style and compact mode |
+| `/ui style clean` | Switch to a cleaner Codex/OpenCode-like frontend style |
+| `/ui style ultra` | Switch to an ultra-clean single-line frontend style |
+| `/ui style sapper` | Switch back to the default Sapper frontend style |
+| `/ui compact auto` | Set responsive compact rendering mode |
 | `/shell` | Inspect shell config and list tracked background sessions |
 | `/shell read <id>` | Read buffered output from a background session |
 | `/shell stop <id>` | Stop a tracked background shell session |
@@ -279,8 +286,12 @@ Run these inside Sapper at the prompt:
 | `/git` | Inspect repository state and git shortcuts |
 | `/symbol <name>` | Search for a code symbol via AST index |
 | `/recall <query>` | Search semantic memory for past context |
+| `/memory` | Inspect markdown long-memory notes |
+| `/memory add <title> ::: <note> ::: <tags>` | Save durable project notes/patterns in markdown |
+| `/memory search <query>` | Search markdown long-memory notes |
 | `/log` | View the current session activity log |
 | `/attach <file>` | Attach a file to the next prompt |
+| `//text` | Send literal text that starts with `/` |
 | `exit` | Exit Sapper |
 
 ---
@@ -373,7 +384,7 @@ Skills follow the same format and are injected into the system prompt as reusabl
 
 ## Configuration
 
-Sapper writes `.sapper/config.json` on first run. All fields are optional; missing values use the defaults shown below.
+Sapper writes `.sapper/config.json` on first run. The file supports JSON-style comments (`//` and `/* ... */`). All fields are optional; missing values use the defaults shown below.
 
 ```json
 {
@@ -396,10 +407,30 @@ Sapper writes `.sapper/config.json` on first run. All fields are optional; missi
     "showHeartbeat": true,
     "idleNoticeSeconds": 4
   },
+  "ui": {
+    "compactMode": "auto",
+    "style": "sapper"
+  },
   "prompt": {
     "prepend": "",
     "append": "",
-    "coreOverride": ""
+    "coreOverride": "",
+    "system": {
+      "core": "...",
+      "nativeTools": "...",
+      "legacyTools": "...",
+      "importantContext": "..."
+    },
+    "ui": {
+      "bannerTitle": "Sapper",
+      "bannerSubtitle": "terminal coding workspace",
+      "bannerTagline": "Model selection, live tools, and focused sessions in one loop"
+    },
+    "questions": {
+      "resumeSession": "Resume session",
+      "agentName": "\\nAgent name (lowercase, no spaces): ",
+      "skillName": "\\nSkill name (lowercase, no spaces): "
+    }
   }
 }
 ```
@@ -419,11 +450,16 @@ Sapper writes `.sapper/config.json` on first run. All fields are optional; missi
 | `streaming.showPhaseStatus` | `true` | Show status lines during tool execution and model turns |
 | `streaming.showHeartbeat` | `true` | Update progress line during quiet streaming phases |
 | `streaming.idleNoticeSeconds` | `4` | Print an idle notice after N seconds of no visible output |
+| `ui.compactMode` | `"auto"` | `auto` / `on` / `off` — compact layout for smaller terminals |
+| `ui.style` | `"sapper"` | `sapper` / `clean` / `ultra` — default style, clean minimal, or ultra-clean single-line frontend |
 | `prompt.prepend` | `""` | Inject custom instructions before the default system prompt |
 | `prompt.append` | `""` | Inject custom instructions after the default system prompt |
 | `prompt.coreOverride` | `""` | Replace the core prompt block entirely (tool and context sections are preserved) |
+| `prompt.system.*` | built-in text | Full system prompt sections, including core behavior, tool instructions, agent wrapper, and skill wrapper |
+| `prompt.ui.*` | built-in text | Startup banner, model picker labels, unknown-command title, and other UI labels |
+| `prompt.questions.*` | built-in text | Interactive confirmations and questions shown during approval, attach, agent creation, skill creation, and step mode |
 
-Configuration is hot-reloaded — edit the file while Sapper is running and changes take effect on the next prompt turn.
+Configuration is hot-reloaded — edit the file while Sapper is running and changes take effect on the next prompt turn. Prompt text is now managed from config, so you can inspect and customize the major system, UI, and question prompts directly in `.sapper/config.json`. Sapper preserves and regenerates built-in explanatory comments when it rewrites the file.
 
 ---
 
@@ -441,6 +477,10 @@ Sapper maintains two layers of memory per project:
 │  Chunked text embedded with cosine similarity       │
 │  Recalled automatically on relevant prompts         │
 │  Searchable manually with /recall <query>           │
+├─────────────────────────────────────────────────────┤
+│  Durable notes →  .sapper/long-memory.md            │
+│  Markdown project patterns/decisions/fixes          │
+│  Managed with /memory add, /memory search, /memory  │
 └─────────────────────────────────────────────────────┘
 ```
 

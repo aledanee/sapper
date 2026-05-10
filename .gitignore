@@ -27,3 +27,8 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Project-private / optional files
+PUBLISHING.md
+sapper-ui.mjs
+old/

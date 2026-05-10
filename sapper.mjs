@@ -15,6 +15,32 @@ import * as acorn from 'acorn';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+function safeCwd() {
+  try {
+    return process.cwd();
+  } catch (error) {
+    const pwdCandidate = process.env.PWD;
+    const homeCandidate = process.env.HOME;
+    const fallback = [pwdCandidate, homeCandidate, __dirname].find((value) => value && fs.existsSync(value));
+
+    if (fallback) {
+      try {
+        process.chdir(fallback);
+      } catch (chdirError) {
+        // Ignore and continue to final fallback return.
+      }
+    }
+
+    try {
+      return process.cwd();
+    } catch (cwdError) {
+      return __dirname;
+    }
+  }
+}
+
+const PROJECT_ROOT = safeCwd();
+
 // Prevent process from exiting on unhandled errors
 process.on('uncaughtException', (err) => {
   console.error(chalk.red('\n❌ Uncaught exception:'), err.message);
@@ -76,6 +102,7 @@ const spinner = ora();
 const SAPPER_DIR = '.sapper';
 const CONTEXT_FILE = `${SAPPER_DIR}/context.json`;
 const EMBEDDINGS_FILE = `${SAPPER_DIR}/embeddings.json`;
+const LONG_MEMORY_FILE = `${SAPPER_DIR}/long-memory.md`;
 const WORKSPACE_FILE = `${SAPPER_DIR}/workspace.json`;
 const CONFIG_FILE = `${SAPPER_DIR}/config.json`;
 const AGENTS_DIR = `${SAPPER_DIR}/agents`;
@@ -184,7 +211,7 @@ function appendLogToFile(entry) {
     if (!existed) {
       line += `# Sapper Session Log\n`;
       line += `**Started:** ${new Date(entry.timestamp).toLocaleString()}\n`;
-      line += `**Working Directory:** \`${process.cwd()}\`\n\n`;
+      line += `**Working Directory:** \`${safeCwd()}\`\n\n`;
       line += `---\n\n`;
     }
 
@@ -607,6 +634,12 @@ const TOOL_NAME_MAP = {
   'memory': 'MEMORY',
   'recall': 'MEMORY',
   'recall_memory': 'MEMORY',
+  'save_memory_note': 'MEMORY',
+  'search_memory_notes': 'MEMORY',
+  'read_memory_notes': 'MEMORY',
+  'memory_note_save': 'MEMORY',
+  'memory_note_search': 'MEMORY',
+  'memory_note_read': 'MEMORY',
   'open': 'OPEN',
   'browser': 'OPEN',
   'open_url': 'OPEN',
@@ -981,117 +1014,39 @@ function buildSystemPrompt(agentContent = null, skillContents = []) {
   const promptConfig = getPromptConfig();
   const promptPrepend = promptConfig.prepend.trim();
   const promptAppend = promptConfig.append.trim();
-  const corePrompt = promptConfig.coreOverride.trim() || `You are Sapper, an intelligent AI assistant with access to the local filesystem and shell.
-You can help with ANY task - coding, writing, research, planning, analysis, and more.
-Adapt your personality and expertise based on the active agent role and loaded skills.
-
-CURRENT DATE AND TIME: ${dateStr}, ${timeStr}
-
-RULES:
-1. EXPLORE FIRST: Use list and read to understand files before making changes.
-2. THINK IN STEPS: Explain what you found and what you plan to do before acting.
-3. BE PRECISE: When using patch, ensure the 'old_text' matches exactly.
-4. VERIFY: After making changes, verify they work (run tests, check output, etc).
-5. NO HALLUCINATIONS: If a file doesn't exist, don't guess its content. List the directory instead.`;
+  const corePrompt = promptConfig.coreOverride.trim() || getPromptTemplate('system.core', '', {
+    date: dateStr,
+    time: timeStr,
+  });
   let prompt = promptPrepend
     ? `${wrapPromptCustomizationBlock('CUSTOM PROMPT PREPEND', promptPrepend, false)}\n\n${corePrompt}`
     : corePrompt;
 
   if (_useNativeToolsFlag) {
-    prompt += `
-
-TOOLS:
-You have function-calling tools available. Call them directly — do NOT use [TOOL:...] text markers.
-Available tools: list_directory, read_file, search_files, write_file, patch_file, create_directory, ls, cat, head, tail, grep, find, pwd, cd, rmdir, changes, fetch_web, recall_memory, open_url, run_shell.
-
-PATCH TIPS:
-- For patch_file, set old_text to "LINE:<number>" to replace a specific line by number (most reliable).
-- Always read_file first to see exact content before using patch_file.
-- If a patch fails, do NOT retry with slight variations. Switch to LINE:number mode or use write_file instead.
-
-EXTRA TOOL TIPS:
-- ls lists directory contents using the current tool working directory when path is omitted.
-- cat reads a full file, while head and tail read the first or last N lines.
-- grep searches file contents, and find searches file or directory names.
-- pwd shows the current tool working directory, and cd changes it for later tool calls.
-- rmdir removes a directory recursively and always asks for approval.
-- changes shows git status and diff output for the current repository or an optional path.
-- fetch_web fetches a web page and returns readable text content.
-- recall_memory searches Sapper's saved conversation memory.
-- open_url opens a URL in the default browser and always asks for approval.
-
-SHELL TIPS:
-- run_shell may keep long-running commands in a background session depending on config.
-- If a shell result returns a session id, inspect more output with run_shell command "__shell_read__ <session_id>".
-- Use run_shell command "__shell_list__" to list sessions and "__shell_stop__ <session_id>" to stop one.`;
+    prompt += `\n\n${getPromptTemplate('system.nativeTools')}`;
   } else {
-    prompt += `
-
-TOOL SYNTAX (use these to interact with files and system):
-- [TOOL:LIST]dir[/TOOL] - List directory contents
-- [TOOL:LS]dir[/TOOL] - Alias for LIST
-- [TOOL:READ]file_path[/TOOL] - Read file contents
-- [TOOL:CAT]file_path[/TOOL] - Alias for READ
-- [TOOL:HEAD]file_path:::20[/TOOL] - Read the first N lines of a file (default 20)
-- [TOOL:TAIL]file_path:::20[/TOOL] - Read the last N lines of a file (default 20)
-- [TOOL:SEARCH]pattern[/TOOL] - Search files for pattern
-- [TOOL:GREP]pattern[/TOOL] - Alias for SEARCH
-- [TOOL:FIND]name_or_fragment[/TOOL] - Find files and directories by name
-- [TOOL:WRITE]path:::content[/TOOL] - Create/overwrite file
-- [TOOL:PATCH]path:::old|||new[/TOOL] - Edit existing file (exact match, trimmed, or fuzzy)
-- [TOOL:PATCH]path:::LINE:number|||new text[/TOOL] - Replace a specific line by number (PREFERRED — more reliable)
-- [TOOL:PWD][/TOOL] - Show the current tool working directory
-- [TOOL:CD]dir[/TOOL] - Change the tool working directory for later tool calls
-- [TOOL:RMDIR]dir[/TOOL] - Remove a directory recursively (asks for approval)
-- [TOOL:CHANGES]path[/TOOL] - Show git status and diffs for the repository or a path
-- [TOOL:FETCH]https://example.com[/TOOL] - Fetch a web page and return readable content
-- [TOOL:MEMORY]query[/TOOL] - Search saved conversation memory
-- [TOOL:OPEN]https://example.com[/TOOL] - Open a URL in the default browser (asks for approval)
-- [TOOL:SHELL]command[/TOOL] - Run shell command
-
-PATCH TIPS:
-- PREFER the LINE:number mode when you know which line to change. It is much more reliable than text matching.
-- Always READ the file first to see exact content before using PATCH.
-- If a PATCH fails, do NOT retry with slight variations. Switch to LINE:number mode or use WRITE instead.
-
-SHELL TIPS:
-- Long-running commands may be moved to a background shell session depending on config.
-- If shell output mentions a session id, inspect more output with [TOOL:SHELL]__shell_read__ <session_id>[/TOOL].
-- Use [TOOL:SHELL]__shell_list__[/TOOL] to list sessions and [TOOL:SHELL]__shell_stop__ <session_id>[/TOOL] to stop one.
-
-You MUST use the [TOOL:...][/TOOL] syntax above to perform actions. This is how you interact with the filesystem and shell - there is no other way. When you want to read a file, output [TOOL:READ]path[/TOOL] in your response. When you want to list a directory, output [TOOL:LIST].[/TOOL]. Always actually use the tools - do not just describe what you would do.
-Do NOT show tool syntax as examples or documentation to the user. Only use them to perform real actions.`;
+    prompt += `\n\n${getPromptTemplate('system.legacyTools')}`;
   }
 
-  prompt += `
-
-IMPORTANT CONTEXT:
-- The current working directory is the user's project folder.
-- Sapper has a built-in agent/skill system. Agents are managed via /agents, /agent create, /newagent commands - NOT by you creating files manually.
-- Do NOT try to build agent frameworks, projects, or directory structures when the user mentions agents. The agent system is already built into Sapper.
-- When the user asks you to do something, work within their current project directory.
-- Use "." for the current directory when listing, not "/" or "agent/".
-
-When no agent is active, you are a general-purpose assistant. When an agent role is loaded, fully adopt that role.`;
+  prompt += `\n\n${getPromptTemplate('system.importantContext')}`;
 
   if (agentContent) {
-    prompt += `\n\n═══ ACTIVE AGENT ROLE ═══\n${agentContent}\n═══ END AGENT ROLE ═══\n\nIMPORTANT: You are now operating as the agent described above. Adopt its persona, expertise, and communication style while still having access to Sapper tools.`;
+    prompt += `\n\n${getPromptTemplate('system.activeAgentWrapper', '', { agentContent })}`;
     
     // If the active agent has tool restrictions, inform the AI
     if (currentAgentTools && currentAgentTools.length > 0) {
       const allTools = ['READ', 'WRITE', 'PATCH', 'LIST', 'SEARCH', 'SHELL', 'MKDIR'];
       const forbidden = allTools.filter(t => !currentAgentTools.includes(t));
-      prompt += `\n\nTOOL RESTRICTION: This agent can ONLY use these tools: ${currentAgentTools.join(', ')}.
-FORBIDDEN TOOLS (DO NOT USE): ${forbidden.join(', ')}. You MUST NOT attempt to use forbidden tools. If you need a forbidden tool, tell the user you cannot perform that action with your current role.`;
+      prompt += `\n\n${getPromptTemplate('system.agentRestriction', '', {
+        allowedTools: currentAgentTools.join(', '),
+        forbiddenTools: forbidden.join(', '),
+      })}`;
     }
   }
 
   if (skillContents.length > 0) {
-    prompt += `\n\n═══ LOADED SKILLS ═══`;
-    for (const skill of skillContents) {
-      prompt += `\n${skill}\n---`;
-    }
-    prompt += `\n═══ END SKILLS ═══\n\nUse the knowledge from the loaded skills above when relevant to the user's request.`;
+    const skillBlock = skillContents.map(skill => `${skill}\n---`).join('\n');
+    prompt += `\n\n${getPromptTemplate('system.loadedSkillsWrapper', '', { skillBlock })}`;
   }
 
   if (promptAppend) {
@@ -1133,12 +1088,177 @@ const DEFAULT_CONFIG = Object.freeze({
   thinking: Object.freeze({
     mode: 'auto',
   }),
+  ui: Object.freeze({
+    compactMode: 'auto',
+    style: 'sapper',
+  }),
   prompt: Object.freeze({
     prepend: '',
     append: '',
     coreOverride: '',
+    system: Object.freeze({
+      core: `You are Sapper, an intelligent AI assistant with access to the local filesystem and shell.
+You can help with ANY task - coding, writing, research, planning, analysis, and more.
+Adapt your personality and expertise based on the active agent role and loaded skills.
+
+CURRENT DATE AND TIME: {date}, {time}
+
+RULES:
+1. EXPLORE FIRST: Use list and read to understand files before making changes.
+2. THINK IN STEPS: Explain what you found and what you plan to do before acting.
+3. BE PRECISE: When using patch, ensure the 'old_text' matches exactly.
+4. VERIFY: After making changes, verify they work (run tests, check output, etc).
+5. NO HALLUCINATIONS: If a file doesn't exist, don't guess its content. List the directory instead.`,
+      nativeTools: `TOOLS:
+You have function-calling tools available. Call them directly — do NOT use [TOOL:...] text markers.
+Available tools: list_directory, read_file, search_files, write_file, patch_file, create_directory, ls, cat, head, tail, grep, find, pwd, cd, rmdir, changes, fetch_web, recall_memory, save_memory_note, search_memory_notes, read_memory_notes, open_url, run_shell.
+
+PATCH TIPS:
+- For patch_file, set old_text to "LINE:<number>" to replace a specific line by number (most reliable).
+- Always read_file first to see exact content before using patch_file.
+- If a patch fails, do NOT retry with slight variations. Switch to LINE:number mode or use write_file instead.
+
+EXTRA TOOL TIPS:
+- ls lists directory contents using the current tool working directory when path is omitted.
+- cat reads a full file, while head and tail read the first or last N lines.
+- grep searches file contents, and find searches file or directory names.
+- pwd shows the current tool working directory, and cd changes it for later tool calls.
+- rmdir removes a directory recursively and always asks for approval.
+- changes shows git status and diff output for the current repository or an optional path.
+- fetch_web fetches a web page and returns readable text content.
+- recall_memory searches Sapper's saved conversation memory.
+- save_memory_note appends a durable markdown note for recurring patterns, decisions, or fixes.
+- search_memory_notes searches markdown long-memory notes in .sapper/long-memory.md.
+- read_memory_notes reads the full markdown long-memory file.
+- open_url opens a URL in the default browser and always asks for approval.
+
+SHELL TIPS:
+- run_shell may keep long-running commands in a background session depending on config.
+- If a shell result returns a session id, inspect more output with run_shell command "__shell_read__ <session_id>".
+- Use run_shell command "__shell_list__" to list sessions and "__shell_stop__ <session_id>" to stop one.`,
+      legacyTools: `TOOL SYNTAX (use these to interact with files and system):
+- [TOOL:LIST]dir[/TOOL] - List directory contents
+- [TOOL:LS]dir[/TOOL] - Alias for LIST
+- [TOOL:READ]file_path[/TOOL] - Read file contents
+- [TOOL:CAT]file_path[/TOOL] - Alias for READ
+- [TOOL:HEAD]file_path:::20[/TOOL] - Read the first N lines of a file (default 20)
+- [TOOL:TAIL]file_path:::20[/TOOL] - Read the last N lines of a file (default 20)
+- [TOOL:SEARCH]pattern[/TOOL] - Search files for pattern
+- [TOOL:GREP]pattern[/TOOL] - Alias for SEARCH
+- [TOOL:FIND]name_or_fragment[/TOOL] - Find files and directories by name
+- [TOOL:WRITE]path:::content[/TOOL] - Create/overwrite file
+- [TOOL:PATCH]path:::old|||new[/TOOL] - Edit existing file (exact match, trimmed, or fuzzy)
+- [TOOL:PATCH]path:::LINE:number|||new text[/TOOL] - Replace a specific line by number (PREFERRED — more reliable)
+- [TOOL:PWD][/TOOL] - Show the current tool working directory
+- [TOOL:CD]dir[/TOOL] - Change the tool working directory for later tool calls
+- [TOOL:RMDIR]dir[/TOOL] - Remove a directory recursively (asks for approval)
+- [TOOL:CHANGES]path[/TOOL] - Show git status and diffs for the repository or a path
+- [TOOL:FETCH]https://example.com[/TOOL] - Fetch a web page and return readable content
+- [TOOL:MEMORY]query[/TOOL] - Search saved conversation memory
+- [TOOL:MEMORY_NOTE_SAVE]title:::note:::tag1,tag2[/TOOL] - Save a durable markdown note
+- [TOOL:MEMORY_NOTE_SEARCH]query[/TOOL] - Search markdown long memory notes
+- [TOOL:MEMORY_NOTE_READ][/TOOL] - Read markdown long memory file
+- [TOOL:OPEN]https://example.com[/TOOL] - Open a URL in the default browser (asks for approval)
+- [TOOL:SHELL]command[/TOOL] - Run shell command
+
+PATCH TIPS:
+- PREFER the LINE:number mode when you know which line to change. It is much more reliable than text matching.
+- Always READ the file first to see exact content before using PATCH.
+- If a PATCH fails, do NOT retry with slight variations. Switch to LINE:number mode or use WRITE instead.
+
+SHELL TIPS:
+- Long-running commands may be moved to a background shell session depending on config.
+- If shell output mentions a session id, inspect more output with [TOOL:SHELL]__shell_read__ <session_id>[/TOOL].
+- Use [TOOL:SHELL]__shell_list__[/TOOL] to list sessions and [TOOL:SHELL]__shell_stop__ <session_id>[/TOOL] to stop one.
+
+You MUST use the [TOOL:...][/TOOL] syntax above to perform actions. This is how you interact with the filesystem and shell - there is no other way. When you want to read a file, output [TOOL:READ]path[/TOOL] in your response. When you want to list a directory, output [TOOL:LIST].[/TOOL]. Always actually use the tools - do not just describe what you would do.
+Do NOT show tool syntax as examples or documentation to the user. Only use them to perform real actions.`,
+      importantContext: `IMPORTANT CONTEXT:
+- The current working directory is the user's project folder.
+- Sapper has a built-in agent/skill system. Agents are managed via /agents, /agent create, /newagent commands - NOT by you creating files manually.
+- Do NOT try to build agent frameworks, projects, or directory structures when the user mentions agents. The agent system is already built into Sapper.
+- When the user asks you to do something, work within their current project directory.
+- Use "." for the current directory when listing, not "/" or "agent/".
+
+When no agent is active, you are a general-purpose assistant. When an agent role is loaded, fully adopt that role.`,
+      activeAgentWrapper: `═══ ACTIVE AGENT ROLE ═══
+{agentContent}
+═══ END AGENT ROLE ═══
+
+IMPORTANT: You are now operating as the agent described above. Adopt its persona, expertise, and communication style while still having access to Sapper tools.`,
+      agentRestriction: `TOOL RESTRICTION: This agent can ONLY use these tools: {allowedTools}.
+FORBIDDEN TOOLS (DO NOT USE): {forbiddenTools}. You MUST NOT attempt to use forbidden tools. If you need a forbidden tool, tell the user you cannot perform that action with your current role.`,
+      loadedSkillsWrapper: `═══ LOADED SKILLS ═══
+{skillBlock}
+═══ END SKILLS ═══
+
+Use the knowledge from the loaded skills above when relevant to the user's request.`,
+    }),
+    ui: Object.freeze({
+      bannerTitle: 'Sapper',
+      bannerSubtitle: 'terminal coding workspace',
+      bannerTagline: 'Model selection, live tools, and focused sessions in one loop',
+      quickStartTitle: 'Quick Start',
+      quickStartSubtitle: '@file attach · /commands palette · /agents modes',
+      cleanFrontendHint: 'clean frontend active  ·  /ui style sapper to switch back',
+      ultraFrontendHint: 'ultra frontend active  /ui style sapper to switch back',
+      modelPickerUltraTitle: 'models',
+      modelPickerCleanTitle: 'model picker',
+      modelPickerTitle: 'Model selection',
+      modelPickerSectionTitle: 'Model',
+      modelPickerSubtitle: 'use ↑↓ or j/k, enter to confirm',
+      unknownCommandTitle: 'Unknown Command',
+      uiUsage: '  Usage: /ui style [sapper|clean|ultra]  |  /ui compact [auto|on|off]  |  /ui reset',
+      fetchStatus: 'Fetching {url}...',
+      webPageContentTitle: 'WEB PAGE CONTENT',
+      symbolSearchStatus: 'Searching for: "{query}"...',
+      memorySearchStatus: 'Searching memory for: "{query}"...',
+      scanStatus: 'Scanning codebase...',
+    }),
+    questions: Object.freeze({
+      resumeSession: 'Resume session',
+      removeDirectory: 'Remove directory',
+      openUrlInBrowser: 'Open URL in browser',
+      runShellCommand: 'Run shell command',
+      stopBackgroundShellSession: 'Stop background shell session {id}',
+      reviewChange: 'Review change [k]eep/[i]gnore/[d]iff/[f]eedback/[e]dit: ',
+      feedbackForSapper: 'Feedback for Sapper: ',
+      editInstructionForSapper: 'Edit instruction for Sapper: ',
+      addFirstMatchFileToContext: 'Add first match file to context? (y/n): ',
+      addFileAndRelatedToContext: 'Add this file + related to context? (y/n): ',
+      addMemoryToCurrentContext: 'Add to current context? (y/n): ',
+      agentName: '\nAgent name (lowercase, no spaces): ',
+      agentTitle: 'Agent title/role: ',
+      agentExpertise: 'Areas of expertise (comma-separated): ',
+      agentStyle: 'Communication style (e.g., professional, casual, technical): ',
+      agentTools: 'Allowed tools (comma-sep, or Enter for all): read,edit,write,list,ls,search,grep,find,shell,mkdir,rmdir,pwd,cd,cat,head,tail,changes,fetch,memory,open: ',
+      skillName: '\nSkill name (lowercase, no spaces): ',
+      skillTitle: 'Skill title: ',
+      skillDescription: 'Brief description (for /skills listing): ',
+      skillArgumentHint: 'Argument hint (optional, e.g. "Describe what to do"): ',
+      skillKnowledge: 'Skill knowledge (or Enter for template): ',
+      promptForFiles: 'Your prompt for these files: ',
+      stepContinue: '[STEP] Press Enter to let AI think...',
+    }),
   }),
 });
+
+function normalizePromptTree(inputValue, defaultValue) {
+  if (typeof defaultValue === 'string') {
+    return normalizePromptText(inputValue === undefined ? defaultValue : inputValue);
+  }
+
+  if (!defaultValue || typeof defaultValue !== 'object' || Array.isArray(defaultValue)) {
+    return inputValue === undefined ? defaultValue : inputValue;
+  }
+
+  const source = inputValue && typeof inputValue === 'object' && !Array.isArray(inputValue) ? inputValue : {};
+  const output = {};
+  for (const [key, nestedDefault] of Object.entries(defaultValue)) {
+    output[key] = normalizePromptTree(source[key], nestedDefault);
+  }
+  return output;
+}
 
 function normalizeBoolean(value, fallback) {
   if (typeof value === 'boolean') return value;
@@ -1242,6 +1362,40 @@ function normalizeStreamingConfig(streamingConfig = {}) {
   };
 }
 
+function normalizeUICompactMode(value) {
+  if (typeof value === 'boolean') return value ? 'on' : 'off';
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['on', 'true', '1', 'yes', 'enable', 'enabled', 'always', 'compact'].includes(normalized)) return 'on';
+  if (['off', 'false', '0', 'no', 'disable', 'disabled', 'never', 'full'].includes(normalized)) return 'off';
+  return 'auto';
+}
+
+function normalizeUIStyle(value) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (['ultra', 'minimal', 'min', 'ultra-clean', 'ultraclean'].includes(normalized)) return 'ultra';
+  if (['clean', 'minimal', 'codex', 'opencode'].includes(normalized)) return 'clean';
+  if (['sapper', 'classic', 'default'].includes(normalized)) return 'sapper';
+  return DEFAULT_CONFIG.ui.style;
+}
+
+function normalizeUIConfig(uiConfig = {}) {
+  if (typeof uiConfig === 'boolean' || typeof uiConfig === 'string') {
+    return {
+      compactMode: normalizeUICompactMode(uiConfig),
+      style: DEFAULT_CONFIG.ui.style,
+    };
+  }
+
+  if (!uiConfig || typeof uiConfig !== 'object' || Array.isArray(uiConfig)) {
+    return { ...DEFAULT_CONFIG.ui };
+  }
+
+  return {
+    compactMode: normalizeUICompactMode(uiConfig.compactMode),
+    style: normalizeUIStyle(uiConfig.style),
+  };
+}
+
 function normalizePromptText(value) {
   if (typeof value === 'string') return value;
   if (value === null || value === undefined) return '';
@@ -1250,21 +1404,20 @@ function normalizePromptText(value) {
 
 function normalizePromptConfig(promptConfig = {}) {
   if (!promptConfig || typeof promptConfig !== 'object' || Array.isArray(promptConfig)) {
-    return {
-      ...DEFAULT_CONFIG.prompt,
-      append: normalizePromptText(promptConfig),
-    };
+    const normalized = normalizePromptTree({}, DEFAULT_CONFIG.prompt);
+    normalized.append = normalizePromptText(promptConfig);
+    return normalized;
   }
 
   const coreOverride = promptConfig.coreOverride !== undefined
     ? promptConfig.coreOverride
     : promptConfig.override;
 
-  return {
-    prepend: normalizePromptText(promptConfig.prepend),
-    append: normalizePromptText(promptConfig.append),
-    coreOverride: normalizePromptText(coreOverride),
-  };
+  const normalized = normalizePromptTree(promptConfig, DEFAULT_CONFIG.prompt);
+  normalized.prepend = normalizePromptText(promptConfig.prepend);
+  normalized.append = normalizePromptText(promptConfig.append);
+  normalized.coreOverride = normalizePromptText(coreOverride);
+  return normalized;
 }
 
 function normalizeConfig(config = {}) {
@@ -1285,8 +1438,130 @@ function normalizeConfig(config = {}) {
     shell: normalizeShellConfig(config.shell),
     streaming: normalizeStreamingConfig(config.streaming),
     thinking: normalizeThinkingConfig(config.thinking),
+    ui: normalizeUIConfig(config.ui),
     prompt: normalizePromptConfig(config.prompt),
   };
+}
+
+function stripJsonComments(text = '') {
+  let result = '';
+  let inString = false;
+  let escaped = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    const next = text[index + 1];
+
+    if (inLineComment) {
+      if (char === '\n') {
+        inLineComment = false;
+        result += char;
+      }
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (char === '*' && next === '/') {
+        inBlockComment = false;
+        index++;
+      }
+      continue;
+    }
+
+    if (inString) {
+      result += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      result += char;
+      continue;
+    }
+
+    if (char === '/' && next === '/') {
+      inLineComment = true;
+      index++;
+      continue;
+    }
+
+    if (char === '/' && next === '*') {
+      inBlockComment = true;
+      index++;
+      continue;
+    }
+
+    result += char;
+  }
+
+  return result;
+}
+
+function appendConfigProperty(lines, name, value, { indent = 2, trailingComma = true } = {}) {
+  const pad = ' '.repeat(indent);
+  const serialized = JSON.stringify(value, null, 2).split('\n');
+  lines.push(`${pad}"${name}": ${serialized[0]}`);
+  for (const line of serialized.slice(1)) {
+    lines.push(`${pad}${line}`);
+  }
+  if (trailingComma) {
+    lines[lines.length - 1] += ',';
+  }
+}
+
+function renderConfigFile(config) {
+  const lines = [
+    '// Sapper configuration file',
+    '// This file supports JSON-style comments. Edit values and restart only when a command explicitly says so.',
+    '{',
+    '  // Core runtime behavior',
+  ];
+
+  appendConfigProperty(lines, 'defaultModel', config.defaultModel);
+  appendConfigProperty(lines, 'defaultAgent', config.defaultAgent);
+  appendConfigProperty(lines, 'autoAttach', config.autoAttach);
+  appendConfigProperty(lines, 'debug', config.debug);
+  appendConfigProperty(lines, 'contextLimit', config.contextLimit);
+  appendConfigProperty(lines, 'toolRoundLimit', config.toolRoundLimit);
+  appendConfigProperty(lines, 'patchRetries', config.patchRetries);
+  appendConfigProperty(lines, 'maxFileSize', config.maxFileSize);
+  appendConfigProperty(lines, 'maxScanSize', config.maxScanSize);
+  appendConfigProperty(lines, 'maxUrlSize', config.maxUrlSize);
+  appendConfigProperty(lines, 'summaryPhases', config.summaryPhases);
+  appendConfigProperty(lines, 'summarizeTriggerPercent', config.summarizeTriggerPercent);
+
+  lines.push('');
+  lines.push('  // Shell execution settings');
+  appendConfigProperty(lines, 'shell', config.shell);
+
+  lines.push('');
+  lines.push('  // Model response visibility');
+  appendConfigProperty(lines, 'thinking', config.thinking);
+  appendConfigProperty(lines, 'streaming', config.streaming);
+
+  lines.push('');
+  lines.push('  // Frontend style and layout');
+  appendConfigProperty(lines, 'ui', config.ui);
+
+  lines.push('');
+  lines.push('  // Prompt customization');
+  lines.push('  // prompt.system.* controls the assistant system prompt blocks');
+  lines.push('  // prompt.ui.* controls startup/model-picker/help labels');
+  lines.push('  // prompt.questions.* controls interactive questions and confirmations');
+  appendConfigProperty(lines, 'prompt', config.prompt, { trailingComma: false });
+
+  lines.push('}');
+  lines.push('');
+  return lines.join('\n');
 }
 
 // Load config (settings like autoAttach and context summarization)
@@ -1294,10 +1569,11 @@ function loadConfig() {
   try {
     ensureSapperDir();
     if (fs.existsSync(CONFIG_FILE)) {
-      const rawConfig = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+      const fileText = fs.readFileSync(CONFIG_FILE, 'utf8');
+      const rawConfig = JSON.parse(stripJsonComments(fileText));
       const normalizedConfig = normalizeConfig(rawConfig);
       if (JSON.stringify(rawConfig) !== JSON.stringify(normalizedConfig)) {
-        fs.writeFileSync(CONFIG_FILE, JSON.stringify(normalizedConfig, null, 2));
+        fs.writeFileSync(CONFIG_FILE, renderConfigFile(normalizedConfig));
       }
       return normalizedConfig;
     }
@@ -1307,7 +1583,7 @@ function loadConfig() {
   try {
     ensureSapperDir();
     if (!fs.existsSync(CONFIG_FILE)) {
-      fs.writeFileSync(CONFIG_FILE, JSON.stringify(defaultConfig, null, 2));
+      fs.writeFileSync(CONFIG_FILE, renderConfigFile(defaultConfig));
     }
   } catch (e) {}
   return defaultConfig;
@@ -1316,7 +1592,7 @@ function loadConfig() {
 function saveConfig(config) {
   ensureSapperDir();
   const normalizedConfig = normalizeConfig(config);
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(normalizedConfig, null, 2));
+  fs.writeFileSync(CONFIG_FILE, renderConfigFile(normalizedConfig));
   sapperConfig = normalizedConfig;
 }
 
@@ -1410,12 +1686,63 @@ function getPromptConfig() {
   return normalizePromptConfig(sapperConfig.prompt);
 }
 
+function getPromptTemplate(path, fallback = '', variables = {}) {
+  const promptConfig = getPromptConfig();
+  const value = String(path || '')
+    .split('.')
+    .filter(Boolean)
+    .reduce((current, key) => {
+      if (!current || typeof current !== 'object') return undefined;
+      return current[key];
+    }, promptConfig);
+
+  const template = typeof value === 'string' && value.trim() ? value : fallback;
+  return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => {
+    const replacement = variables[key];
+    return replacement === undefined || replacement === null ? '' : String(replacement);
+  });
+}
+
+function promptQuestion(path, fallback, variables = {}, tone = 'cyan') {
+  const resolved = getPromptTemplate(path, fallback, variables);
+  return tone === 'cyan' ? chalk.cyan(resolved) : resolved;
+}
+
+function promptLabel(path, fallback, variables = {}) {
+  return getPromptTemplate(path, fallback, variables);
+}
+
 function getThinkingConfig() {
   return normalizeThinkingConfig(sapperConfig.thinking);
 }
 
 function getStreamingConfig() {
   return normalizeStreamingConfig(sapperConfig.streaming);
+}
+
+function getUIConfig() {
+  return normalizeUIConfig(sapperConfig.ui);
+}
+
+function uiCompactMode() {
+  const mode = getUIConfig().compactMode;
+  if (mode === 'on') return true;
+  if (mode === 'off') return false;
+  const cols = process.stdout.columns || 100;
+  const rows = process.stdout.rows || 30;
+  return cols <= 100 || rows <= 28;
+}
+
+function uiStyle() {
+  return getUIConfig().style;
+}
+
+function uiCleanMode() {
+  return uiStyle() === 'clean' || uiStyle() === 'ultra';
+}
+
+function uiUltraCleanMode() {
+  return uiStyle() === 'ultra';
 }
 
 function streamPhaseStatusEnabled() {
@@ -1649,18 +1976,9 @@ function extractExports(content, filePath) {
   if (['js', 'jsx', 'ts', 'tsx', 'mjs'].includes(ext)) {
     // export function/class/const name
     const namedExports = content.matchAll(/export\s+(?:function|class|const|let|var|async function)\s+(\w+)/g);
-    for (const m of namedExports) exports.add(m[1]);
-    
-    // export { name }
-    const bracketExports = content.matchAll(/export\s*\{([^}]+)\}/g);
-    for (const m of bracketExports) {
-      m[1].split(',').forEach(e => {
-        const name = e.trim().split(/\s+as\s+/)[0].trim();
-        if (name) exports.add(name);
-      });
+    for (const m of namedExports) {
+      exports.add(m[1]);
     }
-    
-    // export default
     if (content.includes('export default')) exports.add('default');
   }
   
@@ -1668,85 +1986,6 @@ function extractExports(content, filePath) {
 }
 
 // Resolve relative import to actual file path
-function resolveImportPath(importPath, fromFile) {
-  if (!importPath.startsWith('.')) return null;
-  
-  const fromDir = dirname(fromFile);
-  let resolved = join(fromDir, importPath).replace(/\\/g, '/');
-  
-  // Try common extensions
-  const extensions = ['', '.js', '.ts', '.jsx', '.tsx', '.mjs', '/index.js', '/index.ts'];
-  for (const ext of extensions) {
-    const fullPath = resolved + ext;
-    if (fs.existsSync(fullPath)) {
-      return fullPath.replace(/^\.\//, '');
-    }
-  }
-  return null;
-}
-
-// Build workspace graph from codebase
-async function buildWorkspaceGraph(showProgress = true) {
-  const workspace = { indexed: new Date().toISOString(), files: {}, graph: {} };
-  
-  function scanDir(dir, depth = 0) {
-    if (depth > 5) return;
-    
-    try {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      
-      for (const entry of entries) {
-        const fullPath = dir === '.' ? entry.name : `${dir}/${entry.name}`;
-        
-        if (entry.isDirectory()) {
-          if (shouldIgnore(entry.name) || entry.name.startsWith('.')) continue;
-          scanDir(fullPath, depth + 1);
-        } else {
-          if (shouldIgnore(fullPath) || shouldIgnore(entry.name)) continue;
-          const ext = entry.name.includes('.') ? '.' + entry.name.split('.').pop() : '';
-          if (!CODE_EXTENSIONS.has(ext.toLowerCase())) continue;
-          
-          try {
-            const stats = fs.statSync(fullPath);
-            if (stats.size > getMaxFileSize()) continue;
-            
-            const content = fs.readFileSync(fullPath, 'utf8');
-            const deps = extractDependencies(content, fullPath);
-            const exports = extractExports(content, fullPath);
-            
-            // Generate brief summary (first meaningful lines)
-            const lines = content.split('\n').filter(l => l.trim() && !l.trim().startsWith('//') && !l.trim().startsWith('#'));
-            const summary = lines.slice(0, 3).join(' ').substring(0, 150);
-            
-            workspace.files[fullPath] = {
-              size: stats.size,
-              modified: stats.mtime.toISOString(),
-              imports: deps,
-              exports: exports,
-              symbols: parseFileSymbols(content, fullPath), // AST-extracted symbols
-              summary: summary || '(no summary)'
-            };
-            
-            // Build dependency graph
-            workspace.graph[fullPath] = [];
-            for (const dep of deps) {
-              const resolved = resolveImportPath(dep, fullPath);
-              if (resolved) {
-                workspace.graph[fullPath].push(resolved);
-              }
-            }
-          } catch (e) {}
-        }
-      }
-    } catch (e) {}
-  }
-  
-  scanDir('.');
-  saveWorkspaceGraph(workspace);
-  return workspace;
-}
-
-// Get related files for a given file (imports + files that import it)
 function getRelatedFiles(filePath, workspace, depth = 1) {
   const related = new Set();
   
@@ -1763,10 +2002,9 @@ function getRelatedFiles(filePath, workspace, depth = 1) {
   
   // Second level if depth > 1
   if (depth > 1) {
-    const firstLevel = Array.from(related);
-    for (const f of firstLevel) {
-      const secondImports = workspace.graph[f] || [];
-      secondImports.forEach(sf => related.add(sf));
+    for (const imported of imports) {
+      const secondLevel = workspace.graph[imported] || [];
+      secondLevel.forEach(f => related.add(f));
     }
   }
   
@@ -2118,6 +2356,119 @@ async function addToEmbeddings(text, embeddings) {
   }
 }
 
+function longMemoryTemplate() {
+  return `# Sapper Long Memory
+
+This file stores durable project notes, patterns, and decisions.
+Sapper can write and search this file with /memory commands and memory-note tools.
+
+## Notes
+
+`;
+}
+
+function ensureLongMemoryFile() {
+  ensureSapperDir();
+  if (!fs.existsSync(LONG_MEMORY_FILE)) {
+    fs.writeFileSync(LONG_MEMORY_FILE, longMemoryTemplate());
+  }
+}
+
+function loadLongMemoryText() {
+  try {
+    ensureLongMemoryFile();
+    return fs.readFileSync(LONG_MEMORY_FILE, 'utf8');
+  } catch (error) {
+    return longMemoryTemplate();
+  }
+}
+
+function normalizeMemoryTags(tags) {
+  const rawTags = Array.isArray(tags)
+    ? tags
+    : String(tags ?? '').split(',');
+  return Array.from(new Set(
+    rawTags
+      .map(tag => String(tag ?? '').trim().toLowerCase())
+      .filter(tag => tag.length > 0)
+      .map(tag => tag.replace(/\s+/g, '-'))
+  )).slice(0, 8);
+}
+
+function inferMemoryTitle(content) {
+  const singleLine = String(content ?? '').replace(/\s+/g, ' ').trim();
+  if (!singleLine) return 'Untitled note';
+  const sentence = singleLine.split(/[.!?]/)[0].trim();
+  return (sentence || singleLine).slice(0, 80);
+}
+
+function getLongMemorySections() {
+  const raw = loadLongMemoryText();
+  return raw
+    .split(/\n(?=##\s)/g)
+    .map(section => section.trim())
+    .filter(section => section.startsWith('## '));
+}
+
+function appendLongMemoryNote({ title, content, tags = [], source = 'manual' } = {}) {
+  const cleanContent = String(content ?? '').trim();
+  if (!cleanContent) {
+    return { ok: false, error: 'Note content is required.' };
+  }
+
+  const cleanTitle = String(title ?? '').trim() || inferMemoryTitle(cleanContent);
+  const cleanTags = normalizeMemoryTags(tags);
+  const timestamp = new Date().toISOString();
+  const lines = [
+    `## ${timestamp} | ${cleanTitle}`,
+    `- Tags: ${cleanTags.length ? cleanTags.join(', ') : 'general'}`,
+    `- Source: ${source}`,
+    `- Project: ${PROJECT_ROOT}`,
+    '',
+    cleanContent,
+  ];
+
+  ensureLongMemoryFile();
+  const existing = loadLongMemoryText().trimEnd();
+  fs.writeFileSync(LONG_MEMORY_FILE, `${existing}\n\n${lines.join('\n')}\n`);
+
+  return {
+    ok: true,
+    title: cleanTitle,
+    tags: cleanTags,
+    timestamp,
+    path: LONG_MEMORY_FILE,
+  };
+}
+
+function searchLongMemoryNotes(query, limit = 5) {
+  const cleanQuery = String(query ?? '').trim().toLowerCase();
+  if (!cleanQuery) return [];
+
+  const words = Array.from(new Set(cleanQuery.split(/[^a-z0-9_]+/i).filter(Boolean)));
+  const sections = getLongMemorySections();
+  const scored = sections.map((section) => {
+    const lowered = section.toLowerCase();
+    let score = 0;
+    if (lowered.includes(cleanQuery)) score += 5;
+    for (const word of words) {
+      if (word.length >= 2 && lowered.includes(word)) score += 1;
+    }
+    return { section, score };
+  }).filter(item => item.score > 0);
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, Math.max(1, limit)).map(item => item.section);
+}
+
+function listLongMemoryNotes(limit = 8) {
+  return getLongMemorySections()
+    .slice(-Math.max(1, limit))
+    .reverse()
+    .map(section => section.split('\n')[0]?.replace(/^##\s*/, '').trim())
+    .filter(Boolean);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // SMART CONTEXT SUMMARIZATION
 // ═══════════════════════════════════════════════════════════════
@@ -2435,13 +2786,21 @@ function formatRelativeTime(value) {
   return 'just now';
 }
 
-const BANNER = [
-  `${chalk.hex('#c8ecff').bold('Sapper')} ${UI.slate('terminal workspace')}`,
-  UI.slate('Local models, live tools, and focused coding in one loop')
-].join('\n');
+function bannerText() {
+  return [
+    `${chalk.hex('#c8ecff').bold(promptLabel('ui.bannerTitle', 'Sapper'))} ${UI.slate(promptLabel('ui.bannerSubtitle', 'terminal coding workspace'))}`,
+    UI.slate(promptLabel('ui.bannerTagline', 'Model selection, live tools, and focused sessions in one loop')),
+  ].join('\n');
+}
 
 function box(content, title = '', tone = 'cyan', options = {}) {
   const width = Math.max(28, Math.min(options.width || terminalWidth(72), terminalWidth(72)));
+  if (uiCleanMode()) {
+    const cleanTitle = String(title || '').replace(/[^\x20-\x7E]/g, '').replace(/\s+/g, ' ').trim();
+    const line = UI.slate('-'.repeat(Math.max(12, width)));
+    const header = cleanTitle ? `${chalk.white(cleanTitle)}\n${line}\n` : '';
+    return `${header}${String(content ?? '')}\n${line}`;
+  }
   const header = title ? `${toneColor(tone).bold(title)}\n${divider('─', tone, width)}\n` : '';
   return `${header}${String(content ?? '')}\n${divider('─', tone, width)}`;
 }
@@ -2463,8 +2822,148 @@ function keyValue(label, value, width = 12) {
   return `${padAnsi(UI.slate(label), width)} ${value}`;
 }
 
+function piRow(label, value, width = 13) {
+  return `${padAnsi(UI.slate(`[${label}]`), width)} ${value}`;
+}
+
 function commandRow(command, description, width = 18) {
   return `${padAnsi(UI.accent(command), width)} ${UI.slate('—')} ${UI.ink(description)}`;
+}
+
+const COMMAND_GROUPS = Object.freeze([
+  {
+    title: 'Core',
+    subtitle: 'daily workflow',
+    tone: 'cyan',
+    rows: [
+      ['@ or /attach', 'Pick files to attach interactively'],
+      ['@file', 'Attach a file inline, for example @src/app.js'],
+      ['/scan', 'Scan the codebase into context'],
+      ['/index', 'Rebuild the workspace graph'],
+      ['/graph file', 'Show related files from the graph'],
+      ['/symbol name', 'Search indexed functions and classes'],
+      ['/auto', 'Toggle automatic related-file attach'],
+    ],
+  },
+  {
+    title: 'Context',
+    subtitle: 'memory and visibility',
+    tone: 'cyan',
+    rows: [
+      ['/recall', 'Search memory for relevant context'],
+      ['/memory', 'Manage markdown long-memory notes and patterns'],
+      ['/memory add title ::: note', 'Save a durable note to .sapper/long-memory.md'],
+      ['/fetch <url>', 'Fetch a web page into context'],
+      ['/reset /clear', 'Clear all current context'],
+      ['/prune', 'Summarize long context and store memory'],
+      ['/summary', 'Show or change auto-summary settings'],
+      ['/ui', 'Show or change frontend style and compact mode'],
+      ['/ui style clean', 'Switch to a clean Codex/OpenCode-like frontend'],
+      ['/ui style ultra', 'Switch to an ultra-clean single-line frontend'],
+      ['/shell', 'Inspect shell config and background sessions'],
+      ['/shell read <id>', 'Read output from a tracked shell session'],
+      ['/shell stop <id>', 'Stop a tracked shell session'],
+      ['/context', 'Inspect token usage, summary trigger, and model window'],
+      ['/ctx <limit>', 'Set context window limit (e.g. /ctx 64k)'],
+      ['/debug', 'Toggle regex and tool debug output'],
+      ['/log', 'Show the session activity timeline'],
+      ['/log stats', 'Show session statistics'],
+      ['/log file', 'Show log file path and history'],
+      ['/help', 'Open command guide'],
+      ['/commands', 'Alias for /help'],
+      ['exit', 'Quit Sapper'],
+    ],
+  },
+  {
+    title: 'Agents',
+    subtitle: 'specialist modes and skills',
+    tone: 'cyan',
+    rows: [
+      ['/agents', 'List available agents'],
+      ['/skills', 'List available skills'],
+      ['/agentname', 'Switch to an agent such as /reviewer'],
+      ['/default', 'Return to the default Sapper role'],
+      ['/use skill', 'Load a skill into the session'],
+      ['/unload skill', 'Unload a previously loaded skill'],
+      ['/newagent', 'Create a new agent'],
+      ['/newskill', 'Create a new skill'],
+    ],
+  },
+]);
+
+const COMMAND_LOOKUP = Object.freeze(
+  Array.from(new Set(COMMAND_GROUPS.flatMap(group => group.rows.map(([command]) => command))))
+);
+
+function renderCommandPalette() {
+  const lines = [];
+  for (const group of COMMAND_GROUPS) {
+    if (lines.length > 0) lines.push('');
+    lines.push(sectionTitle(group.title, group.subtitle, group.tone));
+    for (const [command, description] of group.rows) {
+      lines.push(commandRow(command, description));
+    }
+  }
+
+  lines.push(divider());
+  lines.push(UI.slate('  Summary settings: /summary  |  /summary phases off  |  /summary trigger 60'));
+  lines.push(UI.slate('  Tool config: .sapper/config.json -> toolRoundLimit (default 40)'));
+  lines.push(UI.slate('  Shell config: .sapper/config.json -> shell.streamToModel, shell.backgroundMode [off|auto|on], shell.backgroundAfterSeconds, shell.outputChunkChars'));
+  lines.push(UI.slate('  Want to see all live shell output? Set shell.backgroundMode to off. thinking.mode only controls model reasoning.'));
+  lines.push(UI.slate('  Streaming config: .sapper/config.json -> streaming.showPhaseStatus, streaming.showHeartbeat, streaming.idleNoticeSeconds'));
+  lines.push(UI.slate('  Thinking config: .sapper/config.json -> thinking.mode [auto|on|off]'));
+  lines.push(UI.slate('  UI config: .sapper/config.json -> ui.style [sapper|clean|ultra], ui.compactMode [auto|on|off]'));
+  lines.push(UI.slate('  Prompt config: .sapper/config.json -> prompt.prepend, prompt.append, prompt.coreOverride, prompt.system.*, prompt.ui.*, prompt.questions.*'));
+
+  return lines.join('\n');
+}
+
+function levenshteinDistance(a = '', b = '') {
+  const left = String(a);
+  const right = String(b);
+  if (left === right) return 0;
+  if (!left.length) return right.length;
+  if (!right.length) return left.length;
+
+  const previous = Array.from({ length: right.length + 1 }, (_, i) => i);
+  const current = new Array(right.length + 1);
+
+  for (let i = 1; i <= left.length; i++) {
+    current[0] = i;
+    for (let j = 1; j <= right.length; j++) {
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+      current[j] = Math.min(
+        current[j - 1] + 1,
+        previous[j] + 1,
+        previous[j - 1] + cost
+      );
+    }
+    for (let j = 0; j <= right.length; j++) {
+      previous[j] = current[j];
+    }
+  }
+
+  return previous[right.length];
+}
+
+function suggestSlashCommands(inputValue = '', maxSuggestions = 4) {
+  const normalized = inputValue.trim().toLowerCase().replace(/^\/+/, '');
+  if (!normalized) return [];
+
+  const scored = COMMAND_LOOKUP.map(command => {
+    const token = command.toLowerCase().replace(/^\/+/, '').split(/\s+/)[0];
+    const score = token.startsWith(normalized)
+      ? 0
+      : normalized.startsWith(token)
+        ? 1
+        : levenshteinDistance(normalized, token);
+    return { command, score };
+  }).sort((a, b) => a.score - b.score || a.command.length - b.command.length);
+
+  return scored
+    .filter(item => item.score <= Math.max(2, Math.ceil(normalized.length / 2)))
+    .slice(0, maxSuggestions)
+    .map(item => item.command);
 }
 
 function renderViewport(content, { verticalAlign = 'top', minTopPadding = 0 } = {}) {
@@ -2499,7 +2998,11 @@ function ellipsis(text = '', max = 48) {
 }
 
 function promptShell(label, detail = '') {
-  return `${UI.slate(label)}${detail ? `\n${detail}` : ''}\n${UI.accent('› ')} `;
+  if (uiCleanMode()) {
+    const body = detail ? `${UI.slate(label)}\n${UI.slate(detail)}` : UI.slate(label);
+    return `${body}\n${UI.accent('› ')} `;
+  }
+  return `${UI.slate(label)}${detail ? `\n${detail}` : ''}\n${UI.accent('> ')} `;
 }
 
 function renderedTerminalLineCount(text = '', width = process.stdout.columns || 80) {
@@ -2758,7 +3261,7 @@ async function handleShellSessionCommand(command = '') {
     }
 
     console.log();
-    const confirmation = await safeQuestion(confirmPrompt(`Stop background shell session ${session.id}`, 'error', '[y/N] '));
+    const confirmation = await safeQuestion(confirmPrompt(promptLabel('questions.stopBackgroundShellSession', 'Stop background shell session {id}', { id: session.id }), 'error', '[y/N] '));
     if (!['y', 'yes'].includes(String(confirmation ?? '').trim().toLowerCase())) {
       return `Stop request cancelled for shell session ${session.id}.`;
     }
@@ -3009,6 +3512,39 @@ let modelContextLength = null;  // Detected from ollama.show() model_info
 let lastPromptTokens = 0;      // prompt_eval_count from last response
 let lastEvalTokens = 0;        // eval_count from last response
 
+const SLASH_COMPLETION_COMMANDS = Object.freeze(Array.from(new Set(
+  COMMAND_GROUPS
+    .flatMap(group => group.rows.map(([command]) => command))
+    .flatMap(command => (String(command).match(/\/[a-z0-9-]+/gi) || []).map(token => token.toLowerCase()))
+    .concat(['/commands', '/cmd'])
+)).sort());
+
+function buildReadlineCompleter() {
+  return (line) => {
+    const raw = String(line || '');
+    const trimmed = raw.trimStart();
+
+    if (!trimmed.startsWith('/')) {
+      return [[], line];
+    }
+
+    // Complete only the first token (command) to avoid interfering with free-form args.
+    const commandToken = trimmed.split(/\s+/)[0].toLowerCase();
+    const hits = SLASH_COMPLETION_COMMANDS.filter(cmd => cmd.startsWith(commandToken));
+    return [hits.length ? hits : SLASH_COMPLETION_COMMANDS, commandToken];
+  };
+}
+
+function createReadlineInterface() {
+  return readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true,
+    historySize: 100,
+    completer: buildReadlineCompleter(),
+  });
+}
+
 // Estimate token count from text (~4 chars per token for English, ~3 for code)
 // This is a rough heuristic - actual counts come from Ollama response stats
 function estimateTokens(text) {
@@ -3030,21 +3566,11 @@ function estimateMessagesTokens(messages) {
   }
   return total;
 }
-let rl = readline.createInterface({ 
-  input: process.stdin, 
-  output: process.stdout,
-  terminal: true,
-  historySize: 100
-});
+let rl = createReadlineInterface();
 
 function recreateReadline() {
   if (rl) rl.close();
-  rl = readline.createInterface({ 
-    input: process.stdin, 
-    output: process.stdout,
-    terminal: true,
-    historySize: 100
-  });
+  rl = createReadlineInterface();
   // Force resume stdin to keep process alive
   process.stdin.resume();
 }
@@ -3668,7 +4194,12 @@ async function pickModel(models) {
   if (!models || models.length === 0) return null;
 
   let cursor = 0;
-  const pageSize = Math.max(5, Math.min(8, (process.stdout.rows || 24) - 14));
+  const compact = uiCompactMode();
+  const clean = uiCleanMode();
+  const ultra = uiUltraCleanMode();
+  const pageSize = compact
+    ? Math.max(4, Math.min(7, (process.stdout.rows || 24) - 16))
+    : Math.max(5, Math.min(8, (process.stdout.rows || 24) - 14));
 
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
@@ -3677,13 +4208,27 @@ async function pickModel(models) {
 
   const render = () => {
     const current = models[cursor];
-    const lines = [
-      BANNER,
-      `${UI.slate(process.cwd())} ${UI.slate('·')} ${UI.slate(`v${CURRENT_VERSION}`)}`,
-      divider(),
-      sectionTitle('Model selection', 'use ↑↓ or j/k, enter to confirm', 'cyan'),
-      ''
-    ];
+    const lines = ultra
+      ? [
+          `${chalk.white(promptLabel('ui.bannerTitle', 'Sapper'))} ${UI.slate(promptLabel('ui.modelPickerUltraTitle', 'models'))}`,
+          `${UI.slate(safeCwd())}`,
+          ''
+        ]
+      : clean
+      ? [
+          `${chalk.white(promptLabel('ui.bannerTitle', 'Sapper'))} ${UI.slate(promptLabel('ui.modelPickerCleanTitle', 'model picker'))}`,
+          `${UI.slate(safeCwd())} ${UI.slate('·')} ${UI.slate(`v${CURRENT_VERSION}`)}`,
+          divider('─', 'gray', terminalWidth(70)),
+          sectionTitle(promptLabel('ui.modelPickerSectionTitle', 'Model'), promptLabel('ui.modelPickerSubtitle', 'use ↑↓ or j/k, enter to confirm'), 'gray'),
+          ''
+        ]
+      : [
+          bannerText(),
+          `${UI.slate(safeCwd())} ${UI.slate('·')} ${UI.slate(`v${CURRENT_VERSION}`)}`,
+          divider(),
+          sectionTitle(promptLabel('ui.modelPickerTitle', 'Model selection'), promptLabel('ui.modelPickerSubtitle', 'use ↑↓ or j/k, enter to confirm'), 'cyan'),
+          ''
+        ];
 
     const startIdx = Math.max(0, Math.min(cursor - Math.floor(pageSize / 2), models.length - pageSize));
     const endIdx = Math.min(startIdx + pageSize, models.length);
@@ -3717,14 +4262,30 @@ async function pickModel(models) {
     const family = current.details?.family || current.details?.format || current.details?.parameter_size || 'local model';
     const quant = current.details?.quantization_level || current.details?.quantization || 'default';
     lines.push('');
-    lines.push(box(
-      `${keyValue('Selected', chalk.white.bold(current.name), 10)}\n` +
-      `${keyValue('Footprint', UI.ink(current.size ? formatBytes(current.size) : 'unknown'), 10)}\n` +
-      `${keyValue('Updated', UI.ink(current.modified_at ? formatRelativeTime(current.modified_at) : 'unknown'), 10)}\n` +
-      `${keyValue('Profile', UI.ink(family), 10)}\n` +
-      `${keyValue('Quant', UI.ink(quant), 10)}`,
-      'Preview', 'gray'
-    ));
+    if (ultra) {
+      lines.push(
+        `${UI.slate('selected')} ${chalk.white.bold(current.name)} ${UI.slate('·')} ` +
+        `${UI.slate(current.size ? formatBytes(current.size) : 'unknown')} ${UI.slate('·')} ` +
+        `${UI.slate(current.modified_at ? formatRelativeTime(current.modified_at) : 'unknown')}`
+      );
+      lines.push(UI.slate('enter confirm  ·  q cancel'));
+    } else if (clean) {
+      lines.push(
+        `${UI.slate('selected')} ${chalk.white.bold(current.name)} ${UI.slate('·')} ` +
+        `${UI.slate('size')} ${UI.ink(current.size ? formatBytes(current.size) : 'unknown')} ${UI.slate('·')} ` +
+        `${UI.slate('updated')} ${UI.ink(current.modified_at ? formatRelativeTime(current.modified_at) : 'unknown')} ${UI.slate('·')} ` +
+        `${UI.slate('profile')} ${UI.ink(family)} ${UI.slate('·')} ${UI.slate('quant')} ${UI.ink(quant)}`
+      );
+    } else {
+      lines.push(box(
+        `${keyValue('Selected', chalk.white.bold(current.name), 10)}\n` +
+        `${keyValue('Footprint', UI.ink(current.size ? formatBytes(current.size) : 'unknown'), 10)}\n` +
+        `${keyValue('Updated', UI.ink(current.modified_at ? formatRelativeTime(current.modified_at) : 'unknown'), 10)}\n` +
+        `${keyValue('Profile', UI.ink(family), 10)}\n` +
+        `${keyValue('Quant', UI.ink(quant), 10)}`,
+        'Preview', 'gray'
+      ));
+    }
 
     renderViewport(lines.join('\n'), { verticalAlign: 'center' });
   };
@@ -3774,10 +4335,10 @@ async function pickModel(models) {
   });
 }
 
-let toolWorkingDirectory = process.cwd();
+let toolWorkingDirectory = PROJECT_ROOT;
 
 function getToolWorkingDirectory() {
-  return toolWorkingDirectory || process.cwd();
+  return toolWorkingDirectory || PROJECT_ROOT;
 }
 
 function resolveToolPath(pathValue = '.', { allowEmpty = false } = {}) {
@@ -3794,7 +4355,7 @@ function resolveToolPath(pathValue = '.', { allowEmpty = false } = {}) {
   }
   const resolved = isAbsolute(rawPath) ? rawPath : pathResolve(getToolWorkingDirectory(), rawPath);
   // Prevent path traversal outside the project directory
-  const projectRoot = process.cwd();
+  const projectRoot = PROJECT_ROOT;
   if (!resolved.startsWith(projectRoot + '/') && resolved !== projectRoot) {
     return projectRoot; // Fall back to project root for paths that escape sandbox
   }
@@ -4191,7 +4752,7 @@ const tools = {
         `${UI.slate('This will permanently delete the directory and its contents.')}`,
         'Directory Removal', 'red'
       ));
-      const confirm = await safeQuestion(confirmPrompt('Remove directory', 'error'));
+      const confirm = await safeQuestion(confirmPrompt(promptLabel('questions.removeDirectory', 'Remove directory'), 'error'));
       if (!['y', 'yes'].includes(String(confirm ?? '').trim().toLowerCase())) {
         return 'Directory removal blocked by user.';
       }
@@ -4299,6 +4860,39 @@ const tools = {
 
     return `Found ${relevant.length} memory match${relevant.length === 1 ? '' : 'es'} for: ${trimmedQuery}\n\n${formatted}`;
   },
+  save_memory_note: async (title, content, tags) => {
+    const result = appendLongMemoryNote({
+      title,
+      content,
+      tags,
+      source: 'assistant-tool',
+    });
+    if (!result.ok) {
+      return `Error saving memory note: ${result.error}`;
+    }
+    const tagText = result.tags.length ? ` [${result.tags.join(', ')}]` : '';
+    return `Saved memory note: ${result.title}${tagText} (${result.timestamp}) in ${result.path}`;
+  },
+  search_memory_notes: async (query) => {
+    const cleanQuery = String(query ?? '').trim();
+    if (!cleanQuery) return 'Error searching memory notes: missing query';
+
+    const matches = searchLongMemoryNotes(cleanQuery, 5);
+    if (!matches.length) {
+      return `No markdown long-memory notes found for: ${cleanQuery}`;
+    }
+
+    const formatted = matches.map((note, index) => {
+      const preview = truncateToolText(note, 900);
+      return `[${index + 1}]\n${preview}`;
+    }).join('\n\n');
+
+    return `Found ${matches.length} markdown note match${matches.length === 1 ? '' : 'es'} for: ${cleanQuery}\n\n${formatted}`;
+  },
+  read_memory_notes: async () => {
+    const text = loadLongMemoryText();
+    return truncateToolText(text, 28000);
+  },
   open_url: async (url) => {
     const trimmedUrl = String(url ?? '').trim();
     if (!trimmedUrl) return 'Error opening URL: missing URL';
@@ -4312,7 +4906,7 @@ const tools = {
       `${UI.slate('This will open the URL in your default browser.')}`,
       'Open URL', 'red'
     ));
-    const confirm = await safeQuestion(confirmPrompt('Open URL in browser', 'error'));
+    const confirm = await safeQuestion(confirmPrompt(promptLabel('questions.openUrlInBrowser', 'Open URL in browser'), 'error'));
     if (!['y', 'yes'].includes(String(confirm ?? '').trim().toLowerCase())) {
       return 'Open URL blocked by user.';
     }
@@ -4357,7 +4951,7 @@ const tools = {
       'Shell Approval', 'red'
     ));
     while (true) {
-      const confirmInput = await safeQuestion(confirmPrompt('Run shell command', 'error', '[y/N/f/e or text] '));
+      const confirmInput = await safeQuestion(confirmPrompt(promptLabel('questions.runShellCommand', 'Run shell command'), 'error', '[y/N/f/e or text] '));
       const confirmRaw = String(confirmInput ?? '').trim();
       const confirm = confirmRaw.toLowerCase();
 
@@ -4449,8 +5043,8 @@ const tools = {
       }
 
       const approvalInstruction = await resolveApprovalInstruction(confirmRaw, {
-        feedbackPrompt: 'Feedback for this command: ',
-        editPrompt: 'Edit instruction for this command: ',
+        feedbackPrompt: promptLabel('questions.feedbackForSapper', 'Feedback for Sapper: '),
+        editPrompt: promptLabel('questions.editInstructionForSapper', 'Edit instruction for Sapper: '),
       });
 
       if (approvalInstruction) {
@@ -4547,10 +5141,25 @@ async function checkForUpdates() {
 
 async function runSapper() {
   console.clear();
-  console.log(BANNER);
-  console.log(`${UI.slate(process.cwd())} ${UI.slate('·')} ${UI.slate(`v${CURRENT_VERSION}`)}`);
-  console.log(divider());
-  console.log(sectionTitle('Quick start', '@file attach · /help commands · /agents modes', 'gray'));
+  const clean = uiCleanMode();
+  const ultra = uiUltraCleanMode();
+  if (ultra) {
+    console.log(`${chalk.white(promptLabel('ui.bannerTitle', 'Sapper'))} ${UI.slate(`v${CURRENT_VERSION}`)} ${UI.slate(safeCwd())}`);
+    console.log(UI.slate(promptLabel('ui.ultraFrontendHint', 'ultra frontend active  /ui style sapper to switch back')));
+  } else if (clean) {
+    console.log(`${chalk.white(promptLabel('ui.bannerTitle', 'Sapper'))} ${UI.slate(`v${CURRENT_VERSION}`)} ${UI.slate('·')} ${UI.slate(safeCwd())}`);
+    console.log(UI.slate(promptLabel('ui.cleanFrontendHint', 'clean frontend active  ·  /ui style sapper to switch back')));
+    console.log(divider('─', 'gray', terminalWidth(70)));
+  } else {
+    console.log(bannerText());
+    console.log(`${UI.slate(safeCwd())} ${UI.slate('·')} ${UI.slate(`v${CURRENT_VERSION}`)}`);
+    console.log(divider());
+    console.log(sectionTitle(
+      promptLabel('ui.quickStartTitle', 'Quick Start'),
+      promptLabel('ui.quickStartSubtitle', '@file attach · /commands palette · /agents modes'),
+      'gray'
+    ));
+  }
   console.log();
   
   // Check for updates
@@ -4602,27 +5211,46 @@ async function runSapper() {
     ? Math.max(0, Math.round((Date.now() - new Date(workspace.indexed).getTime()) / 1000 / 60))
     : 0;
   const startupLines = [
-    `${statusBadge('workspace', 'info')} ${chalk.white(`${workspaceFileCount} files`)} ${UI.slate('·')} ${chalk.white(`${workspaceSymbolCount} symbols`)} ${UI.slate('·')} ${UI.slate(`indexed ${workspaceAgeMinutes}m ago`)}`,
-    `${statusBadge('memory', 'neutral')} ${chalk.white('.sapper/')} ${UI.slate('·')} ${UI.slate(`auto-attach ${sapperConfig.autoAttach ? 'on' : 'off'}`)}`,
-    `${statusBadge('prompt', hasCustomPromptConfig() ? 'warning' : 'neutral')} ${UI.slate(hasCustomPromptConfig() ? 'custom prompt on' : 'default prompt')}`,
-    `${statusBadge('thinking', 'neutral')} ${UI.slate(`mode ${thinkingMode()}`)}`,
-    `${statusBadge('tools', 'action')} ${UI.slate(`limit ${toolRoundLimit()} rounds`)}`,
-    `${statusBadge('shell', 'info')} ${UI.slate(`stream ${shellStreamToModelEnabled() ? 'on' : 'off'}`)} ${UI.slate('·')} ${UI.slate(`bg ${shellBackgroundMode()}`)} ${UI.slate('·')} ${UI.slate(`${activeShellSessionCount()} active`)}`,
-    `${statusBadge('stream', 'neutral')} ${UI.slate(`heartbeat ${streamHeartbeatEnabled() ? 'on' : 'off'}`)} ${UI.slate('·')} ${UI.slate(`phases ${streamPhaseStatusEnabled() ? 'on' : 'off'}`)}`,
-    `${statusBadge('summary', 'info')} ${UI.slate(`phases ${summaryPhasesEnabled() ? 'on' : 'off'}`)} ${UI.slate('·')} ${UI.slate(`trigger ${summaryTriggerPercent()}%`)}`,
-    `${statusBadge('agents', 'action')} ${chalk.white(`${agentCount}`)} ${UI.slate('·')} ${statusBadge('skills', 'success')} ${chalk.white(`${skillCount}`)}`,
+    piRow('workspace', `${chalk.white(`${workspaceFileCount} files`)} ${UI.slate('·')} ${chalk.white(`${workspaceSymbolCount} symbols`)} ${UI.slate('·')} ${UI.slate(`indexed ${workspaceAgeMinutes}m ago`)}`),
+    piRow('memory', `${chalk.white('.sapper/')} ${UI.slate('·')} ${UI.slate(`auto-attach ${sapperConfig.autoAttach ? 'on' : 'off'}`)}`),
+    piRow('prompt', UI.slate(hasCustomPromptConfig() ? 'custom prompt on' : 'default prompt')),
+    piRow('thinking', UI.slate(`mode ${thinkingMode()}`)),
+    piRow('tools', UI.slate(`limit ${toolRoundLimit()} rounds`)),
+    piRow('shell', `${UI.slate(`stream ${shellStreamToModelEnabled() ? 'on' : 'off'}`)} ${UI.slate('·')} ${UI.slate(`bg ${shellBackgroundMode()}`)} ${UI.slate('·')} ${UI.slate(`${activeShellSessionCount()} active`)}`),
+    piRow('stream', `${UI.slate(`heartbeat ${streamHeartbeatEnabled() ? 'on' : 'off'}`)} ${UI.slate('·')} ${UI.slate(`phases ${streamPhaseStatusEnabled() ? 'on' : 'off'}`)}`),
+    piRow('summary', `${UI.slate(`phases ${summaryPhasesEnabled() ? 'on' : 'off'}`)} ${UI.slate('·')} ${UI.slate(`trigger ${summaryTriggerPercent()}%`)}`),
+    piRow('modes', `${chalk.white(`agents ${agentCount}`)} ${UI.slate('·')} ${chalk.white(`skills ${skillCount}`)}`),
   ];
   if (newlyCreated > 0) {
     startupLines.push(UI.slate(`${newlyCreated} default agents or skills created in .sapper/`));
   }
-  console.log(box(startupLines.join('\n'), 'Workspace', 'gray'));
+  if (ultra) {
+    const condensed = [
+      `${chalk.white(`${workspaceFileCount} files`)} ${UI.slate(`${workspaceSymbolCount} symbols`)}`,
+      `${UI.slate('agents')} ${chalk.white(agentCount)} ${UI.slate('skills')} ${chalk.white(skillCount)} ${UI.slate('summary')} ${chalk.white(`${summaryTriggerPercent()}%`)}`,
+    ];
+    if (newlyCreated > 0) condensed.push(UI.slate(`${newlyCreated} defaults created in .sapper/`));
+    console.log(condensed.join('\n'));
+  } else if (clean) {
+    const condensed = [
+      `${chalk.white(`${workspaceFileCount} files`)} ${UI.slate('·')} ${chalk.white(`${workspaceSymbolCount} symbols`)} ${UI.slate('·')} ${UI.slate(`indexed ${workspaceAgeMinutes}m ago`)}`,
+      `${UI.slate('tools')} ${chalk.white(`limit ${toolRoundLimit()}`)} ${UI.slate('·')} ${UI.slate('summary')} ${chalk.white(`${summaryTriggerPercent()}%`)}`,
+      `${UI.slate('modes')} ${chalk.white(`agents ${agentCount}`)} ${UI.slate('·')} ${chalk.white(`skills ${skillCount}`)} ${UI.slate('·')} ${UI.slate('shell')} ${chalk.white(shellBackgroundMode())}`,
+    ];
+    if (newlyCreated > 0) {
+      condensed.push(UI.slate(`${newlyCreated} default agents or skills created in .sapper/`));
+    }
+    console.log(box(condensed.join('\n'), 'Session', 'gray'));
+  } else {
+    console.log(box(startupLines.join('\n'), 'Session Dashboard', 'gray'));
+  }
   console.log();
   
   let messages = [];
   if (fs.existsSync(CONTEXT_FILE)) {
     console.log(divider());
     console.log(UI.ink('Previous session found in .sapper/context.json'));
-    const resume = await safeQuestion(confirmPrompt('Resume session', 'success'));
+    const resume = await safeQuestion(confirmPrompt(promptLabel('questions.resumeSession', 'Resume session'), 'success'));
     if (resume.toLowerCase() === 'y') {
       messages = JSON.parse(fs.readFileSync(CONTEXT_FILE, 'utf8'));
       console.log(chalk.green('  ✓ Session restored\n'));
@@ -4717,9 +5345,9 @@ async function runSapper() {
     contextLabel = `${effectiveCtx.toLocaleString()} tokens (custom limit, model: ${modelContextLength.toLocaleString()})`;
   }
   console.log(box(
-    `${statusBadge('model', 'action')} ${chalk.white.bold(selectedModel)}\n` +
-    `${statusBadge('tools', useNativeTools ? 'success' : 'neutral')} ${UI.ink(toolModeLabel)}\n` +
-    `${statusBadge('context', 'info')} ${UI.ink(contextLabel)}`,
+    `${piRow('model', chalk.white.bold(selectedModel))}\n` +
+    `${piRow('tools', UI.ink(toolModeLabel))}\n` +
+    `${piRow('context', UI.ink(contextLabel))}`,
     'Session', 'cyan'
   ));
   console.log();
@@ -4982,6 +5610,47 @@ async function runSapper() {
     {
       type: 'function',
       function: {
+        name: 'save_memory_note',
+        description: 'Save a durable markdown note in .sapper/long-memory.md for reusable project patterns, decisions, or fixes.',
+        parameters: {
+          type: 'object',
+          properties: {
+            title: { type: 'string', description: 'Short title for the note' },
+            content: { type: 'string', description: 'Main note content to store' },
+            tags: { type: 'string', description: 'Optional comma-separated tags like bugfix,cli,pattern' }
+          },
+          required: ['content']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'search_memory_notes',
+        description: 'Search markdown long-memory notes in .sapper/long-memory.md.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Search query for notes' }
+          },
+          required: ['query']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'read_memory_notes',
+        description: 'Read the markdown long-memory file at .sapper/long-memory.md.',
+        parameters: {
+          type: 'object',
+          properties: {}
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
         name: 'open_url',
         description: 'Open a URL in the default browser after approval.',
         parameters: {
@@ -5062,30 +5731,58 @@ async function runSapper() {
       
       // Build prompt label with active agent/skills
       const contextPercent = ctxLen ? Math.round((estimatedTokens / ctxLen) * 100) : null;
-      const promptParts = [
-        statusBadge(selectedModel.split(':')[0] || selectedModel, 'action'),
-        activeAgentPromptBadge(),
-      ];
-      const skillsBadge = activeSkillsPromptBadge();
-      if (skillsBadge) {
-        promptParts.push(skillsBadge);
-      }
-      if (contextPercent !== null) {
-        const tone = contextPercent >= 85 ? 'error' : contextPercent >= 65 ? 'warning' : 'neutral';
-        promptParts.push(statusBadge(`${contextPercent}% ctx`, tone));
+      const cleanPrompt = uiCleanMode();
+      const ultraPrompt = uiUltraCleanMode();
+      let promptText;
+
+      if (ultraPrompt) {
+        const modelShort = selectedModel.split(':')[0] || selectedModel;
+        const modeBits = [chalk.white(modelShort)];
+        if (currentAgent) modeBits.push(UI.slate(currentAgent));
+        if (contextPercent !== null) modeBits.push(UI.slate(`${contextPercent}%`));
+        promptText = `\n${modeBits.join(' ')} ${UI.accent('> ' )}`;
+      } else if (cleanPrompt) {
+        const modelShort = selectedModel.split(':')[0] || selectedModel;
+        const modeLineParts = [chalk.white(modelShort)];
+        if (currentAgent) {
+          modeLineParts.push(UI.slate(`agent:${currentAgent}`));
+        } else {
+          modeLineParts.push(UI.slate('default'));
+        }
+        if (contextPercent !== null) {
+          modeLineParts.push(UI.slate(`${contextPercent}% ctx`));
+        }
+
+        const detail = ctxLen
+          ? `${meter(estimatedTokens, ctxLen, 16)} ${UI.slate(`${estimatedTokens.toLocaleString()}/${ctxLen.toLocaleString()} tokens`)}`
+          : UI.slate(`${estimatedTokens.toLocaleString()} estimated tokens`);
+        promptText = `\n${UI.slate(modeLineParts.join(' · '))}\n${detail}\n${UI.accent('› ')} `;
+      } else {
+        const promptParts = [
+          statusBadge(selectedModel.split(':')[0] || selectedModel, 'action'),
+          activeAgentPromptBadge(),
+        ];
+        const skillsBadge = activeSkillsPromptBadge();
+        if (skillsBadge) {
+          promptParts.push(skillsBadge);
+        }
+        if (contextPercent !== null) {
+          const tone = contextPercent >= 85 ? 'error' : contextPercent >= 65 ? 'warning' : 'neutral';
+          promptParts.push(statusBadge(`${contextPercent}% ctx`, tone));
+        }
+
+        const promptDetailLines = [ctxLen
+          ? `${meter(estimatedTokens, ctxLen, 24)} ${UI.slate(`${estimatedTokens.toLocaleString()}/${ctxLen.toLocaleString()} tokens`)}`
+          : UI.slate(`${estimatedTokens.toLocaleString()} estimated tokens`)
+        ];
+        const modeSummary = activeModeSummary({ includeAgent: true, maxSkills: 3 });
+        if (modeSummary) {
+          promptDetailLines.push(UI.slate(modeSummary));
+        }
+        const promptDetail = promptDetailLines.join('\n');
+        promptText = `\n${promptShell(promptParts.join(' '), promptDetail)}`;
       }
 
-      const promptDetailLines = [ctxLen
-        ? `${meter(estimatedTokens, ctxLen, 24)} ${UI.slate(`${estimatedTokens.toLocaleString()}/${ctxLen.toLocaleString()} tokens`)}`
-        : UI.slate(`${estimatedTokens.toLocaleString()} estimated tokens`)
-      ];
-      const modeSummary = activeModeSummary({ includeAgent: true, maxSkills: 3 });
-      if (modeSummary) {
-        promptDetailLines.push(UI.slate(modeSummary));
-      }
-      const promptDetail = promptDetailLines.join('\n');
-
-      const promptText = `\n${promptShell(promptParts.join(' '), promptDetail)}`;
       const input = await safeQuestion(promptText);
       clearPromptEcho(promptText, input);
       
@@ -5141,52 +5838,9 @@ async function runSapper() {
       }
       
       // Handle help command
-      if (input.toLowerCase() === '/help') {
+      if (input.toLowerCase() === '/help' || input.toLowerCase() === '/commands' || input.toLowerCase() === '/cmd') {
         console.log();
-        console.log(sectionTitle('Core', 'daily workflow', 'cyan'));
-        console.log(commandRow('@ or /attach', 'Pick files to attach interactively'));
-        console.log(commandRow('@file', 'Attach a file inline, for example @src/app.js'));
-        console.log(commandRow('/scan', 'Scan the codebase into context'));
-        console.log(commandRow('/index', 'Rebuild the workspace graph'));
-        console.log(commandRow('/graph file', 'Show related files from the graph'));
-        console.log(commandRow('/symbol name', 'Search indexed functions and classes'));
-        console.log(commandRow('/auto', 'Toggle automatic related-file attach'));
-        console.log();
-        console.log(sectionTitle('Context', 'memory and visibility', 'cyan'));
-        console.log(commandRow('/recall', 'Search memory for relevant context'));
-        console.log(commandRow('/fetch <url>', 'Fetch a web page into context'));
-        console.log(commandRow('/reset /clear', 'Clear all current context'));
-        console.log(commandRow('/prune', 'Summarize long context and store memory'));
-        console.log(commandRow('/summary', 'Show or change auto-summary settings'));
-        console.log(commandRow('/shell', 'Inspect shell config and background sessions'));
-        console.log(commandRow('/shell read <id>', 'Read output from a tracked shell session'));
-        console.log(commandRow('/shell stop <id>', 'Stop a tracked shell session'));
-        console.log(commandRow('/context', 'Inspect token usage, summary trigger, and model window'));
-        console.log(commandRow('/ctx <limit>', 'Set context window limit (e.g. /ctx 64k)'));
-        console.log(commandRow('/debug', 'Toggle regex and tool debug output'));
-        console.log(commandRow('/log', 'Show the session activity timeline'));
-        console.log(commandRow('/log stats', 'Show session statistics'));
-        console.log(commandRow('/log file', 'Show log file path and history'));
-        console.log(commandRow('/help', 'Open this command view again'));
-        console.log(commandRow('exit', 'Quit Sapper'));
-        console.log(UI.slate('  Summary settings: /summary  |  /summary phases off  |  /summary trigger 60'));
-        console.log(UI.slate('  Tool config: .sapper/config.json -> toolRoundLimit (default 40)'));
-        console.log(UI.slate('  Shell config: .sapper/config.json -> shell.streamToModel, shell.backgroundMode [off|auto|on], shell.backgroundAfterSeconds, shell.outputChunkChars'));
-        console.log(UI.slate('  Want to see all live shell output? Set shell.backgroundMode to off. thinking.mode only controls model reasoning.'));
-        console.log(UI.slate('  Streaming config: .sapper/config.json -> streaming.showPhaseStatus, streaming.showHeartbeat, streaming.idleNoticeSeconds'));
-        console.log(UI.slate('  Thinking config: .sapper/config.json -> thinking.mode [auto|on|off]'));
-        console.log(UI.slate('  Prompt config: .sapper/config.json -> prompt.prepend, prompt.append, prompt.coreOverride'));
-        console.log();
-        console.log(sectionTitle('Agents', 'specialist modes and skills', 'cyan'));
-        console.log(commandRow('/agents', 'List available agents'));
-        console.log(commandRow('/skills', 'List available skills'));
-        console.log(commandRow('/agentname', 'Switch to an agent such as /reviewer'));
-        console.log(commandRow('/default', 'Return to the default Sapper role'));
-        console.log(commandRow('/use skill', 'Load a skill into the session'));
-        console.log(commandRow('/unload skill', 'Unload a previously loaded skill'));
-        console.log(commandRow('/newagent', 'Create a new agent'));
-        console.log(commandRow('/newskill', 'Create a new skill'));
-        console.log(divider());
+        console.log(renderCommandPalette());
         console.log();
         continue;
       }
@@ -5226,12 +5880,14 @@ async function runSapper() {
             `${chalk.cyan('Methods:')} ${methods.length}\n` +
             chalk.gray('─'.repeat(30)) + '\n' +
             chalk.gray('Usage: /symbol <name> to search'),
-            '📦 Symbol Index', 'cyan'
+            uiCleanMode() ? 'Symbol Index' : '📦 Symbol Index', 'cyan'
           ));
           continue;
         }
         
-        console.log(chalk.cyan(`\n🔍 Searching for: "${query}"...\n`));
+        console.log(uiCleanMode()
+          ? chalk.cyan(`\nSearching for: "${query}"...\n`)
+          : chalk.cyan(`\n🔍 Searching for: "${query}"...\n`));
         const results = searchSymbol(query, workspace);
         
         if (results.length === 0) {
@@ -5243,9 +5899,14 @@ async function runSapper() {
         console.log(chalk.green(`Found ${results.length} symbol${results.length !== 1 ? 's' : ''}:\n`));
         
         for (const sym of results.slice(0, 15)) {
-          const typeIcon = sym.type === 'function' ? chalk.yellow('𝑓') : 
-                          sym.type === 'class' ? chalk.blue('◆') :
-                          sym.type === 'method' ? chalk.cyan('○') : chalk.gray('◇');
+          const clean = uiCleanMode();
+          const typeIcon = sym.type === 'function'
+            ? (clean ? chalk.yellow('f') : chalk.yellow('𝑓'))
+            : sym.type === 'class'
+              ? (clean ? chalk.blue('C') : chalk.blue('◆'))
+              : sym.type === 'method'
+                ? (clean ? chalk.cyan('m') : chalk.cyan('○'))
+                : (clean ? chalk.gray('-') : chalk.gray('◇'));
           const asyncTag = sym.async ? chalk.magenta('async ') : '';
           const params = sym.params !== undefined ? chalk.gray(`(${sym.params})`) : '';
           
@@ -5260,7 +5921,7 @@ async function runSapper() {
         // Offer to add file to context
         if (results.length > 0) {
           console.log();
-          const addToCtx = await safeQuestion(chalk.yellow('Add first match file to context? ') + chalk.gray('(y/n): '));
+          const addToCtx = await safeQuestion(chalk.yellow(promptLabel('questions.addFirstMatchFileToContext', 'Add first match file to context? (y/n): ')));
           if (addToCtx.toLowerCase() === 'y') {
             const targetFile = results[0].file;
             try {
@@ -5310,15 +5971,15 @@ async function runSapper() {
           chalk.gray('─'.repeat(40)) + '\n' +
           `${chalk.white('Related files:')}\n` +
           (related.length > 0 
-            ? related.map(r => `  📄 ${r}`).join('\n')
+            ? related.map(r => uiCleanMode() ? `  - ${r}` : `  📄 ${r}`).join('\n')
             : chalk.gray('  (no related files found)')),
-          '🔗 File Graph', 'cyan'
+          uiCleanMode() ? 'File Graph' : '🔗 File Graph', 'cyan'
         ));
         console.log();
         
         // Offer to add to context
         if (related.length > 0) {
-          const addRelated = await safeQuestion(chalk.yellow('Add this file + related to context? ') + chalk.gray('(y/n): '));
+          const addRelated = await safeQuestion(chalk.yellow(promptLabel('questions.addFileAndRelatedToContext', 'Add this file + related to context? (y/n): ')));
           if (addRelated.toLowerCase() === 'y') {
             let contextContent = `\n📄 ${matchingFile}:\n`;
             contextContent += fs.readFileSync(matchingFile, 'utf8');
@@ -5344,7 +6005,9 @@ async function runSapper() {
       if (input.toLowerCase() === '/auto') {
         sapperConfig.autoAttach = !sapperConfig.autoAttach;
         saveConfig(sapperConfig);
-        console.log(chalk.cyan(`\n🔗 Auto-attach related files: ${sapperConfig.autoAttach ? chalk.green('ON') : chalk.red('OFF')}`));
+        console.log(uiCleanMode()
+          ? chalk.cyan(`\nAuto-attach related files: ${sapperConfig.autoAttach ? chalk.green('ON') : chalk.red('OFF')}`)
+          : chalk.cyan(`\n🔗 Auto-attach related files: ${sapperConfig.autoAttach ? chalk.green('ON') : chalk.red('OFF')}`));
         if (sapperConfig.autoAttach) {
           console.log(chalk.gray('   When you @file, related imports will be auto-included.'));
         } else {
@@ -5481,6 +6144,76 @@ async function runSapper() {
 
         console.log(chalk.yellow(`Unknown summary option: ${subcommand}`));
         console.log(chalk.gray('  Usage: /summary  |  /summary phases [on|off]  |  /summary trigger <percent>  |  /summary reset'));
+        continue;
+      }
+
+      if (input.toLowerCase().startsWith('/ui')) {
+        const arg = input.substring(3).trim();
+        const currentUI = getUIConfig();
+
+        if (!arg || ['status', 'show'].includes(arg.toLowerCase())) {
+          const lines = [
+            `style         ${chalk.white(currentUI.style)}`,
+            `compact       ${chalk.white(currentUI.compactMode)}`,
+            `render mode   ${chalk.white(uiStyle())}`,
+          ];
+          console.log();
+          console.log(box(lines.join('\n'), 'UI Settings', 'cyan'));
+          console.log(UI.slate('  Usage: /ui style [sapper|clean|ultra]  |  /ui compact [auto|on|off]  |  /ui reset'));
+          continue;
+        }
+
+        const [subcommandRaw, ...rest] = arg.split(/\s+/);
+        const subcommand = subcommandRaw.toLowerCase();
+        const value = rest.join(' ').trim();
+
+        if (subcommand === 'reset') {
+          saveConfig({
+            ...sapperConfig,
+            ui: { ...DEFAULT_CONFIG.ui },
+          });
+          console.log(chalk.green('✅ UI settings reset to defaults (style=sapper, compact=auto).'));
+          continue;
+        }
+
+        if (subcommand === 'style') {
+          if (!value) {
+            console.log(chalk.yellow('Usage: /ui style [sapper|clean|ultra]'));
+            continue;
+          }
+
+          const nextStyle = normalizeUIStyle(value);
+          saveConfig({
+            ...sapperConfig,
+            ui: {
+              ...currentUI,
+              style: nextStyle,
+            },
+          });
+          console.log(chalk.green(`✅ UI style set to ${chalk.white(nextStyle)}.`));
+          console.log(chalk.gray('   Restart Sapper to refresh startup screens. Prompt style updates immediately.'));
+          continue;
+        }
+
+        if (subcommand === 'compact') {
+          if (!value) {
+            console.log(chalk.yellow('Usage: /ui compact [auto|on|off]'));
+            continue;
+          }
+
+          const nextCompact = normalizeUICompactMode(value);
+          saveConfig({
+            ...sapperConfig,
+            ui: {
+              ...currentUI,
+              compactMode: nextCompact,
+            },
+          });
+          console.log(chalk.green(`✅ UI compact mode set to ${chalk.white(nextCompact)}.`));
+          continue;
+        }
+
+        console.log(chalk.yellow('Usage: /ui style [sapper|clean|ultra]  |  /ui compact [auto|on|off]  |  /ui reset'));
         continue;
       }
 
@@ -5790,7 +6523,7 @@ async function runSapper() {
           '🤖 New Agent', 'cyan'
         ));
         
-        const agentName = await safeQuestion(chalk.cyan('\nAgent name (lowercase, no spaces): '));
+        const agentName = await safeQuestion(promptQuestion('questions.agentName', '\nAgent name (lowercase, no spaces): '));
         if (!agentName.trim() || !/^[a-z0-9_-]+$/.test(agentName.trim())) {
           console.log(chalk.yellow('Invalid name. Use lowercase letters, numbers, hyphens, underscores only.'));
           continue;
@@ -5802,10 +6535,10 @@ async function runSapper() {
           continue;
         }
         
-        const agentTitle = await safeQuestion(chalk.cyan('Agent title/role: '));
-        const agentExpertise = await safeQuestion(chalk.cyan('Areas of expertise (comma-separated): '));
-        const agentStyle = await safeQuestion(chalk.cyan('Communication style (e.g., professional, casual, technical): '));
-        const agentToolsInput = await safeQuestion(chalk.cyan('Allowed tools (comma-sep, or Enter for all): ') + chalk.gray('read,edit,write,list,ls,search,grep,find,shell,mkdir,rmdir,pwd,cd,cat,head,tail,changes,fetch,memory,open: '));
+        const agentTitle = await safeQuestion(promptQuestion('questions.agentTitle', 'Agent title/role: '));
+        const agentExpertise = await safeQuestion(promptQuestion('questions.agentExpertise', 'Areas of expertise (comma-separated): '));
+        const agentStyle = await safeQuestion(promptQuestion('questions.agentStyle', 'Communication style (e.g., professional, casual, technical): '));
+        const agentToolsInput = await safeQuestion(promptQuestion('questions.agentTools', 'Allowed tools (comma-sep, or Enter for all): read,edit,write,list,ls,search,grep,find,shell,mkdir,rmdir,pwd,cd,cat,head,tail,changes,fetch,memory,open: '));
         
         const expertiseList = agentExpertise.split(',').map(e => `- ${e.trim()}`).join('\n');
         const toolsLine = agentToolsInput.trim() ? `tools: [${agentToolsInput.trim()}]` : 'tools: [read, edit, write, list, search, shell]';
@@ -5828,7 +6561,7 @@ async function runSapper() {
           '📘 New Skill', 'cyan'
         ));
         
-        const skillName = await safeQuestion(chalk.cyan('\nSkill name (lowercase, no spaces): '));
+        const skillName = await safeQuestion(promptQuestion('questions.skillName', '\nSkill name (lowercase, no spaces): '));
         if (!skillName.trim() || !/^[a-z0-9_-]+$/.test(skillName.trim())) {
           console.log(chalk.yellow('Invalid name. Use lowercase letters, numbers, hyphens, underscores only.'));
           continue;
@@ -5840,10 +6573,10 @@ async function runSapper() {
           continue;
         }
         
-        const skillTitle = await safeQuestion(chalk.cyan('Skill title: '));
-        const skillDesc = await safeQuestion(chalk.cyan('Brief description (for /skills listing): '));
-        const skillArgHint = await safeQuestion(chalk.cyan('Argument hint (optional, e.g. "Describe what to do"): '));
-        const skillBody = await safeQuestion(chalk.cyan('Skill knowledge (or Enter for template): '));
+        const skillTitle = await safeQuestion(promptQuestion('questions.skillTitle', 'Skill title: '));
+        const skillDesc = await safeQuestion(promptQuestion('questions.skillDescription', 'Brief description (for /skills listing): '));
+        const skillArgHint = await safeQuestion(promptQuestion('questions.skillArgumentHint', 'Argument hint (optional, e.g. "Describe what to do"): '));
+        const skillBody = await safeQuestion(promptQuestion('questions.skillKnowledge', 'Skill knowledge (or Enter for template): '));
         
         const descLine = skillDesc.trim() || skillTitle.trim() || skillName;
         const argHintLine = skillArgHint.trim() ? `\nargument-hint: "${skillArgHint.trim()}"` : '';
@@ -5916,7 +6649,7 @@ async function runSapper() {
           continue;
         }
         try {
-          const fetchSpinner = ora({ text: chalk.cyan(`🌐 Fetching ${url}...`), spinner: 'dots' }).start();
+          const fetchSpinner = ora({ text: chalk.cyan(`${uiCleanMode() ? 'Fetching' : '🌐 Fetching'} ${url}...`), spinner: 'dots' }).start();
           const rawContent = await fetchUrl(url);
           fetchSpinner.stop();
           
@@ -5932,12 +6665,17 @@ async function runSapper() {
           }
           
           if (text.trim().length > 0) {
-            const webContent = `\n\n══════════════════════════════════════\n🌐 WEB PAGE CONTENT\n══════════════════════════════════════\n\nURL: ${url}\n\n${text}\n`;
+            const webTitle = uiCleanMode() ? 'WEB PAGE CONTENT' : '🌐 WEB PAGE CONTENT';
+            const webContent = `\n\n══════════════════════════════════════\n${webTitle}\n══════════════════════════════════════\n\nURL: ${url}\n\n${text}\n`;
             messages.push({ role: 'user', content: `I fetched this web page for reference:\n${webContent}\n\nUse this information to help me.` });
             ensureSapperDir();
             fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
-            console.log(chalk.green(`🌐 Fetched: ${url} (${Math.round(text.length/1024)}KB)`));
-            console.log(chalk.gray('📝 Added to context. AI can now reference this page.\n'));
+            console.log(uiCleanMode()
+              ? chalk.green(`Fetched: ${url} (${Math.round(text.length/1024)}KB)`)
+              : chalk.green(`🌐 Fetched: ${url} (${Math.round(text.length/1024)}KB)`));
+            console.log(uiCleanMode()
+              ? chalk.gray('Added to context. AI can now reference this page.\n')
+              : chalk.gray('📝 Added to context. AI can now reference this page.\n'));
           } else {
             console.log(chalk.yellow('⚠️  No readable content found on that page.'));
           }
@@ -5961,7 +6699,9 @@ async function runSapper() {
           continue;
         }
         
-        console.log(chalk.cyan(`\n🔍 Searching memory for: "${query}"...`));
+        console.log(uiCleanMode()
+          ? chalk.cyan(`\nSearching memory for: "${query}"...`)
+          : chalk.cyan(`\n🔍 Searching memory for: "${query}"...`));
         const relevant = await findRelevantContext(query, embeddings, 3);
         
         if (relevant.length === 0) {
@@ -5979,7 +6719,7 @@ async function runSapper() {
           });
           
           // Optionally add to context
-          const addToContext = await safeQuestion(chalk.yellow('Add to current context? ') + chalk.gray('(y/n): '));
+          const addToContext = await safeQuestion(chalk.yellow(promptLabel('questions.addMemoryToCurrentContext', 'Add to current context? (y/n): ')));
           if (addToContext.toLowerCase() === 'y') {
             const contextAddition = relevant.map(c => c.text).join('\n---\n');
             messages.push({ 
@@ -5991,10 +6731,99 @@ async function runSapper() {
         }
         continue;
       }
+
+      if (input.toLowerCase().startsWith('/memory')) {
+        const rawArgs = input.slice('/memory'.length).trim();
+
+        if (!rawArgs) {
+          const latestNotes = listLongMemoryNotes(6);
+          console.log(chalk.cyan('\nMarkdown Long Memory'));
+          console.log(chalk.gray(`File: ${LONG_MEMORY_FILE}`));
+          if (latestNotes.length) {
+            console.log(chalk.green(`Recent notes (${latestNotes.length}):`));
+            for (const note of latestNotes) {
+              console.log(`  - ${note}`);
+            }
+          } else {
+            console.log(chalk.gray('No notes yet. Save one with /memory add title ::: note'));
+          }
+          console.log(chalk.gray('Commands: /memory add title ::: note ::: tags | /memory save note | /memory search query | /memory show'));
+          continue;
+        }
+
+        const lowerArgs = rawArgs.toLowerCase();
+        if (lowerArgs === 'show' || lowerArgs === 'read') {
+          const text = loadLongMemoryText();
+          console.log();
+          console.log(box(truncateToolText(text, 16000), 'Long Memory (.md)', 'magenta'));
+          console.log();
+          continue;
+        }
+
+        if (lowerArgs.startsWith('search ')) {
+          const query = rawArgs.slice(7).trim();
+          if (!query) {
+            console.log(chalk.yellow('Usage: /memory search <query>'));
+            continue;
+          }
+          const matches = searchLongMemoryNotes(query, 5);
+          if (!matches.length) {
+            console.log(chalk.yellow(`No markdown notes found for: ${query}`));
+            continue;
+          }
+
+          console.log(chalk.green(`Found ${matches.length} note match${matches.length === 1 ? '' : 'es'}:\n`));
+          matches.forEach((match, index) => {
+            console.log(box(truncateToolText(match, 1200), `Note ${index + 1}`, 'magenta'));
+            console.log();
+          });
+          continue;
+        }
+
+        if (lowerArgs.startsWith('save ')) {
+          const note = rawArgs.slice(5).trim();
+          if (!note) {
+            console.log(chalk.yellow('Usage: /memory save <note>'));
+            continue;
+          }
+          const saved = appendLongMemoryNote({ content: note, source: 'manual-save' });
+          if (!saved.ok) {
+            console.log(chalk.red(`Failed to save note: ${saved.error}`));
+            continue;
+          }
+          console.log(chalk.green(`Saved note: ${saved.title}`));
+          continue;
+        }
+
+        if (lowerArgs.startsWith('add ')) {
+          const payload = rawArgs.slice(4).trim();
+          const parts = payload.split(':::').map(part => part.trim());
+          if (parts.length < 2 || !parts[0] || !parts[1]) {
+            console.log(chalk.yellow('Usage: /memory add <title> ::: <note> ::: <optional tags>'));
+            continue;
+          }
+          const saved = appendLongMemoryNote({
+            title: parts[0],
+            content: parts[1],
+            tags: parts[2] || '',
+            source: 'manual-add',
+          });
+          if (!saved.ok) {
+            console.log(chalk.red(`Failed to save note: ${saved.error}`));
+            continue;
+          }
+          const tagPart = saved.tags.length ? ` [${saved.tags.join(', ')}]` : '';
+          console.log(chalk.green(`Saved note: ${saved.title}${tagPart}`));
+          continue;
+        }
+
+        console.log(chalk.yellow('Usage: /memory | /memory show | /memory search <query> | /memory save <note> | /memory add <title> ::: <note> ::: <optional tags>'));
+        continue;
+      }
       
       // Handle codebase scan command
       if (input.toLowerCase() === '/scan') {
-        console.log(chalk.cyan('\n🔍 Scanning codebase...'));
+        console.log(uiCleanMode() ? chalk.cyan('\nScanning codebase...') : chalk.cyan('\n🔍 Scanning codebase...'));
         const scanResult = scanCodebase('.');
         
         if (scanResult.files.length === 0) {
@@ -6006,9 +6835,13 @@ async function runSapper() {
         const includedCount = scanResult.files.filter(f => !f.skipped).length;
         const skippedCount = scanResult.files.filter(f => f.skipped).length;
         
-        console.log(chalk.green(`✅ Scanned ${includedCount} files (~${Math.round(scanResult.totalSize/1024)}KB)`));
+        console.log(uiCleanMode()
+          ? chalk.green(`Scanned ${includedCount} files (~${Math.round(scanResult.totalSize/1024)}KB)`)
+          : chalk.green(`✅ Scanned ${includedCount} files (~${Math.round(scanResult.totalSize/1024)}KB)`));
         if (skippedCount > 0) {
-          console.log(chalk.yellow(`⏭️  Skipped ${skippedCount} files (too large or limit reached)`));
+          console.log(uiCleanMode()
+            ? chalk.yellow(`Skipped ${skippedCount} files (too large or limit reached)`)
+            : chalk.yellow(`⏭️  Skipped ${skippedCount} files (too large or limit reached)`));
         }
         
         // Add scan to context
@@ -6019,7 +6852,32 @@ async function runSapper() {
         
         ensureSapperDir();
         fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
-        console.log(chalk.gray('📝 Codebase added to context. AI now has full picture.\n'));
+        console.log(uiCleanMode()
+          ? chalk.gray('Codebase added to context. AI now has full picture.\n')
+          : chalk.gray('📝 Codebase added to context. AI now has full picture.\n'));
+        continue;
+      }
+
+      if (input.startsWith('/') && !input.startsWith('//') && !agentHandled) {
+        const commandToken = input.slice(1).trim().split(/\s+/)[0] || '';
+        const suggestions = suggestSlashCommands(commandToken, 5);
+        if (uiCleanMode()) {
+          const lines = [
+            `${chalk.white(input)}`,
+            suggestions.length > 0 ? UI.slate(`did you mean: ${suggestions.join(', ')}`) : UI.slate('no close command suggestions'),
+            UI.slate('use /commands to view the full command palette'),
+            UI.slate('for literal text starting with /, prefix with //'),
+          ];
+          console.log();
+          console.log(box(lines.join('\n'), 'Unknown Command', 'yellow'));
+        } else {
+          console.log(chalk.yellow(`Unknown command: ${input}`));
+          if (suggestions.length > 0) {
+            console.log(UI.slate(`Did you mean: ${suggestions.join(', ')}`));
+          }
+          console.log(UI.slate('Use /commands to view the full command palette.'));
+          console.log(UI.slate('If you meant literal text that starts with /, prefix it with //'));
+        }
         continue;
       }
       
@@ -6062,7 +6920,7 @@ async function runSapper() {
         
         // Ask for the prompt to go with these files
         console.log();
-        const prompt = await safeQuestion(chalk.cyan('Your prompt for these files: '));
+        const prompt = await safeQuestion(promptQuestion('questions.promptForFiles', 'Your prompt for these files: '));
         
         if (!prompt.trim()) {
           console.log(chalk.gray('Cancelled.'));
@@ -6076,7 +6934,7 @@ async function runSapper() {
         // Continue to AI response (don't use 'continue' here)
       } else {
         // Process @file attachments in prompt (e.g., "analyze @package.json" or "fix @src/index.js")
-      let processedInput = input;
+      let processedInput = input.startsWith('//') ? input.slice(1) : input;
       const fileAttachments = [];
       const attachRegex = /@([\w.\/\-_]+)/g;
       let attachMatch;
@@ -6227,7 +7085,7 @@ async function runSapper() {
       
       let active = true;
       while (active) {
-        if (stepMode) await safeQuestion(chalk.gray('[STEP] Press Enter to let AI think...'));
+        if (stepMode) await safeQuestion(chalk.gray(promptLabel('questions.stepContinue', '[STEP] Press Enter to let AI think...')));
         
         spinner.start('Thinking...');
         const aiStartTime = Date.now();
@@ -6598,6 +7456,18 @@ async function runSapper() {
                   result = await tools.recall_memory(args.query);
                   logEntry('tool', { toolType: 'MEMORY', path: args.query, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
                   break;
+                case 'save_memory_note':
+                  result = await tools.save_memory_note(args.title, args.content, args.tags);
+                  logEntry('tool', { toolType: 'MEMORY', path: args.title || 'memory-note', duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+                  break;
+                case 'search_memory_notes':
+                  result = await tools.search_memory_notes(args.query);
+                  logEntry('tool', { toolType: 'MEMORY', path: args.query, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+                  break;
+                case 'read_memory_notes':
+                  result = await tools.read_memory_notes();
+                  logEntry('tool', { toolType: 'MEMORY', path: LONG_MEMORY_FILE, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+                  break;
                 case 'open_url':
                   result = await tools.open_url(args.url);
                   logEntry('tool', { toolType: 'OPEN', path: args.url, duration: Date.now() - toolStart, success: String(result).startsWith('Opened URL'), resultSize: result?.length });
@@ -6815,6 +7685,19 @@ async function runSapper() {
               result = await tools.recall_memory(path);
               logEntry('tool', { toolType: 'MEMORY', path, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
             }
+            else if (type.toLowerCase() === 'memory_note_save') {
+              const [noteContent = '', tagText = ''] = String(content ?? '').split(':::');
+              result = await tools.save_memory_note(path, noteContent, tagText);
+              logEntry('tool', { toolType: 'MEMORY', path, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+            }
+            else if (type.toLowerCase() === 'memory_note_search') {
+              result = await tools.search_memory_notes(path);
+              logEntry('tool', { toolType: 'MEMORY', path, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+            }
+            else if (type.toLowerCase() === 'memory_note_read') {
+              result = await tools.read_memory_notes();
+              logEntry('tool', { toolType: 'MEMORY', path: LONG_MEMORY_FILE, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+            }
             else if (type.toLowerCase() === 'open') {
               result = await tools.open_url(path);
               logEntry('tool', { toolType: 'OPEN', path, duration: Date.now() - toolStart, success: String(result).startsWith('Opened URL'), resultSize: result?.length });
@@ -6826,7 +7709,7 @@ async function runSapper() {
             }
 
             // Log tool execution (for non-shell, non-file specific ones)
-            if (!['list', 'ls', 'read', 'cat', 'head', 'tail', 'mkdir', 'rmdir', 'pwd', 'cd', 'write', 'patch', 'search', 'grep', 'find', 'changes', 'fetch', 'memory', 'open', 'shell'].includes(type.toLowerCase())) {
+            if (!['list', 'ls', 'read', 'cat', 'head', 'tail', 'mkdir', 'rmdir', 'pwd', 'cd', 'write', 'patch', 'search', 'grep', 'find', 'changes', 'fetch', 'memory', 'memory_note_save', 'memory_note_search', 'memory_note_read', 'open', 'shell'].includes(type.toLowerCase())) {
               logEntry('tool', { toolType: type.toUpperCase(), path, duration: Date.now() - toolStart, success: toolSuccess, resultSize: result?.length, error: toolSuccess ? undefined : result });
             }
 
