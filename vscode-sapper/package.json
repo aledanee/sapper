@@ -1,0 +1,111 @@
+{
+  "name": "sapper-vscode",
+  "displayName": "Sapper",
+  "description": "AI-powered coding assistant using local Ollama models — no accounts required",
+  "version": "1.0.0",
+  "publisher": "sapper-iq",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["AI", "Other"],
+  "keywords": ["ai", "ollama", "coding assistant", "sapper", "local ai"],
+  "icon": "images/icon.png",
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sapper",
+          "title": "Sapper",
+          "icon": "$(robot)"
+        }
+      ]
+    },
+    "views": {
+      "sapper": [
+        {
+          "type": "webview",
+          "id": "sapperPanel",
+          "name": "Sapper Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "sapper.openPanel",
+        "title": "Open Sapper",
+        "category": "Sapper",
+        "icon": "$(robot)"
+      },
+      {
+        "command": "sapper.askAboutFile",
+        "title": "Ask Sapper about this file",
+        "category": "Sapper"
+      },
+      {
+        "command": "sapper.newSession",
+        "title": "New Session",
+        "category": "Sapper"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "sapper.askAboutFile",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "sapper.askAboutFile",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Sapper",
+      "properties": {
+        "sapper.ollamaHost": {
+          "type": "string",
+          "default": "http://127.0.0.1:11434",
+          "description": "Ollama server host URL"
+        },
+        "sapper.defaultModel": {
+          "type": "string",
+          "default": "",
+          "description": "Default Ollama model to use (leave empty to prompt on startup)"
+        },
+        "sapper.toolRoundLimit": {
+          "type": "number",
+          "default": 40,
+          "description": "Maximum tool-call rounds per AI response"
+        },
+        "sapper.autoAttach": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically attach workspace context on startup"
+        },
+        "sapper.shellEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow Sapper to run shell commands (with confirmation)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "npx @vscode/vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "ollama": "^0.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}
