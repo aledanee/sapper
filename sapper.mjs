@@ -8634,31 +8634,31 @@ async function runSapper() {
         spinner.start('Thinking...');
         const aiStartTime = Date.now();
         let response;
+        // Build chat options — pass native tools when supported
+        const chatOpts = { model: selectedModel, messages, stream: true };
+        if (effectiveContextLength()) {
+          chatOpts.options = { num_ctx: effectiveContextLength() };
+        }
+        // Thinking can be forced on, forced off, or auto-disabled for simple prompts.
+        if (turnThinkingEnabled) chatOpts.think = true;
+        if (useNativeTools) {
+          // Filter tool defs by agent restrictions if any
+          if (currentAgentTools) {
+            const toolNameMap = {
+              list_directory: 'LIST', read_file: 'READ', search_files: 'SEARCH',
+              write_file: 'WRITE', patch_file: 'PATCH', create_directory: 'MKDIR',
+              ls: 'LS', cat: 'CAT', head: 'HEAD', tail: 'TAIL', grep: 'GREP', find: 'FIND',
+              pwd: 'PWD', cd: 'CD', rmdir: 'RMDIR', changes: 'CHANGES',
+              fetch_web: 'FETCH', recall_memory: 'MEMORY', open_url: 'OPEN', run_shell: 'SHELL'
+            };
+            chatOpts.tools = nativeToolDefs.filter(t => 
+              isToolAllowedForAgent(currentAgentTools, toolNameMap[t.function.name])
+            );
+          } else {
+            chatOpts.tools = nativeToolDefs;
+          }
+        }
         try {
-          // Build chat options — pass native tools when supported
-          const chatOpts = { model: selectedModel, messages, stream: true };
-          if (effectiveContextLength()) {
-            chatOpts.options = { num_ctx: effectiveContextLength() };
-          }
-          // Thinking can be forced on, forced off, or auto-disabled for simple prompts.
-          if (turnThinkingEnabled) chatOpts.think = true;
-          if (useNativeTools) {
-            // Filter tool defs by agent restrictions if any
-            if (currentAgentTools) {
-              const toolNameMap = {
-                list_directory: 'LIST', read_file: 'READ', search_files: 'SEARCH',
-                write_file: 'WRITE', patch_file: 'PATCH', create_directory: 'MKDIR',
-                ls: 'LS', cat: 'CAT', head: 'HEAD', tail: 'TAIL', grep: 'GREP', find: 'FIND',
-                pwd: 'PWD', cd: 'CD', rmdir: 'RMDIR', changes: 'CHANGES',
-                fetch_web: 'FETCH', recall_memory: 'MEMORY', open_url: 'OPEN', run_shell: 'SHELL'
-              };
-              chatOpts.tools = nativeToolDefs.filter(t => 
-                isToolAllowedForAgent(currentAgentTools, toolNameMap[t.function.name])
-              );
-            } else {
-              chatOpts.tools = nativeToolDefs;
-            }
-          }
           response = await ollama.chat(chatOpts);
         } catch (ollamaError) {
           const errMsg = ollamaError && ollamaError.message ? ollamaError.message : String(ollamaError);
