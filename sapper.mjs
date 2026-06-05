@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import ollama from 'ollama';
 import fs from 'fs';
+import os from 'os';
 import { spawn } from 'child_process';
 import chalk from 'chalk';
 import ora from 'ora';
 import readline from 'readline';
 import { fileURLToPath } from 'url';
-import { dirname, join, isAbsolute, resolve as pathResolve } from 'path';
+import { dirname, join, isAbsolute, resolve as pathResolve, extname } from 'path';
 import { marked } from 'marked';
 import { markedTerminal } from 'marked-terminal';
 import { highlight as highlightCode } from 'cli-highlight';
@@ -617,6 +618,12 @@ const TOOL_NAME_MAP = {
   'search': 'SEARCH',
   'grep': 'GREP',
   'find': 'FIND',
+  'regex': 'REGEX',
+  'regex_search': 'REGEX',
+  'rx': 'REGEX',
+  'chunk': 'READ_CHUNK',
+  'read_chunk': 'READ_CHUNK',
+  'read_range': 'READ_CHUNK',
   'shell': 'SHELL',
   'mkdir': 'MKDIR',
   'rmdir': 'RMDIR',
@@ -656,6 +663,8 @@ const TOOL_ALLOWED_BY = {
   SEARCH: ['SEARCH', 'GREP'],
   GREP: ['SEARCH', 'GREP'],
   FIND: ['FIND'],
+  REGEX: ['REGEX'],
+  READ_CHUNK: ['READ_CHUNK', 'READ', 'CAT', 'HEAD', 'TAIL'],
   WRITE: ['WRITE'],
   PATCH: ['PATCH'],
   MKDIR: ['MKDIR'],
@@ -1030,6 +1039,15 @@ function buildSystemPrompt(agentContent = null, skillContents = []) {
 
   prompt += `\n\n${getPromptTemplate('system.importantContext')}`;
 
+  if (chunkingEnabled()) {
+    const ctx = chunkingContextLines();
+    prompt += `\n\nCONTEXT-WINDOW STRATEGY (chunked reading is ON):\n` +
+      `- Do NOT load entire large files. The context window is limited and full-file reads waste it.\n` +
+      `- Two-step approach: (1) SEARCH with grep / regex_search to find the relevant lines, then (2) CHUNK with read_chunk(path, start, end) to pull just those lines plus ~${ctx} lines of surrounding context.\n` +
+      `- For files larger than ~${chunkingAutoAboveLines()} lines, always prefer read_chunk over read_file unless the user explicitly asks for the whole file.\n` +
+      `- regex_search already groups nearby hits into chunks (±${ctx} lines) — read those first before opening anything else.`;
+  }
+
   if (agentContent) {
     prompt += `\n\n${getPromptTemplate('system.activeAgentWrapper', '', { agentContent })}`;
     
@@ -1092,6 +1110,30 @@ const DEFAULT_CONFIG = Object.freeze({
     compactMode: 'auto',
     style: 'sapper',
   }),
+  chunking: Object.freeze({
+    enabled: true,           // Master toggle — agent prefers chunked reads/searches
+    contextLines: 20,        // Lines of context above & below each match
+    maxChunksPerFile: 5,     // Max chunk groups returned per file
+    autoChunkAboveLines: 400,// read_file warns + suggests chunking above this many lines
+  }),
+  voice: Object.freeze({
+    enabled: true,                                                      // Feature available (still triggered manually via /voice)
+    whisperBin: 'whisper-cli',                                          // whisper.cpp CLI binary on PATH
+    whisperStreamBin: 'whisper-stream',                                 // whisper.cpp streaming binary (live mode)
+    model: '/Users/ibrahimihsan/models/ggml-medium.bin',                // Path to a ggml-*.bin (whisper.cpp format)
+    language: 'auto',                                                   // 'auto' for detection, or 'en' / 'ar' / etc.
+    recorder: 'ffmpeg',                                                 // 'ffmpeg' or 'sox'
+    recordSeconds: 8,                                                   // Default mic-record duration
+    device: ':0',                                                       // ffmpeg avfoundation audio input (macOS: ':0' default mic)
+    sampleRate: 16000,                                                  // Whisper expects 16kHz mono
+    translate: false,                                                   // True = translate non-English speech to English
+    autoSend: false,                                                    // If true, transcript is sent to the AI immediately (no confirm prompt)
+    liveStepMs: 500,                                                    // Live mode: re-decode every N ms (lower = snappier, more CPU)
+    liveLengthMs: 5000,                                                 // Live mode: sliding window length in ms
+    liveKeepMs: 200,                                                    // Live mode: ms of audio to carry over between steps
+    archive: true,                                                      // Save every recording (audio + transcript) to disk
+    archiveDir: '.sapper/voice',                                        // Folder for archive (relative to cwd or absolute). A YYYY-MM-DD subfolder is auto-created.
+  }),
   prompt: Object.freeze({
     prepend: '',
     append: '',
@@ -1111,7 +1153,7 @@ RULES:
 5. NO HALLUCINATIONS: If a file doesn't exist, don't guess its content. List the directory instead.`,
       nativeTools: `TOOLS:
 You have function-calling tools available. Call them directly — do NOT use [TOOL:...] text markers.
-Available tools: list_directory, read_file, search_files, write_file, patch_file, create_directory, ls, cat, head, tail, grep, find, pwd, cd, rmdir, changes, fetch_web, recall_memory, save_memory_note, search_memory_notes, read_memory_notes, open_url, run_shell.
+Available tools: list_directory, read_file, search_files, write_file, patch_file, create_directory, ls, cat, head, tail, grep, find, regex_search, read_chunk, pwd, cd, rmdir, changes, fetch_web, recall_memory, save_memory_note, search_memory_notes, read_memory_notes, open_url, run_shell.
 
 PATCH TIPS:
 - For patch_file, set old_text to "LINE:<number>" to replace a specific line by number (most reliable).
@@ -1122,6 +1164,8 @@ EXTRA TOOL TIPS:
 - ls lists directory contents using the current tool working directory when path is omitted.
 - cat reads a full file, while head and tail read the first or last N lines.
 - grep searches file contents, and find searches file or directory names.
+- regex_search runs advanced JS-regex search across source code with capture groups; supports /pattern/flags syntax and an optional include filter (e.g. "js,ts" or "src/").
+- read_chunk reads a specific line range from a file (e.g. lines 40-80). Prefer this over read_file for large files — search first with grep/regex_search, then read_chunk the surrounding window instead of the whole file. This keeps the context window small and responses fast.
 - pwd shows the current tool working directory, and cd changes it for later tool calls.
 - rmdir removes a directory recursively and always asks for approval.
 - changes shows git status and diff output for the current repository or an optional path.
@@ -1146,6 +1190,10 @@ SHELL TIPS:
 - [TOOL:SEARCH]pattern[/TOOL] - Search files for pattern
 - [TOOL:GREP]pattern[/TOOL] - Alias for SEARCH
 - [TOOL:FIND]name_or_fragment[/TOOL] - Find files and directories by name
+- [TOOL:REGEX]/pattern/flags[/TOOL] - Advanced regex search across source code (returns file:line:col + capture groups)
+- [TOOL:REGEX]/pattern/flags:::js,ts[/TOOL] - Same, restricted to file extensions or path substrings
+- [TOOL:CHUNK]path:::40-80[/TOOL] - Read a specific line range from a file (preferred over READ for big files)
+- [TOOL:CHUNK]path:::40-80:::10[/TOOL] - Same with 10 extra context lines above & below the range
 - [TOOL:WRITE]path:::content[/TOOL] - Create/overwrite file
 - [TOOL:PATCH]path:::old|||new[/TOOL] - Edit existing file (exact match, trimmed, or fuzzy)
 - [TOOL:PATCH]path:::LINE:number|||new text[/TOOL] - Replace a specific line by number (PREFERRED — more reliable)
@@ -1231,7 +1279,7 @@ Use the knowledge from the loaded skills above when relevant to the user's reque
       agentTitle: 'Agent title/role: ',
       agentExpertise: 'Areas of expertise (comma-separated): ',
       agentStyle: 'Communication style (e.g., professional, casual, technical): ',
-      agentTools: 'Allowed tools (comma-sep, or Enter for all): read,edit,write,list,ls,search,grep,find,shell,mkdir,rmdir,pwd,cd,cat,head,tail,changes,fetch,memory,open: ',
+      agentTools: 'Allowed tools (comma-sep, or Enter for all): read,read_chunk,edit,write,list,ls,search,grep,find,regex,shell,mkdir,rmdir,pwd,cd,cat,head,tail,changes,fetch,memory,open: ',
       skillName: '\nSkill name (lowercase, no spaces): ',
       skillTitle: 'Skill title: ',
       skillDescription: 'Brief description (for /skills listing): ',
@@ -1396,6 +1444,67 @@ function normalizeUIConfig(uiConfig = {}) {
   };
 }
 
+function normalizeChunkingConfig(chunkingConfig = {}) {
+  if (typeof chunkingConfig === 'boolean') {
+    return { ...DEFAULT_CONFIG.chunking, enabled: chunkingConfig };
+  }
+  if (typeof chunkingConfig === 'string') {
+    return { ...DEFAULT_CONFIG.chunking, enabled: normalizeBoolean(chunkingConfig, DEFAULT_CONFIG.chunking.enabled) };
+  }
+  if (!chunkingConfig || typeof chunkingConfig !== 'object' || Array.isArray(chunkingConfig)) {
+    return { ...DEFAULT_CONFIG.chunking };
+  }
+  return {
+    enabled: normalizeBoolean(chunkingConfig.enabled, DEFAULT_CONFIG.chunking.enabled),
+    contextLines: normalizeIntegerInRange(chunkingConfig.contextLines, DEFAULT_CONFIG.chunking.contextLines, 0, 200),
+    maxChunksPerFile: normalizeIntegerInRange(chunkingConfig.maxChunksPerFile, DEFAULT_CONFIG.chunking.maxChunksPerFile, 1, 50),
+    autoChunkAboveLines: normalizeIntegerInRange(chunkingConfig.autoChunkAboveLines, DEFAULT_CONFIG.chunking.autoChunkAboveLines, 50, 10000),
+  };
+}
+
+function normalizeVoiceConfig(voiceConfig = {}) {
+  if (typeof voiceConfig === 'boolean') {
+    return { ...DEFAULT_CONFIG.voice, enabled: voiceConfig };
+  }
+  if (typeof voiceConfig === 'string') {
+    return { ...DEFAULT_CONFIG.voice, enabled: normalizeBoolean(voiceConfig, DEFAULT_CONFIG.voice.enabled) };
+  }
+  if (!voiceConfig || typeof voiceConfig !== 'object' || Array.isArray(voiceConfig)) {
+    return { ...DEFAULT_CONFIG.voice };
+  }
+  const recorder = String(voiceConfig.recorder ?? '').trim().toLowerCase();
+  return {
+    enabled: normalizeBoolean(voiceConfig.enabled, DEFAULT_CONFIG.voice.enabled),
+    whisperBin: typeof voiceConfig.whisperBin === 'string' && voiceConfig.whisperBin.trim()
+      ? voiceConfig.whisperBin.trim()
+      : DEFAULT_CONFIG.voice.whisperBin,
+    whisperStreamBin: typeof voiceConfig.whisperStreamBin === 'string' && voiceConfig.whisperStreamBin.trim()
+      ? voiceConfig.whisperStreamBin.trim()
+      : DEFAULT_CONFIG.voice.whisperStreamBin,
+    model: typeof voiceConfig.model === 'string' && voiceConfig.model.trim()
+      ? voiceConfig.model.trim()
+      : DEFAULT_CONFIG.voice.model,
+    language: typeof voiceConfig.language === 'string' && voiceConfig.language.trim()
+      ? voiceConfig.language.trim().toLowerCase()
+      : DEFAULT_CONFIG.voice.language,
+    recorder: ['ffmpeg', 'sox'].includes(recorder) ? recorder : DEFAULT_CONFIG.voice.recorder,
+    recordSeconds: normalizeIntegerInRange(voiceConfig.recordSeconds, DEFAULT_CONFIG.voice.recordSeconds, 1, 300),
+    device: typeof voiceConfig.device === 'string' && voiceConfig.device
+      ? voiceConfig.device
+      : DEFAULT_CONFIG.voice.device,
+    sampleRate: normalizeIntegerInRange(voiceConfig.sampleRate, DEFAULT_CONFIG.voice.sampleRate, 8000, 48000),
+    translate: normalizeBoolean(voiceConfig.translate, DEFAULT_CONFIG.voice.translate),
+    autoSend: normalizeBoolean(voiceConfig.autoSend, DEFAULT_CONFIG.voice.autoSend),
+    liveStepMs: normalizeIntegerInRange(voiceConfig.liveStepMs, DEFAULT_CONFIG.voice.liveStepMs, 100, 5000),
+    liveLengthMs: normalizeIntegerInRange(voiceConfig.liveLengthMs, DEFAULT_CONFIG.voice.liveLengthMs, 1000, 30000),
+    liveKeepMs: normalizeIntegerInRange(voiceConfig.liveKeepMs, DEFAULT_CONFIG.voice.liveKeepMs, 0, 2000),
+    archive: normalizeBoolean(voiceConfig.archive, DEFAULT_CONFIG.voice.archive),
+    archiveDir: typeof voiceConfig.archiveDir === 'string' && voiceConfig.archiveDir.trim()
+      ? voiceConfig.archiveDir.trim()
+      : DEFAULT_CONFIG.voice.archiveDir,
+  };
+}
+
 function normalizePromptText(value) {
   if (typeof value === 'string') return value;
   if (value === null || value === undefined) return '';
@@ -1439,6 +1548,8 @@ function normalizeConfig(config = {}) {
     streaming: normalizeStreamingConfig(config.streaming),
     thinking: normalizeThinkingConfig(config.thinking),
     ui: normalizeUIConfig(config.ui),
+    chunking: normalizeChunkingConfig(config.chunking),
+    voice: normalizeVoiceConfig(config.voice),
     prompt: normalizePromptConfig(config.prompt),
   };
 }
@@ -1551,6 +1662,18 @@ function renderConfigFile(config) {
   lines.push('');
   lines.push('  // Frontend style and layout');
   appendConfigProperty(lines, 'ui', config.ui);
+
+  lines.push('');
+  lines.push('  // Chunked / windowed reading');
+  lines.push('  // Keeps context small: agent reads relevant line ranges (e.g. 40-80) instead of whole files.');
+  lines.push('  // Set enabled to false to disable chunk grouping in regex_search and the read_chunk tool.');
+  appendConfigProperty(lines, 'chunking', config.chunking);
+
+  lines.push('');
+  lines.push('  // Voice input (Whisper)');
+  lines.push('  // Requires whisper.cpp `whisper-cli` and ffmpeg (or sox) on PATH, plus a ggml-*.bin model file.');
+  lines.push('  // Trigger from the chat with /voice record [seconds] or /voice file <path>.');
+  appendConfigProperty(lines, 'voice', config.voice);
 
   lines.push('');
   lines.push('  // Prompt customization');
@@ -1743,6 +1866,34 @@ function uiCleanMode() {
 
 function uiUltraCleanMode() {
   return uiStyle() === 'ultra';
+}
+
+function getChunkingConfig() {
+  return normalizeChunkingConfig(sapperConfig.chunking);
+}
+
+function chunkingEnabled() {
+  return getChunkingConfig().enabled;
+}
+
+function chunkingContextLines() {
+  return getChunkingConfig().contextLines;
+}
+
+function chunkingMaxPerFile() {
+  return getChunkingConfig().maxChunksPerFile;
+}
+
+function chunkingAutoAboveLines() {
+  return getChunkingConfig().autoChunkAboveLines;
+}
+
+function getVoiceConfig() {
+  return normalizeVoiceConfig(sapperConfig.voice);
+}
+
+function voiceEnabled() {
+  return getVoiceConfig().enabled;
 }
 
 function streamPhaseStatusEnabled() {
@@ -2880,6 +3031,12 @@ const COMMAND_GROUPS = Object.freeze([
       ['/reset /clear', 'Clear all current context'],
       ['/prune', 'Summarize long context and store memory'],
       ['/summary', 'Show or change auto-summary settings'],
+      ['/chunking', 'Toggle chunked reading (search-then-window) and context size'],
+      ['/voice, /v', 'Voice input via Whisper (record from mic or transcribe a file)'],
+      ['/v live', 'Live preview while you speak, clean final transcript on stop'],
+      ['/v models', 'List available Whisper models and pick one interactively'],
+      ['/v record', 'Record — press any key to stop, then transcribe'],
+      ['/v record <secs>', 'Record for a fixed duration, then transcribe'],
       ['/ui', 'Show or change frontend style and compact mode'],
       ['/ui style clean', 'Switch to a clean Codex/OpenCode-like frontend'],
       ['/ui style ultra', 'Switch to an ultra-clean single-line frontend'],
@@ -4483,6 +4640,276 @@ function findPathsByName(patternValue, startPathValue = '.') {
   return `${header}\n${body}${truncated}`;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// REGEX SEARCH — advanced source-code search using JS RegExp
+// Accepts /pattern/flags or raw pattern (default flags = 'i').
+// Optional include filter: comma-separated extensions (js,ts) or
+// path substrings (src/,routes). Returns file:line:col matches
+// with capture groups, capped to keep context small.
+// ─────────────────────────────────────────────────────────────────
+function parseRegexPattern(rawPattern) {
+  const raw = String(rawPattern ?? '').trim();
+  if (!raw) return { error: 'Missing regex pattern' };
+
+  let body = raw;
+  let flags = 'i';
+  const delimMatch = raw.match(/^\/(.+)\/([gimsuy]*)$/);
+  if (delimMatch) {
+    body = delimMatch[1];
+    flags = delimMatch[2] || 'i';
+  }
+  // Always evaluate per-line so we can report line numbers; strip a user-supplied 'g'.
+  flags = flags.replace(/g/g, '');
+
+  try {
+    return { regex: new RegExp(body, flags), body, flags };
+  } catch (error) {
+    return { error: `Invalid regex: ${error.message}` };
+  }
+}
+
+function matchesIncludeFilter(relativePath, includeList) {
+  if (!includeList || includeList.length === 0) return true;
+  const lower = relativePath.toLowerCase();
+  for (const token of includeList) {
+    const norm = token.toLowerCase();
+    if (!norm) continue;
+    // Extension-only token (e.g. "js" or ".js")
+    if (/^\.?[a-z0-9]+$/i.test(norm)) {
+      const ext = norm.startsWith('.') ? norm : `.${norm}`;
+      if (lower.endsWith(ext)) return true;
+    } else if (lower.includes(norm)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const REGEX_TEXT_EXTENSIONS = new Set([
+  'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs',
+  'py', 'rb', 'go', 'rs', 'java', 'kt', 'kts', 'scala',
+  'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'swift', 'm', 'mm',
+  'php', 'pl', 'lua', 'sh', 'bash', 'zsh', 'fish', 'ps1',
+  'html', 'htm', 'css', 'scss', 'sass', 'less', 'vue', 'svelte',
+  'json', 'jsonc', 'yaml', 'yml', 'toml', 'ini', 'env',
+  'md', 'mdx', 'txt', 'rst', 'tex',
+  'sql', 'graphql', 'gql', 'proto', 'xml',
+]);
+
+function isLikelyTextFile(name) {
+  const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+  if (!ext) return false;
+  return REGEX_TEXT_EXTENSIONS.has(ext);
+}
+
+// Read a specific line range from a file (1-based, inclusive).
+// If start/end are omitted, returns the whole file capped at maxLines.
+// Always emits gutter-style line numbers so the agent knows exact positions.
+function readChunk(pathValue, startValue, endValue, contextValue) {
+  const trimmedPath = typeof pathValue === 'string' ? pathValue.trim() : '';
+  if (!trimmedPath) return 'Error reading chunk: missing file path';
+
+  let content;
+  try {
+    content = fs.readFileSync(resolveToolPath(trimmedPath), 'utf8');
+  } catch (error) {
+    return `Error reading chunk: ${error.message}`;
+  }
+
+  const lines = content === '' ? [] : content.split('\n');
+  if (lines.length === 0) {
+    return `Chunk of ${trimmedPath}: (empty file)`;
+  }
+
+  const ctx = Number.isFinite(Number(contextValue)) ? Math.max(0, Math.round(Number(contextValue))) : 0;
+  let start = Number(startValue);
+  let end = Number(endValue);
+
+  if (!Number.isFinite(start) || start < 1) start = 1;
+  if (!Number.isFinite(end) || end < start) end = Math.min(lines.length, start + 60);
+
+  // Expand by context window when caller asked for it
+  start = Math.max(1, start - ctx);
+  end = Math.min(lines.length, end + ctx);
+
+  const MAX_CHUNK_LINES = 400;
+  if (end - start + 1 > MAX_CHUNK_LINES) {
+    end = start + MAX_CHUNK_LINES - 1;
+  }
+
+  const gutterWidth = String(end).length;
+  const slice = lines.slice(start - 1, end).map((line, idx) => {
+    const lineNo = String(start + idx).padStart(gutterWidth, ' ');
+    return `${lineNo} | ${line}`;
+  });
+
+  const header = `Chunk of ${trimmedPath} (lines ${start}-${end} of ${lines.length}):`;
+  const footer = end < lines.length || start > 1
+    ? `\n... (${start > 1 ? `${start - 1} line(s) before` : ''}${start > 1 && end < lines.length ? ', ' : ''}${end < lines.length ? `${lines.length - end} line(s) after` : ''})`
+    : '';
+  return `${header}\n${slice.join('\n')}${footer}`;
+}
+
+function regexSearch(patternValue, includeValue = '', startPathValue = '.') {
+  const parsed = parseRegexPattern(patternValue);
+  if (parsed.error) return `Error: ${parsed.error}`;
+  const { regex, body, flags } = parsed;
+
+  const startPath = typeof startPathValue === 'string' && startPathValue.trim() ? startPathValue.trim() : '.';
+  const resolvedStart = resolveToolPath(startPath);
+  if (!fs.existsSync(resolvedStart)) {
+    return `Error: ${startPath} does not exist`;
+  }
+
+  const includeList = String(includeValue ?? '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const useChunks = chunkingEnabled();
+  const ctxLines = chunkingContextLines();
+  const maxChunksFile = chunkingMaxPerFile();
+
+  const MAX_MATCHES = 80;
+  const MAX_FILES_SCANNED = 2000;
+  const MAX_FILE_BYTES = 512 * 1024; // 512KB — skip huge files
+  const MAX_LINE_PREVIEW = 240;
+
+  const matches = [];
+  const chunkBlocks = []; // { file, start, end, body }
+  let filesScanned = 0;
+  let filesMatched = 0;
+  let truncated = false;
+
+  const visit = (dirPath, displayPrefix = '') => {
+    if (truncated) return;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    } catch { return; }
+
+    for (const entry of entries) {
+      if (truncated) return;
+      if (entry.name.startsWith('.')) continue;
+      if (shouldIgnore(entry.name)) continue;
+
+      const fullPath = join(dirPath, entry.name);
+      const relativePath = displayPrefix ? `${displayPrefix}/${entry.name}` : entry.name;
+      if (shouldIgnore(relativePath)) continue;
+
+      if (entry.isDirectory()) {
+        visit(fullPath, relativePath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (!isLikelyTextFile(entry.name)) continue;
+      if (!matchesIncludeFilter(relativePath, includeList)) continue;
+
+      filesScanned++;
+      if (filesScanned > MAX_FILES_SCANNED) { truncated = true; return; }
+
+      let stat;
+      try { stat = fs.statSync(fullPath); } catch { continue; }
+      if (stat.size > MAX_FILE_BYTES) continue;
+
+      let content;
+      try { content = fs.readFileSync(fullPath, 'utf8'); } catch { continue; }
+
+      const lines = content.split('\n');
+      let fileMatchCount = 0;
+      const fileMatchLines = []; // 1-based line numbers of hits in this file
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        regex.lastIndex = 0;
+        const m = line.match(regex);
+        if (!m) continue;
+
+        const col = (m.index ?? 0) + 1;
+        let preview = line.trim();
+        if (preview.length > MAX_LINE_PREVIEW) {
+          preview = `${preview.slice(0, MAX_LINE_PREVIEW)}…`;
+        }
+        let entryLine = `${relativePath}:${i + 1}:${col}: ${preview}`;
+        if (m.length > 1) {
+          const groups = m.slice(1).map((g, idx) => `$${idx + 1}=${g === undefined ? '∅' : JSON.stringify(g)}`).join(' ');
+          entryLine += `\n    └─ ${groups}`;
+        }
+        matches.push(entryLine);
+        fileMatchLines.push(i + 1);
+        fileMatchCount++;
+
+        if (matches.length >= MAX_MATCHES) { truncated = true; break; }
+        if (fileMatchCount >= 10) break; // Cap per-file noise
+      }
+      if (fileMatchCount > 0) filesMatched++;
+
+      // Group nearby matches into chunk windows (lines ± ctxLines)
+      if (useChunks && fileMatchLines.length > 0) {
+        const groups = [];
+        let curStart = Math.max(1, fileMatchLines[0] - ctxLines);
+        let curEnd = Math.min(lines.length, fileMatchLines[0] + ctxLines);
+        for (let k = 1; k < fileMatchLines.length; k++) {
+          const ln = fileMatchLines[k];
+          const winStart = Math.max(1, ln - ctxLines);
+          const winEnd = Math.min(lines.length, ln + ctxLines);
+          if (winStart <= curEnd + 1) {
+            curEnd = Math.max(curEnd, winEnd);
+          } else {
+            groups.push([curStart, curEnd]);
+            curStart = winStart;
+            curEnd = winEnd;
+            if (groups.length >= maxChunksFile) break;
+          }
+        }
+        if (groups.length < maxChunksFile) groups.push([curStart, curEnd]);
+
+        const gutterWidthMax = String(lines.length).length;
+        for (const [s, e] of groups.slice(0, maxChunksFile)) {
+          const sliceText = lines.slice(s - 1, e).map((ln, idx) => {
+            const num = String(s + idx).padStart(gutterWidthMax, ' ');
+            return `${num} | ${ln}`;
+          }).join('\n');
+          chunkBlocks.push({ file: relativePath, start: s, end: e, body: sliceText });
+        }
+      }
+    }
+  };
+
+  let startStat;
+  try { startStat = fs.statSync(resolvedStart); } catch (e) { return `Error: ${e.message}`; }
+  if (startStat.isFile()) {
+    visit(dirname(resolvedStart), '');
+  } else {
+    visit(resolvedStart);
+  }
+
+  if (matches.length === 0) {
+    return `No regex matches for /${body}/${flags}${includeList.length ? ` (filter: ${includeList.join(',')})` : ''}\nFiles scanned: ${filesScanned}`;
+  }
+
+  const header = `Found ${matches.length}${truncated ? '+' : ''} match${matches.length === 1 ? '' : 'es'} for /${body}/${flags}` +
+    ` in ${filesMatched} file${filesMatched === 1 ? '' : 's'} (scanned ${filesScanned})` +
+    `${includeList.length ? ` · filter: ${includeList.join(',')}` : ''}` +
+    `${useChunks ? ` · chunked ±${ctxLines} lines` : ''}`;
+  const footer = truncated ? `\n... (results truncated at ${MAX_MATCHES} matches)` : '';
+
+  let output = `${header}\n${matches.join('\n')}${footer}`;
+
+  if (useChunks && chunkBlocks.length > 0) {
+    const MAX_TOTAL_CHUNKS = 25;
+    const shown = chunkBlocks.slice(0, MAX_TOTAL_CHUNKS);
+    const chunkText = shown.map(c =>
+      `── ${c.file}:${c.start}-${c.end} ──\n${c.body}`
+    ).join('\n\n');
+    const chunkFooter = chunkBlocks.length > shown.length
+      ? `\n\n... (${chunkBlocks.length - shown.length} more chunk(s) omitted — narrow the pattern or use read_chunk for specific ranges)`
+      : '';
+    output += `\n\n=== Code chunks (±${ctxLines} lines of context) ===\n${chunkText}${chunkFooter}`;
+  }
+
+  return output;
+}
+
 function truncateToolText(textValue = '', maxChars = 24000) {
   const text = String(textValue ?? '').trim();
   if (!text) return '';
@@ -4492,6 +4919,501 @@ function truncateToolText(textValue = '', maxChars = 24000) {
 
 function shellQuote(value = '') {
   return `'${String(value ?? '').replace(/'/g, `'\\''`)}'`;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// VOICE INPUT (Whisper)
+// Uses whisper.cpp `whisper-cli` for transcription and ffmpeg (or
+// sox) to capture from the microphone. Triggered by /voice.
+// ─────────────────────────────────────────────────────────────────
+function recordAudioToFile(outPath, { seconds, recorder, device, sampleRate }) {
+  return new Promise((resolve) => {
+    let cmd, args;
+    if (recorder === 'sox') {
+      // `rec` reads from default mic
+      cmd = 'rec';
+      args = ['-q', '-c', '1', '-r', String(sampleRate), outPath, 'trim', '0', String(seconds)];
+    } else {
+      // ffmpeg + avfoundation on macOS, alsa on linux. We default to macOS-style ':0'.
+      const platform = process.platform;
+      const inputFmt = platform === 'darwin' ? 'avfoundation'
+                      : platform === 'linux' ? 'alsa'
+                      : 'dshow';
+      cmd = 'ffmpeg';
+      args = [
+        '-loglevel', 'error',
+        '-y',
+        '-f', inputFmt,
+        '-i', device,
+        '-t', String(seconds),
+        '-ar', String(sampleRate),
+        '-ac', '1',
+        outPath,
+      ];
+    }
+    const proc = spawn(cmd, args);
+    let stderr = '';
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.on('error', (err) => resolve({ ok: false, error: `Failed to start ${cmd}: ${err.message}` }));
+    proc.on('close', (code) => {
+      if (code === 0 && fs.existsSync(outPath)) resolve({ ok: true });
+      else resolve({ ok: false, error: stderr.trim() || `${cmd} exited with code ${code}` });
+    });
+  });
+}
+
+// Push-to-stop recording: records until the user presses any key (or Ctrl-C).
+// Returns { ok, error?, durationMs }.
+function recordAudioUntilKey(outPath, { recorder, device, sampleRate, maxSeconds = 600 }) {
+  return new Promise((resolve) => {
+    let cmd, args;
+    const platform = process.platform;
+    if (recorder === 'sox') {
+      cmd = 'rec';
+      args = ['-q', '-c', '1', '-r', String(sampleRate), outPath, 'trim', '0', String(maxSeconds)];
+    } else {
+      const inputFmt = platform === 'darwin' ? 'avfoundation'
+                      : platform === 'linux' ? 'alsa'
+                      : 'dshow';
+      cmd = 'ffmpeg';
+      args = [
+        '-loglevel', 'error',
+        '-y',
+        '-f', inputFmt,
+        '-i', device,
+        '-t', String(maxSeconds),
+        '-ar', String(sampleRate),
+        '-ac', '1',
+        outPath,
+      ];
+    }
+
+    const proc = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stderr = '';
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+
+    // Pause readline so its keypress listeners don't eat our input.
+    const rlWasPaused = rl ? rl.paused : true;
+    try { if (rl && !rl.paused) rl.pause(); } catch {}
+
+    const wasRaw = !!process.stdin.isRaw;
+    let listenerAttached = false;
+    let stopped = false;
+    const startTs = Date.now();
+
+    const cleanupStdin = () => {
+      try { process.stdin.removeListener('data', onKey); } catch {}
+      try { if (process.stdin.isTTY) process.stdin.setRawMode(wasRaw); } catch {}
+      listenerAttached = false;
+    };
+
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      cleanupStdin();
+      if (recorder === 'sox') {
+        try { proc.kill('SIGINT'); } catch {}
+      } else {
+        // ffmpeg: send 'q' on stdin for a clean shutdown (writes a valid WAV).
+        try { proc.stdin.write('q'); } catch {}
+        // Hard-stop fallback if it doesn't exit on its own.
+        const t = setTimeout(() => { try { proc.kill('SIGINT'); } catch {} }, 1500);
+        if (t.unref) t.unref();
+      }
+    };
+
+    const onKey = (chunk) => {
+      // Ctrl-C → also stop (and let SIGINT bubble below via parent handlers)
+      stop();
+    };
+
+    // Ticker
+    let tickInterval = null;
+    const drawTick = () => {
+      const elapsed = ((Date.now() - startTs) / 1000).toFixed(1);
+      process.stdout.write('\r' + chalk.red('🔴 ') + chalk.cyan(`Recording ${elapsed}s  `) + chalk.gray('— press any key to stop'));
+    };
+    const clearTick = () => {
+      if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
+      // Clear the status line
+      process.stdout.write('\r' + ' '.repeat(70) + '\r');
+    };
+
+    try {
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(true);
+        process.stdin.resume();
+        process.stdin.on('data', onKey);
+        listenerAttached = true;
+        drawTick();
+        tickInterval = setInterval(drawTick, 100);
+      } else {
+        console.log(chalk.yellow(`No TTY — recording up to ${maxSeconds}s then auto-stopping.`));
+      }
+    } catch {}
+
+    proc.on('error', (err) => {
+      clearTick();
+      cleanupStdin();
+      try { if (rl && !rlWasPaused) rl.resume(); } catch {}
+      resolve({ ok: false, error: `Failed to start ${cmd}: ${err.message}` });
+    });
+
+    proc.on('close', (code) => {
+      clearTick();
+      cleanupStdin();
+      try { if (rl && !rlWasPaused) rl.resume(); } catch {}
+      const durationMs = Date.now() - startTs;
+      // ffmpeg sometimes exits non-zero when killed; accept if the file exists and isn't tiny.
+      const fileOk = fs.existsSync(outPath) && (() => {
+        try { return fs.statSync(outPath).size > 1000; } catch { return false; }
+      })();
+      if (fileOk || (code === 0 && fs.existsSync(outPath))) {
+        return resolve({ ok: true, durationMs });
+      }
+      resolve({ ok: false, error: stderr.trim() || `${cmd} exited with code ${code}` });
+    });
+  });
+}
+
+function runWhisperCli(audioPath, { whisperBin, model, language, translate }) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(model)) {
+      return resolve({ ok: false, error: `Whisper model not found: ${model}` });
+    }
+    if (!fs.existsSync(audioPath)) {
+      return resolve({ ok: false, error: `Audio file not found: ${audioPath}` });
+    }
+
+    // whisper-cli writes <audio>.txt next to the input when --output-txt is set.
+    const outTxt = `${audioPath}.txt`;
+    try { if (fs.existsSync(outTxt)) fs.unlinkSync(outTxt); } catch {}
+
+    const args = [
+      '-m', model,
+      '-f', audioPath,
+      '-l', language || 'auto',
+      '-nt',                  // no timestamps
+      '-np',                  // no progress / debug prints
+      '-sns',                 // suppress non-speech tokens (kills "you"/"Thank you" hallucinations)
+      '--no-fallback',        // don't escalate temperature into garbage
+      '--temperature', '0',   // deterministic decoding
+      '-bs', '5',             // beam search
+      '-bo', '5',             // best-of
+      '--output-txt',         // write <audio>.txt
+    ];
+    if (translate) args.push('-tr');
+
+    const proc = spawn(whisperBin, args);
+    let stderr = '';
+    let stdout = '';
+    proc.stdout.on('data', (d) => { stdout += d.toString(); });
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.on('error', (err) => resolve({ ok: false, error: `Failed to start ${whisperBin}: ${err.message}` }));
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        return resolve({ ok: false, error: stderr.trim() || `${whisperBin} exited with code ${code}` });
+      }
+      let text = '';
+      try {
+        if (fs.existsSync(outTxt)) text = fs.readFileSync(outTxt, 'utf8');
+      } catch {}
+      if (!text.trim()) text = stdout; // fallback
+      try { if (fs.existsSync(outTxt)) fs.unlinkSync(outTxt); } catch {}
+      // Strip whisper's silence/non-speech markers, timestamps, and common
+      // hallucinations that surface on silence (multilingual).
+      let cleaned = text
+        .replace(/\r/g, '')
+        .replace(/\[\d{2}:\d{2}:\d{2}\.\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}\.\d{3}\]/g, '')
+        .replace(/\[BLANK_AUDIO\]/gi, '')
+        .replace(/\(.*?silence.*?\)/gi, '')
+        // Common subtitle/end-card hallucinations Whisper learned from training data:
+        .replace(/Продолжение следует\.{0,3}/gi, '')
+        .replace(/Thanks? for watching!?/gi, '')
+        .replace(/Subtitles by[^\n.]*/gi, '')
+        .replace(/Subtitles? (made|provided) by[^\n.]*/gi, '')
+        .replace(/ترجمة[^\n.]*/g, '')
+        .replace(/字幕[^\n。]*/g, '')
+        .replace(/시청해주셔서 감사합니다/g, '')
+        .replace(/ご視聴ありがとうございました/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      // If the entire result is just a bare hallucination word, drop it.
+      const HALLUCINATION_WHOLE = /^(you|thanks?|thank you\.?|okay\.?|um\.?|uh\.?|\.+|bye\.?|hi\.?)$/i;
+      if (HALLUCINATION_WHOLE.test(cleaned)) cleaned = '';
+      resolve({ ok: true, text: cleaned });
+    });
+  });
+}
+
+// Live transcription using whisper-stream. Streams partial text to the terminal
+// as the user is speaking. Press any key to stop. Returns the cleaned full
+// transcript on stop.
+function runWhisperLive({ whisperStreamBin, model, language, translate, stepMs, lengthMs, keepMs }) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(model)) {
+      return resolve({ ok: false, error: `Whisper model not found: ${model}` });
+    }
+
+    // We ALWAYS save audio in live mode. The streamed text is for live preview
+    // only — the final transcript comes from a single clean whisper-cli pass on
+    // the saved audio (no overlap-induced duplicates).
+    const saStartTs = Date.now();
+    const saTmpDir = fs.mkdtempSync(join(os.tmpdir(), 'sapper-live-sa-'));
+
+    const args = [
+      '-m', model,
+      '-c', '-1',                // default capture device
+      '--step', String(stepMs),
+      '--length', String(lengthMs),
+      '--keep', String(keepMs),
+      '-l', language || 'auto',  // whisper-stream supports 'auto' (real-time language detection)
+      '--keep-context',
+      '-sa',                     // save the captured audio (we'll re-transcribe it)
+    ];
+    if (translate) args.push('-tr');
+
+    let proc;
+    try {
+      proc = spawn(whisperStreamBin, args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        cwd: saTmpDir,
+      });
+    } catch (err) {
+      try { fs.rmSync(saTmpDir, { recursive: true, force: true }); } catch {}
+      return resolve({ ok: false, error: `Failed to start ${whisperStreamBin}: ${err.message}` });
+    }
+
+    // Pause readline so its keypress listeners don't eat our key.
+    const rlWasPaused = rl ? rl.paused : true;
+    try { if (rl && !rl.paused) rl.pause(); } catch {}
+
+    const wasRaw = !!process.stdin.isRaw;
+    let stopped = false;
+    let stderr = '';
+    let initSeen = false;
+
+    // Print a header banner
+    console.log();
+    console.log(chalk.red('🔴 ') + chalk.cyan('Live preview ') + chalk.gray('— press any key to stop. Final transcript will be cleaner.'));
+    if (!language || language === 'auto') {
+      console.log(chalk.yellow('  💡 Tip: lock language for much better quality, e.g. ') + chalk.white('/v lang ar') + chalk.yellow(' (Arabic) or ') + chalk.white('/v lang en'));
+    } else {
+      console.log(chalk.gray(`  language: ${language}`));
+    }
+    console.log(chalk.gray('─'.repeat(Math.min(70, process.stdout.columns || 70))));
+
+    const cleanupStdin = () => {
+      try { process.stdin.removeListener('data', onKey); } catch {}
+      try { if (process.stdin.isTTY) process.stdin.setRawMode(wasRaw); } catch {}
+    };
+
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      cleanupStdin();
+      try { proc.kill('SIGINT'); } catch {}
+      // Hard-kill if it lingers
+      const t = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 1500);
+      if (t.unref) t.unref();
+    };
+
+    const onKey = () => { stop(); };
+
+    try {
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(true);
+        process.stdin.resume();
+        process.stdin.on('data', onKey);
+      }
+    } catch {}
+
+    // Filter whisper-stream output for live preview only (we discard it later).
+    const isNoise = (line) => {
+      const s = line.trim();
+      if (!s) return true;
+      if (/^ggml_|^load_backend:|^whisper_|^main:|^init:|^system_info:/i.test(s)) return true;
+      if (/^\[Start speaking\]/i.test(s)) return true;
+      if (/^processing|^n_new_line|^n_threads|^step_ms|^length_ms|^keep_ms|^vad_thold|^freq_thold/i.test(s)) return true;
+      if (/^use gpu|^flash attn|^audio_ctx|^model: |^translate|^language/i.test(s)) return true;
+      return false;
+    };
+
+    // Show only the LAST line of each chunk (collapse the overlap visually).
+    let lastShown = '';
+    proc.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l && !isNoise(l));
+      if (lines.length === 0) return;
+      initSeen = true;
+      const latest = lines[lines.length - 1];
+      // Skip the dummy [BLANK_AUDIO] markers
+      if (/^\[?BLANK_AUDIO\]?$/i.test(latest)) return;
+      if (latest === lastShown) return;
+      lastShown = latest;
+      process.stdout.write(chalk.white('  ' + latest) + '\n');
+    });
+
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on('error', (err) => {
+      cleanupStdin();
+      try { if (rl && !rlWasPaused) rl.resume(); } catch {}
+      try { fs.rmSync(saTmpDir, { recursive: true, force: true }); } catch {}
+      resolve({ ok: false, error: `Failed to start ${whisperStreamBin}: ${err.message}` });
+    });
+
+    proc.on('close', () => {
+      cleanupStdin();
+      try { if (rl && !rlWasPaused) rl.resume(); } catch {}
+
+      console.log(chalk.gray('─'.repeat(Math.min(70, process.stdout.columns || 70))));
+
+      // Locate the audio file produced by -sa (named like 20260605104159.wav).
+      let savedAudio = null;
+      try {
+        const files = fs.readdirSync(saTmpDir)
+          .filter(f => f.toLowerCase().endsWith('.wav'))
+          .map(f => ({ f, full: join(saTmpDir, f), mtime: fs.statSync(join(saTmpDir, f)).mtimeMs, size: fs.statSync(join(saTmpDir, f)).size }))
+          .filter(x => x.mtime >= saStartTs - 1000 && x.size > 1000)
+          .sort((a, b) => b.mtime - a.mtime);
+        if (files.length) savedAudio = files[0].full;
+      } catch {}
+
+      if (!savedAudio) {
+        try { fs.rmSync(saTmpDir, { recursive: true, force: true }); } catch {}
+        const errMsg = stderr.trim().split('\n').slice(-3).join('\n') || 'no audio was captured';
+        return resolve({ ok: false, error: errMsg });
+      }
+
+      resolve({ ok: true, audioPath: savedAudio, audioTmpDir: saTmpDir });
+    });
+  });
+}
+
+// Save a recording (audio + transcript) under voice.archiveDir/YYYY-MM-DD/.
+// Returns { ok, audio?, transcript?, error? } with the final saved paths.
+function archiveVoiceRecording({ sourceAudio, transcript, mode = 'record', extHint = null } = {}) {
+  try {
+    const cfg = getVoiceConfig();
+    if (!cfg.archive) return { ok: false, error: 'archiving disabled' };
+
+    const baseDir = isAbsolute(cfg.archiveDir)
+      ? cfg.archiveDir
+      : pathResolve(getToolWorkingDirectory(), cfg.archiveDir);
+
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mi = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    const dayDir = join(baseDir, `${yyyy}-${mm}-${dd}`);
+    fs.mkdirSync(dayDir, { recursive: true });
+
+    const stamp = `${hh}${mi}${ss}`;
+    const safeMode = String(mode).replace(/[^a-z0-9_-]/gi, '');
+    const baseName = `${stamp}-${safeMode}`;
+
+    let audioOut = null;
+    if (sourceAudio && fs.existsSync(sourceAudio)) {
+      const ext = extHint || extname(sourceAudio) || '.wav';
+      audioOut = join(dayDir, `${baseName}${ext}`);
+      try {
+        fs.copyFileSync(sourceAudio, audioOut);
+      } catch (err) {
+        // Fall back to rename if same FS
+        try { fs.renameSync(sourceAudio, audioOut); } catch { audioOut = null; }
+      }
+    }
+
+    let txtOut = null;
+    const cleanTranscript = (transcript || '').trim();
+    if (cleanTranscript) {
+      txtOut = join(dayDir, `${baseName}.txt`);
+      try {
+        fs.writeFileSync(txtOut, cleanTranscript + '\n', 'utf8');
+      } catch { txtOut = null; }
+    }
+
+    return { ok: true, audio: audioOut, transcript: txtOut, dir: dayDir };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+async function transcribeAudio({ audioFile = null, seconds = null, pushToStop = false, mode = null } = {}) {
+  const cfg = getVoiceConfig();
+  if (!cfg.enabled) return { ok: false, error: 'Voice input is disabled in config (voice.enabled = false). Re-enable with /voice on.' };
+  if (!cfg.model) return { ok: false, error: 'No Whisper model configured. Set one with /voice model <path-to-ggml.bin>.' };
+
+  let audioPath = audioFile;
+  let cleanupAudio = false;
+
+  if (!audioPath) {
+    audioPath = join(os.tmpdir(), `sapper-voice-${Date.now()}.wav`);
+    cleanupAudio = true;
+
+    let rec;
+    if (pushToStop) {
+      // Push-to-stop: ticker + key-press handling are rendered inside the helper.
+      rec = await recordAudioUntilKey(audioPath, {
+        recorder: cfg.recorder,
+        device: cfg.device,
+        sampleRate: cfg.sampleRate,
+        maxSeconds: 600,
+      });
+    } else {
+      const dur = Math.max(1, Math.min(300, Number(seconds) || cfg.recordSeconds));
+      const recIntro = uiCleanMode()
+        ? chalk.cyan(`Recording ${dur}s from ${cfg.recorder} (${cfg.device}) ...`)
+        : chalk.cyan(`🎙️  Recording ${dur}s from ${cfg.recorder} (${cfg.device}) ...`);
+      console.log(recIntro);
+      rec = await recordAudioToFile(audioPath, {
+        seconds: dur,
+        recorder: cfg.recorder,
+        device: cfg.device,
+        sampleRate: cfg.sampleRate,
+      });
+    }
+
+    if (!rec.ok) {
+      try { if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath); } catch {}
+      return { ok: false, error: `Recording failed: ${rec.error}` };
+    }
+  }
+
+  const transSpinner = ora(chalk.cyan(`Transcribing with ${cfg.whisperBin} (${cfg.model.split('/').pop()})...`)).start();
+  const result = await runWhisperCli(audioPath, {
+    whisperBin: cfg.whisperBin,
+    model: cfg.model,
+    language: cfg.language,
+    translate: cfg.translate,
+  });
+  transSpinner.stop();
+
+  // Archive the recording (audio + transcript) before cleaning up the temp file.
+  let archived = null;
+  if (result.ok && cfg.archive) {
+    const archiveMode = mode || (audioFile ? 'file' : (pushToStop ? 'talk' : 'record'));
+    archived = archiveVoiceRecording({
+      sourceAudio: audioPath,
+      transcript: result.text,
+      mode: archiveMode,
+    });
+    if (archived && archived.ok) {
+      const where = archived.audio || archived.transcript;
+      if (where) console.log(UI.slate(`  Archived → ${where.replace(getToolWorkingDirectory() + '/', '')}`));
+    }
+  }
+
+  if (cleanupAudio) {
+    try { if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath); } catch {}
+  }
+  return { ...result, archived };
 }
 
 function runCapturedCommand(command, { cwd = getToolWorkingDirectory(), timeoutMs = 12000, maxOutput = 24000 } = {}) {
@@ -4792,6 +5714,8 @@ const tools = {
   tail: (path, lines) => readFileLineWindow(path, 'tail', lines),
   grep: (pattern) => tools.search(pattern),
   find: (pattern, startPath) => findPathsByName(pattern, startPath),
+  regex: (pattern, include, startPath) => regexSearch(pattern, include, startPath),
+  read_chunk: (path, start, end, context) => readChunk(path, start, end, context),
   changes: async (path) => {
     const trimmedPath = typeof path === 'string' ? path.trim() : '';
     const cwd = getToolWorkingDirectory();
@@ -5553,6 +6477,39 @@ async function runSapper() {
     {
       type: 'function',
       function: {
+        name: 'regex_search',
+        description: 'Advanced regex search across source code. Accepts JS-style /pattern/flags or a raw pattern (default flag: case-insensitive). Returns file:line:col with capture groups. Optional filter limits to extensions (js,ts) or path substrings (src/).',
+        parameters: {
+          type: 'object',
+          properties: {
+            pattern: { type: 'string', description: 'Regex pattern, e.g. "TODO[:\\s]" or "/function\\s+(\\w+)/i"' },
+            include: { type: 'string', description: 'Optional comma-separated extensions (js,ts,py) or path substrings (src/,routes/)' },
+            path: { type: 'string', description: 'Directory to search from (default current tool working directory)' }
+          },
+          required: ['pattern']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'read_chunk',
+        description: 'Read a specific line range from a file (e.g. lines 40-80) instead of the whole file. Use this after regex_search/grep to inspect the surrounding context without loading huge files into context. Always preferred for files larger than ~400 lines.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'File path to read' },
+            start: { type: 'number', description: 'Starting line (1-based, inclusive)' },
+            end: { type: 'number', description: 'Ending line (1-based, inclusive). Defaults to start + 60.' },
+            context: { type: 'number', description: 'Extra lines to include above & below the range (default 0)' }
+          },
+          required: ['path', 'start']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
         name: 'pwd',
         description: 'Show the current tool working directory.',
         parameters: {
@@ -5806,9 +6763,9 @@ async function runSapper() {
         promptText = `\n${promptShell(promptParts.join(' '), promptDetail)}`;
       }
 
-      const input = await safeQuestion(promptText);
+      let input = await safeQuestion(promptText);
       clearPromptEcho(promptText, input);
-      
+
       // Block empty prompts
       if (!input.trim()) {
         continue;
@@ -6199,6 +7156,535 @@ async function runSapper() {
         console.log(chalk.yellow(`Unknown summary option: ${subcommand}`));
         console.log(chalk.gray('  Usage: /summary  |  /summary phases [on|off]  |  /summary trigger <percent>  |  /summary reset'));
         continue;
+      }
+
+      if (input.toLowerCase().startsWith('/chunking') || input.toLowerCase().startsWith('/chunk ') || input.toLowerCase() === '/chunk') {
+        const arg = input.replace(/^\/chunk(ing)?/i, '').trim();
+
+        if (!arg || ['status', 'show'].includes(arg.toLowerCase())) {
+          const cfg = getChunkingConfig();
+          const lines = [
+            `enabled         ${cfg.enabled ? chalk.green('ON') : chalk.red('OFF')}`,
+            `context lines   ${chalk.white.bold(cfg.contextLines)} ${UI.slate('(lines above & below each match)')}`,
+            `max per file    ${chalk.white.bold(cfg.maxChunksPerFile)} ${UI.slate('(chunk groups returned per file)')}`,
+            `auto-suggest    ${chalk.white.bold(cfg.autoChunkAboveLines)} ${UI.slate('(prefer chunking when files exceed this many lines)')}`,
+            `config file     ${chalk.white(CONFIG_FILE)}`,
+          ];
+          console.log();
+          console.log(box(lines.join('\n'), 'Chunked Reading', 'cyan'));
+          console.log(UI.slate('  Usage: /chunking on|off  |  /chunking context <N>  |  /chunking max <N>  |  /chunking auto <N>  |  /chunking reset'));
+          continue;
+        }
+
+        const [subcommandRaw, ...rest] = arg.split(/\s+/);
+        const subcommand = subcommandRaw.toLowerCase();
+        const value = rest.join(' ').trim();
+        const updateChunking = (patch) => {
+          sapperConfig.chunking = { ...getChunkingConfig(), ...patch };
+          saveConfig(sapperConfig);
+        };
+
+        if (subcommand === 'reset' || subcommand === 'default') {
+          sapperConfig.chunking = { ...DEFAULT_CONFIG.chunking };
+          saveConfig(sapperConfig);
+          console.log(chalk.green(`✅ Chunking reset to defaults: enabled=${chunkingEnabled() ? 'ON' : 'OFF'}, context=${chunkingContextLines()}, maxPerFile=${chunkingMaxPerFile()}`));
+          continue;
+        }
+
+        if (['on', 'true', 'yes', '1', 'enable', 'enabled'].includes(subcommand)) {
+          updateChunking({ enabled: true });
+          console.log(chalk.green('✅ Chunked reading: ' + chalk.green('ON')));
+          continue;
+        }
+        if (['off', 'false', 'no', '0', 'disable', 'disabled'].includes(subcommand)) {
+          updateChunking({ enabled: false });
+          console.log(chalk.yellow('✅ Chunked reading: ' + chalk.red('OFF') + chalk.gray(' (agent will read full files)')));
+          continue;
+        }
+        if (subcommand === 'toggle' || subcommand === 'flip') {
+          updateChunking({ enabled: !chunkingEnabled() });
+          console.log(chalk.green(`✅ Chunked reading: ${chunkingEnabled() ? chalk.green('ON') : chalk.red('OFF')}`));
+          continue;
+        }
+
+        if (subcommand === 'context' || subcommand === 'lines') {
+          const n = parseInt(value, 10);
+          if (!Number.isFinite(n) || n < 0 || n > 200) {
+            console.log(chalk.yellow('Usage: /chunking context <0-200>'));
+            continue;
+          }
+          updateChunking({ contextLines: n });
+          console.log(chalk.green(`✅ Chunk context lines set to ${chalk.white.bold(chunkingContextLines())}`));
+          continue;
+        }
+
+        if (subcommand === 'max' || subcommand === 'maxperfile') {
+          const n = parseInt(value, 10);
+          if (!Number.isFinite(n) || n < 1 || n > 50) {
+            console.log(chalk.yellow('Usage: /chunking max <1-50>'));
+            continue;
+          }
+          updateChunking({ maxChunksPerFile: n });
+          console.log(chalk.green(`✅ Max chunks per file set to ${chalk.white.bold(chunkingMaxPerFile())}`));
+          continue;
+        }
+
+        if (subcommand === 'auto' || subcommand === 'autoabove') {
+          const n = parseInt(value, 10);
+          if (!Number.isFinite(n) || n < 50 || n > 10000) {
+            console.log(chalk.yellow('Usage: /chunking auto <50-10000>'));
+            continue;
+          }
+          updateChunking({ autoChunkAboveLines: n });
+          console.log(chalk.green(`✅ Auto-chunk threshold set to ${chalk.white.bold(chunkingAutoAboveLines())} lines`));
+          continue;
+        }
+
+        console.log(chalk.yellow(`Unknown chunking option: ${subcommand}`));
+        console.log(chalk.gray('  Usage: /chunking  |  /chunking on|off  |  /chunking context <N>  |  /chunking max <N>  |  /chunking auto <N>  |  /chunking reset'));
+        continue;
+      }
+
+      {
+        const _voiceLower = input.toLowerCase();
+        const _isVoiceCmd =
+          _voiceLower === '/voice' || _voiceLower === '/v' ||
+          _voiceLower.startsWith('/voice ') || _voiceLower.startsWith('/v ');
+        if (_isVoiceCmd) {
+        const arg = (_voiceLower.startsWith('/voice') ? input.substring(6) : input.substring(2)).trim();
+        const cfg = getVoiceConfig();
+        const updateVoice = (patch) => {
+          sapperConfig.voice = { ...getVoiceConfig(), ...patch };
+          saveConfig(sapperConfig);
+        };
+
+        if (!arg || ['status', 'show'].includes(arg.toLowerCase())) {
+          const archiveDirDisplay = isAbsolute(cfg.archiveDir)
+            ? cfg.archiveDir
+            : pathResolve(getToolWorkingDirectory(), cfg.archiveDir);
+          const lines = [
+            `enabled         ${cfg.enabled ? chalk.green('ON') : chalk.red('OFF')}`,
+            `whisper bin     ${chalk.white(cfg.whisperBin)}`,
+            `model           ${fs.existsSync(cfg.model) ? chalk.white(cfg.model) : chalk.red(cfg.model + ' (not found)')}`,
+            `language        ${chalk.white(cfg.language)}`,
+            `recorder        ${chalk.white(cfg.recorder)} ${UI.slate(`(device: ${cfg.device})`)}`,
+            `record seconds  ${chalk.white.bold(cfg.recordSeconds)}`,
+            `sample rate     ${chalk.white(cfg.sampleRate + ' Hz')}`,
+            `translate       ${cfg.translate ? chalk.green('ON') : chalk.red('OFF')} ${UI.slate('(force English output)')}`,
+            `auto-send       ${cfg.autoSend ? chalk.green('ON') : chalk.red('OFF')} ${UI.slate('(skip confirm before sending to AI)')}`,
+            `archive         ${cfg.archive ? chalk.green('ON') : chalk.red('OFF')} ${UI.slate(`→ ${archiveDirDisplay}/YYYY-MM-DD/`)}`,
+          ];
+          console.log();
+          console.log(box(lines.join('\n'), '🎙️  Voice / Whisper', 'cyan'));
+          console.log(UI.slate('  Usage:'));
+          console.log(UI.slate('    /v live                   live preview while you speak, clean final transcript on stop'));
+          console.log(UI.slate('    /v record                 record from mic — press any key to stop'));
+          console.log(UI.slate('    /v record <seconds>       record for a fixed duration'));
+          console.log(UI.slate('    /v talk                   alias for push-to-stop recording'));
+          console.log(UI.slate('    /v file <path>            transcribe an existing audio file'));
+          console.log(UI.slate('    /voice on|off             toggle the feature'));
+          console.log(UI.slate('    /voice model              list available models and pick one'));
+          console.log(UI.slate('    /voice model <N|path>     pick model by number or set path'));
+          console.log(UI.slate('    /voice lang <code|auto>   set language'));
+          console.log(UI.slate('    /voice seconds <n>        default record duration'));
+          console.log(UI.slate('    /voice device <id>        mic device (e.g. :0)'));
+          console.log(UI.slate('    /voice recorder ffmpeg|sox'));
+          console.log(UI.slate('    /voice translate on|off   translate to English'));
+          console.log(UI.slate('    /voice autosend on|off    skip confirm and send to AI'));
+          console.log(UI.slate('    /voice archive on|off     save recordings + transcripts to disk'));
+          console.log(UI.slate('    /voice archive path <dir> set archive folder (default .sapper/voice)'));
+          console.log(UI.slate('    /voice archive open       reveal archive folder in Finder/Explorer'));
+          console.log(UI.slate('    /voice reset              restore defaults'));
+          continue;
+        }
+
+        const [subcommandRaw, ...rest] = arg.split(/\s+/);
+        const subcommand = subcommandRaw.toLowerCase();
+        const value = rest.join(' ').trim();
+
+        // Settings subcommands
+        if (subcommand === 'reset' || subcommand === 'default') {
+          sapperConfig.voice = { ...DEFAULT_CONFIG.voice };
+          saveConfig(sapperConfig);
+          console.log(chalk.green('✅ Voice settings reset to defaults'));
+          continue;
+        }
+        if (['on', 'true', 'yes', '1', 'enable', 'enabled'].includes(subcommand)) {
+          updateVoice({ enabled: true });
+          console.log(chalk.green('✅ Voice input: ' + chalk.green('ON')));
+          continue;
+        }
+        if (['off', 'false', 'no', '0', 'disable', 'disabled'].includes(subcommand)) {
+          updateVoice({ enabled: false });
+          console.log(chalk.yellow('✅ Voice input: ' + chalk.red('OFF')));
+          continue;
+        }
+        if (subcommand === 'model' || subcommand === 'models') {
+          // Build the list of candidate models from common locations
+          const searchDirs = [
+            join(os.homedir(), 'models'),
+            join(os.homedir(), '.whisper'),
+            join(os.homedir(), '.cache', 'whisper'),
+            '/opt/homebrew/share/whisper.cpp/models',
+            '/usr/local/share/whisper.cpp/models',
+            './models',
+          ];
+          const seen = new Set();
+          const found = [];
+          for (const dir of searchDirs) {
+            const abs = isAbsolute(dir) ? dir : pathResolve(getToolWorkingDirectory(), dir);
+            try {
+              if (!fs.existsSync(abs)) continue;
+              for (const f of fs.readdirSync(abs)) {
+                if (!/^ggml-.*\.bin$/i.test(f)) continue;          // ggml-*.bin only
+                if (/\.(tmp|partial|download)$/i.test(f)) continue; // skip stale tmp files
+                const full = join(abs, f);
+                if (seen.has(full)) continue;
+                seen.add(full);
+                try {
+                  const st = fs.statSync(full);
+                  if (st.size < 50 * 1024 * 1024) continue;        // skip < 50MB (probably broken)
+                  found.push({ path: full, name: f, size: st.size, mtime: st.mtimeMs });
+                } catch {}
+              }
+            } catch {}
+          }
+          found.sort((a, b) => a.name.localeCompare(b.name));
+
+          const humanSize = (n) => n >= 1024 * 1024 * 1024
+            ? `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`
+            : `${(n / 1024 / 1024).toFixed(0)} MB`;
+
+          // Direct pick by number: /v model 2
+          if (value && /^\d+$/.test(value)) {
+            const idx = parseInt(value, 10) - 1;
+            if (idx < 0 || idx >= found.length) {
+              console.log(chalk.yellow(`No model #${value}. Run /v model (no args) to list.`));
+              continue;
+            }
+            updateVoice({ model: found[idx].path });
+            console.log(chalk.green(`✅ Whisper model set to ${chalk.white(found[idx].path)}`));
+            continue;
+          }
+
+          // Direct pick by path: /v model /some/path.bin
+          if (value) {
+            const abs = isAbsolute(value) ? value : pathResolve(getToolWorkingDirectory(), value);
+            if (!fs.existsSync(abs)) {
+              console.log(chalk.yellow(`⚠️  File not found: ${abs} (saved anyway — fix the path before recording)`));
+            }
+            updateVoice({ model: abs });
+            console.log(chalk.green(`✅ Whisper model set to ${chalk.white(abs)}`));
+            continue;
+          }
+
+          // Interactive list + pick
+          if (found.length === 0) {
+            console.log();
+            console.log(chalk.yellow('No ggml-*.bin Whisper models found.'));
+            console.log(UI.slate('  Searched: ' + searchDirs.join(', ')));
+            console.log(UI.slate('  Download one with:'));
+            console.log(UI.slate('    curl -L -o ~/models/ggml-large-v3-turbo.bin \\'));
+            console.log(UI.slate('      https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin'));
+            continue;
+          }
+
+          console.log();
+          console.log(chalk.cyan(`Available Whisper models (${found.length}):`));
+          const currentModel = cfg.model;
+          const nameW = Math.min(40, Math.max(...found.map(m => m.name.length)));
+          for (let i = 0; i < found.length; i++) {
+            const m = found[i];
+            const marker = m.path === currentModel ? chalk.green(' ← current') : '';
+            const num = chalk.cyan(String(i + 1).padStart(2, ' ') + '.');
+            const name = chalk.white(m.name.padEnd(nameW));
+            const size = chalk.gray(humanSize(m.size).padStart(7));
+            const dir = UI.slate('  ' + dirname(m.path));
+            console.log(`  ${num} ${name} ${size}${marker}`);
+            console.log(`     ${dir}`);
+          }
+          console.log();
+          const pick = await safeQuestion(chalk.yellow(`Pick a model [1-${found.length}, Enter to cancel]: `));
+          const pickN = parseInt(pick.trim(), 10);
+          if (!Number.isFinite(pickN) || pickN < 1 || pickN > found.length) {
+            console.log(UI.slate('Cancelled.'));
+            continue;
+          }
+          updateVoice({ model: found[pickN - 1].path });
+          console.log(chalk.green(`✅ Whisper model set to ${chalk.white(found[pickN - 1].path)}`));
+          continue;
+        }
+        if (subcommand === 'lang' || subcommand === 'language') {
+          if (!value) { console.log(chalk.yellow('Usage: /voice lang <code|auto>')); continue; }
+          updateVoice({ language: value.toLowerCase() });
+          console.log(chalk.green(`✅ Whisper language set to ${chalk.white(value.toLowerCase())}`));
+          continue;
+        }
+        if (subcommand === 'seconds' || subcommand === 'duration') {
+          const n = parseInt(value, 10);
+          if (!Number.isFinite(n) || n < 1 || n > 300) { console.log(chalk.yellow('Usage: /voice seconds <1-300>')); continue; }
+          updateVoice({ recordSeconds: n });
+          console.log(chalk.green(`✅ Default record duration: ${chalk.white.bold(n)}s`));
+          continue;
+        }
+        if (subcommand === 'device' || subcommand === 'mic') {
+          if (!value) { console.log(chalk.yellow('Usage: /voice device <id>  (e.g. :0 for ffmpeg avfoundation default mic)')); continue; }
+          updateVoice({ device: value });
+          console.log(chalk.green(`✅ Mic device set to ${chalk.white(value)}`));
+          continue;
+        }
+        if (subcommand === 'recorder') {
+          const r = value.toLowerCase();
+          if (!['ffmpeg', 'sox'].includes(r)) { console.log(chalk.yellow('Usage: /voice recorder ffmpeg|sox')); continue; }
+          updateVoice({ recorder: r });
+          console.log(chalk.green(`✅ Recorder set to ${chalk.white(r)}`));
+          continue;
+        }
+        if (subcommand === 'translate') {
+          const on = ['on', 'true', 'yes', '1'].includes(value.toLowerCase());
+          const off = ['off', 'false', 'no', '0'].includes(value.toLowerCase());
+          if (!on && !off) { console.log(chalk.yellow('Usage: /voice translate on|off')); continue; }
+          updateVoice({ translate: on });
+          console.log(chalk.green(`✅ Translate to English: ${on ? chalk.green('ON') : chalk.red('OFF')}`));
+          continue;
+        }
+        if (subcommand === 'autosend' || subcommand === 'auto-send' || subcommand === 'auto') {
+          const on = ['on', 'true', 'yes', '1'].includes(value.toLowerCase());
+          const off = ['off', 'false', 'no', '0'].includes(value.toLowerCase());
+          if (!on && !off) { console.log(chalk.yellow('Usage: /voice autosend on|off')); continue; }
+          updateVoice({ autoSend: on });
+          console.log(chalk.green(`✅ Auto-send transcript: ${on ? chalk.green('ON') : chalk.red('OFF')}`));
+          continue;
+        }
+        if (subcommand === 'archive') {
+          const [archSubRaw, ...archRest] = (value || '').split(/\s+/);
+          const archSub = (archSubRaw || '').toLowerCase();
+          const archValue = archRest.join(' ').trim();
+          const archiveDirAbs = isAbsolute(cfg.archiveDir)
+            ? cfg.archiveDir
+            : pathResolve(getToolWorkingDirectory(), cfg.archiveDir);
+
+          if (!archSub || archSub === 'show' || archSub === 'status') {
+            const exists = fs.existsSync(archiveDirAbs);
+            console.log(chalk.cyan('Archive') + ': ' + (cfg.archive ? chalk.green('ON') : chalk.red('OFF')));
+            console.log(chalk.cyan('Folder') + ': ' + chalk.white(archiveDirAbs) + (exists ? UI.slate(' (exists)') : UI.slate(' (will be created on next recording)')));
+            if (exists) {
+              try {
+                const days = fs.readdirSync(archiveDirAbs).filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort().reverse().slice(0, 5);
+                if (days.length) {
+                  console.log(chalk.cyan('Recent days') + ':');
+                  for (const d of days) {
+                    const files = fs.readdirSync(join(archiveDirAbs, d));
+                    const wavs = files.filter(f => f.endsWith('.wav')).length;
+                    const txts = files.filter(f => f.endsWith('.txt')).length;
+                    console.log(UI.slate(`  ${d}  →  ${wavs} audio, ${txts} transcripts`));
+                  }
+                }
+              } catch {}
+            }
+            console.log(UI.slate('  /voice archive on|off       toggle archiving'));
+            console.log(UI.slate('  /voice archive path <dir>   change archive folder'));
+            console.log(UI.slate('  /voice archive open         reveal folder in Finder/Explorer'));
+            continue;
+          }
+          if (['on', 'true', 'yes', '1'].includes(archSub)) {
+            updateVoice({ archive: true });
+            console.log(chalk.green('✅ Voice archiving: ' + chalk.green('ON')));
+            continue;
+          }
+          if (['off', 'false', 'no', '0'].includes(archSub)) {
+            updateVoice({ archive: false });
+            console.log(chalk.green('✅ Voice archiving: ' + chalk.red('OFF')));
+            continue;
+          }
+          if (archSub === 'path' || archSub === 'dir' || archSub === 'folder') {
+            if (!archValue) { console.log(chalk.yellow('Usage: /voice archive path <dir>')); continue; }
+            updateVoice({ archiveDir: archValue });
+            console.log(chalk.green(`✅ Archive folder set to ${chalk.white(archValue)}`));
+            continue;
+          }
+          if (archSub === 'open' || archSub === 'reveal') {
+            try { fs.mkdirSync(archiveDirAbs, { recursive: true }); } catch {}
+            const opener = process.platform === 'darwin' ? 'open'
+                          : process.platform === 'win32' ? 'explorer'
+                          : 'xdg-open';
+            try {
+              spawn(opener, [archiveDirAbs], { detached: true, stdio: 'ignore' }).unref();
+              console.log(chalk.green(`✅ Opening ${archiveDirAbs}`));
+            } catch (err) {
+              console.log(chalk.red(`Failed to open: ${err.message}`));
+            }
+            continue;
+          }
+          console.log(chalk.yellow(`Unknown archive option: ${archSub}`));
+          console.log(chalk.gray('  Run "/voice archive" with no args to see usage.'));
+          continue;
+        }
+
+        // Action subcommands: record / rec / talk / live / file
+        if (subcommand === 'live' || subcommand === 'stream') {
+          if (!cfg.enabled) {
+            console.log(chalk.yellow('Voice input is OFF. Enable with /voice on first.'));
+            continue;
+          }
+          // Phase 1: live preview + save audio (no final text yet)
+          const res = await runWhisperLive({
+            whisperStreamBin: cfg.whisperStreamBin,
+            model: cfg.model,
+            language: cfg.language,
+            translate: cfg.translate,
+            stepMs: cfg.liveStepMs,
+            lengthMs: cfg.liveLengthMs,
+            keepMs: cfg.liveKeepMs,
+          });
+          if (!res.ok) { console.log(chalk.red(`❌ ${res.error}`)); continue; }
+          if (!res.audioPath) {
+            if (res.audioTmpDir) { try { fs.rmSync(res.audioTmpDir, { recursive: true, force: true }); } catch {} }
+            console.log(chalk.yellow('No audio captured.'));
+            continue;
+          }
+
+          // Phase 2: single clean transcription pass on the saved WAV (this is
+          // the trick — whisper-stream's sliding window produces overlapping
+          // chunks, so we ignore that text and re-decode the whole file once).
+          const finalSpinner = ora(chalk.cyan(`Transcribing with ${cfg.whisperBin} (${cfg.model.split('/').pop()})...`)).start();
+          const finalRes = await runWhisperCli(res.audioPath, {
+            whisperBin: cfg.whisperBin,
+            model: cfg.model,
+            language: cfg.language,
+            translate: cfg.translate,
+          });
+          finalSpinner.stop();
+
+          if (!finalRes.ok) {
+            if (res.audioTmpDir) { try { fs.rmSync(res.audioTmpDir, { recursive: true, force: true }); } catch {} }
+            console.log(chalk.red(`❌ Final transcription failed: ${finalRes.error}`));
+            continue;
+          }
+
+          // Drop the [BLANK_AUDIO] marker whisper sometimes emits at the start
+          let transcript = (finalRes.text || '')
+            .replace(/\[BLANK_AUDIO\]/gi, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+          if (!transcript) {
+            if (res.audioTmpDir) { try { fs.rmSync(res.audioTmpDir, { recursive: true, force: true }); } catch {} }
+            console.log(chalk.yellow('No speech detected.'));
+            continue;
+          }
+
+          // Archive (audio + clean transcript)
+          if (cfg.archive) {
+            const archived = archiveVoiceRecording({
+              sourceAudio: res.audioPath,
+              transcript,
+              mode: 'live',
+            });
+            if (archived && archived.ok) {
+              const where = archived.audio || archived.transcript;
+              if (where) console.log(UI.slate(`  Archived → ${where.replace(getToolWorkingDirectory() + '/', '')}`));
+            }
+          }
+          // Cleanup the temp sa dir whether or not archive succeeded
+          if (res.audioTmpDir) { try { fs.rmSync(res.audioTmpDir, { recursive: true, force: true }); } catch {} }
+
+          console.log();
+          if (!transcript || !transcript.trim()) {
+            console.log(box(
+              chalk.gray('(empty — no speech detected or only hallucinations were filtered)\n') +
+              (cfg.language === 'auto' || !cfg.language
+                ? chalk.yellow('  💡 Try locking the language: ') + chalk.white('/v lang ar') + chalk.yellow(' or ') + chalk.white('/v lang en')
+                : chalk.gray(`  language was: ${cfg.language}`)),
+              '🎙️  Final transcript', 'yellow'));
+            continue;
+          }
+          console.log(box(chalk.white(transcript), '🎙️  Final transcript', 'cyan'));
+          if (cfg.autoSend) {
+            input = transcript;
+          } else {
+            const confirm = await safeQuestion(chalk.yellow('Send to AI? [Y/n/e=edit]: '));
+            const ans = confirm.trim().toLowerCase();
+            if (ans === 'n' || ans === 'no') { continue; }
+            if (ans === 'e' || ans === 'edit') {
+              const edited = await safeQuestion(chalk.cyan('Edit transcript: '));
+              if (!edited.trim()) continue;
+              input = edited.trim();
+            } else {
+              input = transcript;
+            }
+          }
+          // Fall through to AI processing
+        } else if (subcommand === 'record' || subcommand === 'rec' || subcommand === 'talk') {
+          if (!cfg.enabled) {
+            console.log(chalk.yellow('Voice input is OFF. Enable with /voice on first.'));
+            continue;
+          }
+          // /v record           → push-to-stop (press any key to stop)
+          // /v record <N>       → fixed N seconds
+          // /v talk             → also push-to-stop (alias)
+          const secs = value ? parseInt(value, 10) : null;
+          const usePushToStop = (subcommand === 'talk') || !Number.isFinite(secs);
+          const t = await transcribeAudio({
+            seconds: usePushToStop ? null : secs,
+            pushToStop: usePushToStop,
+            mode: subcommand === 'talk' ? 'talk' : 'record',
+          });
+          if (!t.ok) { console.log(chalk.red(`❌ ${t.error}`)); continue; }
+          const transcript = (t.text || '').trim();
+          if (!transcript) { console.log(chalk.yellow('No speech detected.')); continue; }
+          console.log();
+          console.log(box(chalk.white(transcript), '🎙️  Transcript', 'cyan'));
+          if (cfg.autoSend) {
+            input = transcript; // fall through to AI processing
+          } else {
+            const confirm = await safeQuestion(chalk.yellow('Send to AI? [Y/n/e=edit]: '));
+            const ans = confirm.trim().toLowerCase();
+            if (ans === 'n' || ans === 'no') { continue; }
+            if (ans === 'e' || ans === 'edit') {
+              const edited = await safeQuestion(chalk.cyan('Edit transcript: '));
+              if (!edited.trim()) continue;
+              input = edited.trim();
+            } else {
+              input = transcript;
+            }
+          }
+          // Fall through — the loop body below will process `input` as a normal user prompt
+        } else if (subcommand === 'file') {
+          if (!cfg.enabled) {
+            console.log(chalk.yellow('Voice input is OFF. Enable with /voice on first.'));
+            continue;
+          }
+          if (!value) { console.log(chalk.yellow('Usage: /voice file <path-to-audio>')); continue; }
+          const resolved = isAbsolute(value) ? value : pathResolve(getToolWorkingDirectory(), value);
+          if (!fs.existsSync(resolved)) { console.log(chalk.red(`❌ File not found: ${resolved}`)); continue; }
+          const t = await transcribeAudio({ audioFile: resolved, mode: 'file' });
+          if (!t.ok) { console.log(chalk.red(`❌ ${t.error}`)); continue; }
+          const transcript = (t.text || '').trim();
+          if (!transcript) { console.log(chalk.yellow('No speech detected in file.')); continue; }
+          console.log();
+          console.log(box(chalk.white(transcript), `🎙️  Transcript (${value})`, 'cyan'));
+          if (cfg.autoSend) {
+            input = transcript;
+          } else {
+            const confirm = await safeQuestion(chalk.yellow('Send to AI? [Y/n/e=edit]: '));
+            const ans = confirm.trim().toLowerCase();
+            if (ans === 'n' || ans === 'no') { continue; }
+            if (ans === 'e' || ans === 'edit') {
+              const edited = await safeQuestion(chalk.cyan('Edit transcript: '));
+              if (!edited.trim()) continue;
+              input = edited.trim();
+            } else {
+              input = transcript;
+            }
+          }
+        } else {
+          console.log(chalk.yellow(`Unknown /voice option: ${subcommand}`));
+          console.log(chalk.gray('  Run /voice with no args to see usage.'));
+          continue;
+        }
+        // No `continue` here — `input` was set to the transcript, let the rest of the loop process it.
+        }
       }
 
       if (input.toLowerCase().startsWith('/ui')) {
@@ -7488,6 +8974,14 @@ async function runSapper() {
                   result = tools.find(args.pattern, args.path ?? '.');
                   logEntry('tool', { toolType: 'FIND', path: args.pattern, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
                   break;
+                case 'regex_search':
+                  result = tools.regex(args.pattern, args.include ?? '', args.path ?? '.');
+                  logEntry('tool', { toolType: 'REGEX', path: args.pattern, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+                  break;
+                case 'read_chunk':
+                  result = tools.read_chunk(args.path, args.start, args.end, args.context);
+                  logEntry('file', { action: 'read', path: `${args.path}#L${args.start}-${args.end ?? ''}`, size: result?.length || 0 });
+                  break;
                 case 'pwd':
                   result = tools.pwd();
                   break;
@@ -7727,6 +9221,41 @@ async function runSapper() {
               result = tools.find(path, content);
               logEntry('tool', { toolType: 'FIND', path, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
             }
+            else if (type.toLowerCase() === 'regex') {
+              // Content can be "include" filter (e.g. "js,ts") or "include:::startPath"
+              let include = '';
+              let startPath = '.';
+              if (content) {
+                const idx = content.indexOf(':::');
+                if (idx > -1) {
+                  include = content.substring(0, idx).trim();
+                  startPath = content.substring(idx + 3).trim() || '.';
+                } else {
+                  include = content.trim();
+                }
+              }
+              result = tools.regex(path, include, startPath);
+              logEntry('tool', { toolType: 'REGEX', path, duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
+            }
+            else if (type.toLowerCase() === 'chunk' || type.toLowerCase() === 'read_chunk') {
+              // Content format: "start-end" or "start:end" or "start,end" (end optional). Extra ":::context" appends context lines.
+              let start = 1, end = null, ctx = 0;
+              if (content) {
+                let main = content.trim();
+                const ctxIdx = main.indexOf(':::');
+                if (ctxIdx > -1) {
+                  ctx = Number(main.substring(ctxIdx + 3).trim()) || 0;
+                  main = main.substring(0, ctxIdx).trim();
+                }
+                const rangeMatch = main.match(/^(\d+)\s*[-:,]\s*(\d+)?$/) || main.match(/^(\d+)$/);
+                if (rangeMatch) {
+                  start = parseInt(rangeMatch[1], 10);
+                  end = rangeMatch[2] ? parseInt(rangeMatch[2], 10) : null;
+                }
+              }
+              result = tools.read_chunk(path, start, end, ctx);
+              logEntry('file', { action: 'read', path: `${path}#L${start}-${end ?? ''}`, size: result?.length || 0 });
+            }
             else if (type.toLowerCase() === 'changes') {
               result = await tools.changes(path);
               logEntry('tool', { toolType: 'CHANGES', path: path || '.', duration: Date.now() - toolStart, success: !String(result).startsWith('Error:'), resultSize: result?.length });
@@ -7763,7 +9292,7 @@ async function runSapper() {
             }
 
             // Log tool execution (for non-shell, non-file specific ones)
-            if (!['list', 'ls', 'read', 'cat', 'head', 'tail', 'mkdir', 'rmdir', 'pwd', 'cd', 'write', 'patch', 'search', 'grep', 'find', 'changes', 'fetch', 'memory', 'memory_note_save', 'memory_note_search', 'memory_note_read', 'open', 'shell'].includes(type.toLowerCase())) {
+            if (!['list', 'ls', 'read', 'cat', 'head', 'tail', 'mkdir', 'rmdir', 'pwd', 'cd', 'write', 'patch', 'search', 'grep', 'find', 'regex', 'chunk', 'read_chunk', 'changes', 'fetch', 'memory', 'memory_note_save', 'memory_note_search', 'memory_note_read', 'open', 'shell'].includes(type.toLowerCase())) {
               logEntry('tool', { toolType: type.toUpperCase(), path, duration: Date.now() - toolStart, success: toolSuccess, resultSize: result?.length, error: toolSuccess ? undefined : result });
             }
 
