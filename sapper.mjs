@@ -1016,6 +1016,9 @@ project/
 // Global flag — set after model selection, read in buildSystemPrompt
 let _useNativeToolsFlag = false;
 
+// Models known to reject `think:true` (populated lazily on first failure).
+const modelsWithoutThinking = new Set();
+
 function buildSystemPrompt(agentContent = null, skillContents = []) {
   const now = new Date();
   const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -8621,8 +8624,9 @@ async function runSapper() {
         }
         return { result, success: true };
       }
-      const turnThinkingEnabled = shouldUseThinkingForInput(input);
-      
+      let turnThinkingEnabled = shouldUseThinkingForInput(input);
+      if (modelsWithoutThinking.has(selectedModel)) turnThinkingEnabled = false;
+
       let active = true;
       while (active) {
         if (stepMode) await safeQuestion(chalk.gray(promptLabel('questions.stepContinue', '[STEP] Press Enter to let AI think...')));
@@ -8637,7 +8641,7 @@ async function runSapper() {
             chatOpts.options = { num_ctx: effectiveContextLength() };
           }
           // Thinking can be forced on, forced off, or auto-disabled for simple prompts.
-          chatOpts.think = turnThinkingEnabled;
+          if (turnThinkingEnabled) chatOpts.think = true;
           if (useNativeTools) {
             // Filter tool defs by agent restrictions if any
             if (currentAgentTools) {
@@ -8657,11 +8661,28 @@ async function runSapper() {
           }
           response = await ollama.chat(chatOpts);
         } catch (ollamaError) {
-          spinner.stop();
-          console.error(chalk.red('\n❌ Ollama error:'), ollamaError.message);
-          logEntry('error', { message: `Ollama error: ${ollamaError.message}` });
-          active = false;
-          continue;
+          const errMsg = ollamaError && ollamaError.message ? ollamaError.message : String(ollamaError);
+          if (/does not support thinking/i.test(errMsg) && chatOpts.think) {
+            modelsWithoutThinking.add(selectedModel);
+            turnThinkingEnabled = false;
+            delete chatOpts.think;
+            console.log(chalk.yellow(`  ⚠ "${selectedModel}" doesn't support thinking — retrying without it.`));
+            try {
+              response = await ollama.chat(chatOpts);
+            } catch (retryErr) {
+              spinner.stop();
+              console.error(chalk.red('\n❌ Ollama error:'), retryErr.message);
+              logEntry('error', { message: `Ollama error: ${retryErr.message}` });
+              active = false;
+              continue;
+            }
+          } else {
+            spinner.stop();
+            console.error(chalk.red('\n❌ Ollama error:'), errMsg);
+            logEntry('error', { message: `Ollama error: ${errMsg}` });
+            active = false;
+            continue;
+          }
         }
         spinner.stop();
 
