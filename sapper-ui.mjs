@@ -1806,14 +1806,21 @@ function sendPasteToTerm(text) {
     showToast('Terminal not connected', 'err');
     return false;
   }
-  // xterm bracketed-paste sequence + Enter
-  var BEGIN = '\\u001b[200~';
-  var END = '\\u001b[201~';
-  // Decode escape literals; pty sees raw bytes
-  ws.send('\\u001b[200~'); // ESC [ 200 ~  (start paste)
+  // Sapper's readline does NOT advertise bracketed-paste mode (no ESC[?2004h),
+  // so wrapping in ESC[200~ … ESC[201~ would leak the literal "^[[200~" into
+  // the prompt. Only use bracket-paste when we truly need multi-line atomicity
+  // (Ask AI feature). For single-line content, send it raw and submit with \\r.
+  var LF = String.fromCharCode(10);
+  var CR = String.fromCharCode(13);
+  if (text.indexOf(LF) < 0 && text.indexOf(CR) < 0) {
+    ws.send(text + CR);
+    return true;
+  }
+  // Multi-line: bracketed paste so readline treats it as one input.
+  ws.send('\\u001b[200~');
   ws.send(text);
-  ws.send('\\u001b[201~'); // end paste
-  ws.send('\\r');
+  ws.send('\\u001b[201~');
+  ws.send(CR);
   return true;
 }
 
