@@ -1917,10 +1917,14 @@ window.sendIndexToChat = function() {
   paths.forEach(function(p){
     if (state.indexSet[p] && state.indexSet[p].isDir) dirs.push(p); else files.push(p);
   });
+  // Helper: quote paths that contain spaces, leave plain otherwise.
+  function quoteIfNeeded(p) {
+    return /\\s/.test(p) ? '"' + p.replace(/"/g, '\\\\"') + '"' : p;
+  }
   // 1) /scan each folder (each sent as its own command + Enter)
-  dirs.forEach(function(d){ sendPasteToTerm('/scan ' + d); });
+  dirs.forEach(function(d){ sendPasteToTerm('/scan ' + quoteIfNeeded(d)); });
   // 2) Build attachments token for files
-  var atTokens = files.map(function(f){ return '@' + f; }).join(' ');
+  var atTokens = files.map(function(f){ return '@' + quoteIfNeeded(f); }).join(' ');
   var comment = (document.getElementById('idxComment') || {}).value || '';
   comment = comment.trim();
   if (comment) {

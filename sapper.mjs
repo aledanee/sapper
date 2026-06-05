@@ -8364,10 +8364,33 @@ async function runSapper() {
         continue;
       }
       
-      // Handle codebase scan command
-      if (input.toLowerCase() === '/scan') {
-        console.log(uiCleanMode() ? chalk.cyan('\nScanning codebase...') : chalk.cyan('\n🔍 Scanning codebase...'));
-        const scanResult = scanCodebase('.');
+      // Handle codebase scan command — accepts an optional path argument
+      // (single quoted path or single bare path; spaces are allowed in bare paths)
+      if (input.toLowerCase() === '/scan' || input.toLowerCase().startsWith('/scan ')) {
+        let scanTarget = '.';
+        const rest = input.slice(5).trim();
+        if (rest) {
+          // Strip surrounding quotes if present
+          if ((rest.startsWith('"') && rest.endsWith('"')) ||
+              (rest.startsWith("'") && rest.endsWith("'"))) {
+            scanTarget = rest.slice(1, -1);
+          } else {
+            scanTarget = rest;
+          }
+        }
+        if (!fs.existsSync(scanTarget)) {
+          console.log(chalk.red(`Path not found: ${scanTarget}`));
+          continue;
+        }
+        const scanStat = fs.statSync(scanTarget);
+        if (!scanStat.isDirectory()) {
+          console.log(chalk.red(`Not a directory: ${scanTarget}`));
+          continue;
+        }
+        console.log(uiCleanMode()
+          ? chalk.cyan(`\nScanning ${scanTarget}...`)
+          : chalk.cyan(`\n🔍 Scanning ${scanTarget}...`));
+        const scanResult = scanCodebase(scanTarget);
         
         if (scanResult.files.length === 0) {
           console.log(chalk.yellow('No code files found in current directory.'));
@@ -8477,13 +8500,17 @@ async function runSapper() {
         // Continue to AI response (don't use 'continue' here)
       } else {
         // Process @file attachments in prompt (e.g., "analyze @package.json" or "fix @src/index.js")
+        // Supports three forms:
+        //   @path/no/spaces               — plain bare path
+        //   @"path with spaces/file.md"   — double-quoted path
+        //   @'path with spaces/file.md'   — single-quoted path
       let processedInput = input.startsWith('//') ? input.slice(1) : input;
       const fileAttachments = [];
-      const attachRegex = /@([\w.\/\-_]+)/g;
+      const attachRegex = /@(?:"([^"]+)"|'([^']+)'|([\w.\/\-_]+))/g;
       let attachMatch;
       
       while ((attachMatch = attachRegex.exec(input)) !== null) {
-        const filePath = attachMatch[1];
+        const filePath = attachMatch[1] || attachMatch[2] || attachMatch[3];
         try {
           if (fs.existsSync(filePath)) {
             // Check .sapperignore
