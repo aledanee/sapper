@@ -1,6 +1,7 @@
 # ═══════════════════════════════════════════════════════════════
 # .sapperignore — Files and folders Sapper should ignore
 # Works like .gitignore: one pattern per line, # for comments
+# Edit this file to customize what Sapper skips
 # ═══════════════════════════════════════════════════════════════
 
 # ── Sapper internal ──

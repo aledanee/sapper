@@ -142,6 +142,9 @@ function buildHTML() {
 <title>Sapper</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/theme/material-darker.min.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/dialog/dialog.min.css" />
 <style>
   :root {
     --bg: #0a0e14;
@@ -271,6 +274,16 @@ function buildHTML() {
   #activityPanel .ai.kind-created .ak { color: var(--green); }
   #activityPanel .ai.kind-modified .ak { color: var(--yellow); }
   #activityPanel .ai.kind-deleted .ak { color: var(--red); }
+  #activityPanel .ai .acts { display: none; gap: 4px; flex-shrink: 0; }
+  #activityPanel .ai:hover .acts { display: inline-flex; }
+  #activityPanel .ai .ab { background: transparent; border: 1px solid var(--border2);
+    color: var(--muted); border-radius: 3px; padding: 1px 5px; font-size: 10px; cursor: pointer;
+    line-height: 1.2; font-family: inherit; }
+  #activityPanel .ai .ab:hover { color: var(--accent); border-color: var(--accent); }
+  #activityPanel .ai .ab.danger:hover { color: var(--red); border-color: var(--red); }
+  #activityPanel .note { padding: 2px 10px 6px 76px; color: var(--accent2);
+    font-style: italic; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
+  #activityPanel .note:before { content: '💬  '; margin-right: 2px; font-style: normal; }
   #activityPanel .empty { padding: 12px; color: var(--dim); text-align: center; font-size: 11px; }
   .tree { font-family: ui-monospace, 'SF Mono', monospace; font-size: 12px; padding-bottom: 12px; }
   .row { display: flex; align-items: center; gap: 4px; padding: 3px 8px; cursor: pointer; color: var(--muted);
@@ -472,6 +485,31 @@ function buildHTML() {
   #pview.code { padding: 0; }
   #pview.code pre { margin: 0; border: none; border-radius: 0; min-height: 100%; }
 
+  /* Diff view */
+  #pview.diff { padding: 0; font-family: ui-monospace, 'SF Mono', monospace; font-size: 12px; line-height: 1.45; }
+  #pview.diff .dh { padding: 8px 14px; background: var(--panel2); color: var(--dim);
+    border-bottom: 1px solid var(--border); font-size: 10px; text-transform: uppercase;
+    letter-spacing: .5px; display: flex; gap: 14px; }
+  #pview.diff .dh .add { color: var(--green); } #pview.diff .dh .del { color: var(--red); }
+  #pview.diff .hunk { border-bottom: 1px solid var(--border); }
+  #pview.diff .hunk-h { padding: 4px 14px; background: rgba(88,166,255,.08);
+    color: var(--accent); font-size: 10px; }
+  #pview.diff .ln { display: flex; }
+  #pview.diff .ln .gut { flex-shrink: 0; width: 70px; padding: 0 6px 0 10px; text-align: right;
+    color: var(--dim); border-right: 1px solid var(--border); user-select: none;
+    font-variant-numeric: tabular-nums; font-size: 10px; line-height: 18px; white-space: pre; }
+  #pview.diff .ln .txt { flex: 1; padding: 0 10px; white-space: pre; overflow-x: auto;
+    line-height: 18px; }
+  #pview.diff .ln.add { background: rgba(63,185,80,.10); }
+  #pview.diff .ln.add .txt { color: #56d364; }
+  #pview.diff .ln.add .txt::before { content: '+ '; color: var(--green); }
+  #pview.diff .ln.del { background: rgba(248,81,73,.10); }
+  #pview.diff .ln.del .txt { color: #ffa198; }
+  #pview.diff .ln.del .txt::before { content: '- '; color: var(--red); }
+  #pview.diff .ln.ctx .txt { color: var(--muted); }
+  #pview.diff .ln.ctx .txt::before { content: '  '; }
+  #pview.diff .empty-diff { padding: 20px; color: var(--dim); text-align: center; }
+
   #pedit {
     flex: 1; min-height: 0; width: 100%; padding: 12px 14px;
     background: var(--bg); border: none; color: var(--fg);
@@ -480,6 +518,30 @@ function buildHTML() {
   }
   #pedit.show { display: block; }
   #pview.hide { display: none; }
+  /* CodeMirror editor inside #preview */
+  #editorWrap { flex: 1; min-height: 0; display: none; position: relative; }
+  #editorWrap.show { display: flex; flex-direction: column; }
+  #editorWrap .CodeMirror { flex: 1; min-height: 0; height: 100% !important; width: 100%;
+    font-family: ui-monospace, 'SF Mono', monospace; font-size: 12.5px; line-height: 1.5; }
+  #editorWrap .editorbar { display: flex; align-items: center; gap: 10px; padding: 4px 10px;
+    background: var(--panel2); border-bottom: 1px solid var(--border); font-size: 10px;
+    color: var(--dim); font-family: ui-monospace, 'SF Mono', monospace;
+    text-transform: uppercase; letter-spacing: .5px; flex-shrink: 0; }
+  #editorWrap .editorbar .lang { color: var(--accent); }
+  #editorWrap .editorbar .ln-toggle { margin-left: auto; cursor: pointer; color: var(--muted); }
+  #editorWrap .editorbar .ln-toggle:hover { color: var(--accent); }
+  .CodeMirror-linenumber { color: var(--dim) !important; }
+  .cm-s-material-darker.CodeMirror, .cm-s-material-darker .CodeMirror-gutters { background: var(--bg) !important; }
+  .cm-s-material-darker .CodeMirror-gutters { border-right: 1px solid var(--border) !important; }
+  .cm-s-material-darker .CodeMirror-activeline-background { background: rgba(88,166,255,.05) !important; }
+
+  /* Resizable splitters between panes */
+  .resizer { width: 5px; background: transparent; cursor: col-resize; flex-shrink: 0;
+    transition: background .15s; position: relative; z-index: 5; }
+  .resizer:hover, .resizer.active { background: var(--accent); }
+  .resizer.hidden { display: none; }
+  body.resizing { cursor: col-resize !important; user-select: none; }
+  body.resizing iframe { pointer-events: none; }
 
   #empty { padding: 40px 20px; text-align: center; color: var(--dim); font-size: 13px; }
   #empty .lg { font-size: 36px; margin-bottom: 8px; }
@@ -572,6 +634,8 @@ function buildHTML() {
       </div>
     </aside>
 
+    <div class="resizer" id="sideRes"></div>
+
     <!-- Center: terminal -->
     <main id="center">
       <div id="qa">
@@ -598,11 +662,15 @@ function buildHTML() {
       </div>
     </main>
 
+    <div class="resizer" id="prevRes"></div>
+
     <!-- Right: preview -->
     <aside id="preview" class="hidden">
       <div class="ph">
         <span class="pp" id="pPath">No file open</span>
         <button id="pEdit" onclick="startEdit()" style="display:none">Edit</button>
+        <button id="pDiff" onclick="showDiff()" style="display:none" title="Show what changed">Diff</button>
+        <button id="pAsk" onclick="askAboutSelection()" style="display:none" title="Send the selection (or whole file) to Sapper with a comment">&#128172; Ask AI</button>
         <button id="pSave" onclick="saveEdit()" class="primary" style="display:none">Save</button>
         <button id="pCancel" onclick="cancelEdit()" style="display:none">Cancel</button>
         <button id="pSrc" onclick="toggleSource()" style="display:none">Source</button>
@@ -611,7 +679,10 @@ function buildHTML() {
       </div>
       <div class="ind" id="pInd">File changed on disk — reload to view latest.</div>
       <div id="pview"><div id="empty"><div class="lg">&#128196;</div>Open a file from the sidebar.</div></div>
-      <textarea id="pedit" spellcheck="false"></textarea>
+      <div id="editorWrap">
+        <div class="editorbar"><span class="lang" id="edLang">text</span><span id="edPos"></span><span class="ln-toggle" id="edWrap" title="Toggle word wrap">wrap</span><span class="ln-toggle" id="edLines" title="Toggle line numbers">lines</span></div>
+        <textarea id="pedit" spellcheck="false"></textarea>
+      </div>
     </aside>
   </div>
 </div>
@@ -622,6 +693,16 @@ function buildHTML() {
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/meta.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/mode/loadmode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/edit/matchbrackets.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/edit/closebrackets.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/selection/active-line.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/search/searchcursor.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/search/search.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/dialog/dialog.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/diff@5.2.0/dist/diff.min.js"></script>
 <script>
 /* ─────────────────────────────────────────────────────────────── */
 /*  Sapper Web — frontend                                         */
@@ -641,6 +722,16 @@ var state = {
   activity: [],         // ordered list of {kind, path, isDir, ts}
   activityOpen: false,
 };
+
+var cm = null; // CodeMirror instance (lazy)
+
+// Notes persisted across reloads: { "path|ts": "note text" }
+var savedNotes = {};
+try { savedNotes = JSON.parse(localStorage.getItem('sapperNotes') || '{}') || {}; } catch(e) {}
+function saveNotes() {
+  try { localStorage.setItem('sapperNotes', JSON.stringify(savedNotes)); } catch(e) {}
+}
+function noteKey(a) { return a.path + '|' + a.ts; }
 
 function esc(s) {
   if (s == null) return '';
@@ -812,7 +903,10 @@ function applyActivityItem(item) {
     last.count = (last.count || 1) + 1;
     last.ts = item.ts;
   } else {
-    state.activity.push({ kind: item.kind, path: item.path, isDir: item.isDir, ts: item.ts, count: 1 });
+    var entry = { kind: item.kind, path: item.path, isDir: item.isDir, ts: item.ts, count: 1 };
+    // restore any saved note for this exact timestamp (rarely matches but safe)
+    if (savedNotes[noteKey(entry)]) entry.note = savedNotes[noteKey(entry)];
+    state.activity.push(entry);
     if (state.activity.length > 100) state.activity.shift();
   }
   renderActivity();
@@ -846,33 +940,116 @@ function renderActivity() {
     host.innerHTML = '<div class="empty">No changes yet. Ask Sapper to edit something.</div>';
     return;
   }
-  var items = state.activity.slice(-30).reverse();
-  host.innerHTML = items.map(function(a){
+  // Render newest-first; track original index via data-idx
+  var html = '';
+  for (var i = state.activity.length - 1; i >= 0; i--) {
+    var a = state.activity[i];
     var rel = relTime(a.ts);
     var ct = a.count > 1 ? ' &times;' + a.count : '';
-    return '<div class="ai kind-' + a.kind + '" data-path="' + esc(a.path) + '">' +
+    html += '<div class="ai kind-' + a.kind + '" data-idx="' + i + '" data-path="' + esc(a.path) + '">' +
       '<span class="ak">' + a.kind + ct + '</span>' +
       '<span class="ap">' + esc(a.path) + '</span>' +
-      '<span class="at">' + rel + '</span></div>';
-  }).join('');
+      '<span class="at">' + rel + '</span>' +
+      '<span class="acts">' +
+        '<button class="ab" data-act="note" title="' + (a.note ? 'Edit note' : 'Add note') + '">' + (a.note ? '&#9998;' : '&#128172;') + '</button>' +
+        '<button class="ab danger" data-act="dismiss" title="Dismiss this change">&times;</button>' +
+      '</span></div>';
+    if (a.note) {
+      html += '<div class="note" data-idx="' + i + '">' + esc(a.note) + '</div>';
+    }
+  }
+  host.innerHTML = html;
   Array.from(host.querySelectorAll('.ai')).forEach(function(el){
-    el.addEventListener('click', function(){
-      var p = el.dataset.path;
+    el.addEventListener('click', function(ev){
+      var btn = ev.target.closest('button.ab');
+      var idx = parseInt(el.dataset.idx, 10);
+      var entry = state.activity[idx];
+      if (!entry) return;
+      if (btn) {
+        ev.stopPropagation();
+        if (btn.dataset.act === 'dismiss') {
+          dismissActivity(idx);
+        } else if (btn.dataset.act === 'note') {
+          promptNote(idx);
+        }
+        return;
+      }
+      var p = entry.path;
       var mark = state.marks[p];
       if (mark && mark.kind === 'deleted') { showToast(p + ' (deleted)'); return; }
-      // expand ancestor dirs then open
       var parts = p.split('/');
       var soFar = '';
-      for (var i = 0; i < parts.length - 1; i++) {
-        soFar = soFar ? soFar + '/' + parts[i] : parts[i];
+      for (var j = 0; j < parts.length - 1; j++) {
+        soFar = soFar ? soFar + '/' + parts[j] : parts[j];
         state.expanded[soFar] = true;
       }
       loadTree();
       setTimeout(function(){ openFile(p); }, 80);
-      // clear that file's mark since the user has acknowledged it
       clearMark(p);
     });
   });
+  // Click on a note line lets you edit it too
+  Array.from(host.querySelectorAll('.note')).forEach(function(el){
+    el.addEventListener('click', function(){
+      promptNote(parseInt(el.dataset.idx, 10));
+    });
+  });
+}
+
+function dismissActivity(idx) {
+  var entry = state.activity[idx];
+  if (!entry) return;
+  state.activity.splice(idx, 1);
+  // If this was the only outstanding mark for that path, clear the row mark
+  var stillHas = state.activity.some(function(x){ return x.path === entry.path; });
+  if (!stillHas) clearMark(entry.path);
+  if (savedNotes[noteKey(entry)]) { delete savedNotes[noteKey(entry)]; saveNotes(); }
+  renderActivity();
+}
+
+async function promptNote(idx) {
+  var entry = state.activity[idx];
+  if (!entry) return;
+  var val = await showModal({
+    title: 'Note for change',
+    label: entry.kind + '  ' + entry.path,
+    placeholder: 'e.g. reviewed, intentional, needs revert',
+    value: entry.note || '',
+    okLabel: 'Save note',
+  });
+  if (val == null) return; // cancelled
+  var trimmed = val.trim();
+  if (!trimmed) {
+    delete entry.note;
+    delete savedNotes[noteKey(entry)];
+  } else {
+    entry.note = trimmed;
+    savedNotes[noteKey(entry)] = trimmed;
+  }
+  saveNotes();
+  renderActivity();
+}
+
+function dismissPathMarks(path) {
+  // Remove every activity entry for this path
+  for (var i = state.activity.length - 1; i >= 0; i--) {
+    if (state.activity[i].path === path) {
+      var k = noteKey(state.activity[i]);
+      if (savedNotes[k]) { delete savedNotes[k]; }
+      state.activity.splice(i, 1);
+    }
+  }
+  saveNotes();
+  clearMark(path);
+  renderActivity();
+}
+
+function noteForPath(path) {
+  // Note attaches to the most recent activity entry for this path
+  for (var i = state.activity.length - 1; i >= 0; i--) {
+    if (state.activity[i].path === path) { promptNote(i); return; }
+  }
+  showToast('No tracked change for ' + path);
 }
 
 function relTime(ts) {
@@ -930,13 +1107,16 @@ window.toggleSide = function() {
   var s = document.getElementById('side');
   s.classList.toggle('hidden');
   document.getElementById('btnSide').classList.toggle('on', !s.classList.contains('hidden'));
+  if (typeof updateResizerVisibility === 'function') updateResizerVisibility();
   setTimeout(doFit, 50);
 };
 window.togglePreview = function() {
   var p = document.getElementById('preview');
   p.classList.toggle('hidden');
   document.getElementById('btnPrev').classList.toggle('on', !p.classList.contains('hidden'));
+  if (typeof updateResizerVisibility === 'function') updateResizerVisibility();
   setTimeout(doFit, 50);
+  if (cm && !p.classList.contains('hidden')) setTimeout(function(){ cm.refresh(); }, 80);
 };
 
 // ─── File tree ───────────────────────────────────────────────
@@ -1088,6 +1268,12 @@ function openRowMenu(anchor, path, isDir) {
     }});
   } else {
     items.push({ label: 'Open', fn: function(){ openFile(path); } });
+  }
+  // Change-mark actions, only shown when the row has a mark
+  if (state.marks[path]) {
+    items.push({ sep: true });
+    items.push({ label: '&#10005; Dismiss change mark', fn: function(){ dismissPathMarks(path); } });
+    items.push({ label: '&#128172; Add note to last change', fn: function(){ noteForPath(path); } });
   }
   items.push({ sep: true });
   items.push({ label: 'Rename\u2026', fn: function(){ renamePrompt(path); } });
@@ -1271,7 +1457,8 @@ window.openFile = function(path, isReload) {
   document.querySelectorAll('.row.active').forEach(function(r){ r.classList.remove('active'); });
   var row = document.querySelector('.row[data-path="' + cssEscape(path) + '"]');
   if (row) row.classList.add('active');
-  // Clear any pending change-mark for this file since the user is acknowledging it
+  // Capture mark BEFORE clearing so we know whether to show the Diff button
+  var hadModification = !isReload && state.marks[path] && state.marks[path].kind === 'modified';
   if (!isReload && state.marks[path]) clearMark(path);
 
   state.currentFile = path;
@@ -1280,12 +1467,16 @@ window.openFile = function(path, isReload) {
   document.getElementById('pPath').textContent = path;
   document.getElementById('pInd').classList.remove('show');
   document.getElementById('pEdit').style.display = 'none';
+  document.getElementById('pDiff').style.display = hadModification ? 'inline-block' : 'none';
+  document.getElementById('pAsk').style.display = 'inline-block';
   document.getElementById('pSave').style.display = 'none';
   document.getElementById('pCancel').style.display = 'none';
   document.getElementById('pSrc').style.display = 'none';
   document.getElementById('pReload').style.display = 'inline-block';
-  document.getElementById('pedit').classList.remove('show');
+  document.getElementById('editorWrap').classList.remove('show');
   document.getElementById('pview').classList.remove('hide');
+  // auto-open the diff if we just navigated to a modified file
+  if (hadModification) setTimeout(function(){ if (state.currentFile === path) window.showDiff(); }, 250);
 
   fetch('/api/file?path=' + encodeURIComponent(path)).then(function(r){return r.json();}).then(function(d){
     if (d.error) {
@@ -1372,26 +1563,33 @@ window.closePreview = function() {
   document.getElementById('pview').className = '';
   document.getElementById('pPath').textContent = 'No file open';
   document.getElementById('pEdit').style.display = 'none';
+  document.getElementById('pDiff').style.display = 'none';
+  document.getElementById('pAsk').style.display = 'none';
   document.getElementById('pSave').style.display = 'none';
   document.getElementById('pCancel').style.display = 'none';
   document.getElementById('pSrc').style.display = 'none';
   document.getElementById('pReload').style.display = 'none';
-  document.getElementById('pedit').classList.remove('show');
+  document.getElementById('editorWrap').classList.remove('show');
   document.getElementById('pview').classList.remove('hide');
 };
 window.startEdit = function() {
   if (!state.currentFile) return;
   state.editing = true;
-  document.getElementById('pedit').value = state.fileOnDisk;
-  document.getElementById('pedit').classList.add('show');
   document.getElementById('pview').classList.add('hide');
+  document.getElementById('editorWrap').classList.add('show');
+  ensureEditor();
+  setEditorMode(state.currentFile);
+  cm.setValue(state.fileOnDisk || '');
+  cm.clearHistory();
+  setTimeout(function(){ cm.refresh(); cm.focus(); }, 30);
   document.getElementById('pEdit').style.display = 'none';
+  document.getElementById('pDiff').style.display = 'none';
   document.getElementById('pSave').style.display = 'inline-block';
   document.getElementById('pCancel').style.display = 'inline-block';
 };
 window.cancelEdit = function() {
   state.editing = false;
-  document.getElementById('pedit').classList.remove('show');
+  document.getElementById('editorWrap').classList.remove('show');
   document.getElementById('pview').classList.remove('hide');
   document.getElementById('pEdit').style.display = 'inline-block';
   document.getElementById('pSave').style.display = 'none';
@@ -1400,7 +1598,7 @@ window.cancelEdit = function() {
 };
 window.saveEdit = function() {
   if (!state.currentFile) return;
-  var content = document.getElementById('pedit').value;
+  var content = cm ? cm.getValue() : document.getElementById('pedit').value;
   fetch('/api/file', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path: state.currentFile, content: content })
@@ -1411,6 +1609,302 @@ window.saveEdit = function() {
     openFile(state.currentFile, false);
   }).catch(function(e){ showToast('Save failed: ' + e.message, 'err'); });
 };
+
+window.showDiff = function() {
+  if (!state.currentFile) return;
+  var view = document.getElementById('pview');
+  document.getElementById('editorWrap').classList.remove('show');
+  view.classList.remove('hide');
+  view.className = 'diff';
+  view.innerHTML = '<div class="empty-diff">Loading diff…</div>';
+  document.getElementById('pDiff').style.display = 'none';
+  document.getElementById('pEdit').style.display = 'inline-block';
+  fetch('/api/diff?path=' + encodeURIComponent(state.currentFile))
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if (d.error) { view.innerHTML = '<div class="empty-diff">' + esc(d.error) + '</div>'; return; }
+      if (d.prev == null) {
+        view.innerHTML = '<div class="empty-diff">' + esc(d.message || 'No prior snapshot available.') +
+          '<br><br>Sapper started tracking this file from now on \u2014 the next change will show a diff.</div>';
+        return;
+      }
+      renderUnifiedDiff(view, d.prev, d.curr);
+    })
+    .catch(function(e){ view.innerHTML = '<div class="empty-diff">Diff failed: ' + esc(e.message) + '</div>'; });
+};
+
+function renderUnifiedDiff(host, prev, curr) {
+  if (!window.Diff) {
+    host.innerHTML = '<div class="empty-diff">Diff library failed to load.</div>';
+    return;
+  }
+  var patch = Diff.structuredPatch('a', 'b', prev || '', curr || '', '', '', { context: 3 });
+  if (!patch.hunks.length) {
+    host.innerHTML = '<div class="empty-diff">No textual differences \u2014 file content is identical.</div>';
+    return;
+  }
+  var added = 0, removed = 0;
+  patch.hunks.forEach(function(h){
+    h.lines.forEach(function(l){
+      if (l[0] === '+') added++;
+      else if (l[0] === '-') removed++;
+    });
+  });
+  var html = '<div class="dh"><span class="add">+' + added + ' added</span>' +
+             '<span class="del">-' + removed + ' removed</span>' +
+             '<span>' + patch.hunks.length + ' hunk' + (patch.hunks.length>1?'s':'') + '</span></div>';
+  patch.hunks.forEach(function(h){
+    html += '<div class="hunk">';
+    html += '<div class="hunk-h">@@ -' + h.oldStart + ',' + h.oldLines +
+            ' +' + h.newStart + ',' + h.newLines + ' @@</div>';
+    var oldNo = h.oldStart, newNo = h.newStart;
+    h.lines.forEach(function(l){
+      var sign = l[0], body = l.slice(1);
+      if (sign === '\\\\') return; // "\\ No newline at end of file"
+      var cls = sign === '+' ? 'add' : (sign === '-' ? 'del' : 'ctx');
+      var lo = sign === '+' ? '' : String(oldNo);
+      var ln = sign === '-' ? '' : String(newNo);
+      var gut = lo.padStart(4, ' ') + ' ' + ln.padStart(4, ' ');
+      html += '<div class="ln ' + cls + '"><span class="gut">' + gut + '</span>' +
+              '<span class="txt">' + esc(body || ' ') + '</span></div>';
+      if (sign !== '+') oldNo++;
+      if (sign !== '-') newNo++;
+    });
+    html += '</div>';
+  });
+  host.innerHTML = html;
+}
+
+// ─── Ask AI: send selection + comment to terminal ─────────────
+function detectLang(path) {
+  var ext = ((path || '').split('.').pop() || '').toLowerCase();
+  var map = { js:'js', mjs:'js', cjs:'js', jsx:'jsx', ts:'ts', tsx:'tsx', py:'python',
+    rb:'ruby', go:'go', rs:'rust', java:'java', c:'c', h:'c', cpp:'cpp', hpp:'cpp',
+    cs:'csharp', kt:'kotlin', swift:'swift', php:'php', sh:'bash', bash:'bash',
+    zsh:'zsh', md:'markdown', json:'json', yml:'yaml', yaml:'yaml', toml:'toml',
+    xml:'xml', html:'html', css:'css', scss:'scss', sql:'sql', lua:'lua', pl:'perl',
+    r:'r', erl:'erlang', ex:'elixir', dart:'dart', vue:'vue', svelte:'svelte' };
+  return map[ext] || '';
+}
+
+// Collect what the user has selected in the preview/editor/diff
+function getCurrentSelection() {
+  var out = { text: '', startLine: null, endLine: null, source: '' };
+  // Editor (CodeMirror) selection wins if visible
+  var edWrap = document.getElementById('editorWrap');
+  if (cm && edWrap && edWrap.classList.contains('show') && cm.somethingSelected()) {
+    out.text = cm.getSelection();
+    var sel = cm.listSelections()[0];
+    var a = sel.anchor, h = sel.head;
+    var startL = Math.min(a.line, h.line), endL = Math.max(a.line, h.line);
+    out.startLine = startL + 1; out.endLine = endL + 1;
+    out.source = 'editor';
+    return out;
+  }
+  // DOM selection (preview / diff)
+  var sel = window.getSelection ? window.getSelection() : null;
+  var pview = document.getElementById('pview');
+  if (sel && sel.rangeCount && !sel.isCollapsed && pview.contains(sel.anchorNode)) {
+    out.text = sel.toString();
+    out.source = pview.classList.contains('diff') ? 'diff' : 'preview';
+    // Try to recover line range from the diff gutter (.gut spans contain old/new line nums)
+    if (out.source === 'diff') {
+      var range = sel.getRangeAt(0);
+      var node = range.startContainer;
+      while (node && node.nodeType !== 1) node = node.parentNode;
+      var startLn = node && node.closest ? node.closest('.ln') : null;
+      node = range.endContainer;
+      while (node && node.nodeType !== 1) node = node.parentNode;
+      var endLn = node && node.closest ? node.closest('.ln') : null;
+      function rightNum(ln) {
+        if (!ln) return null;
+        var g = ln.querySelector('.gut');
+        if (!g) return null;
+        var parts = g.textContent.trim().split(/\\s+/);
+        var n = parseInt(parts[parts.length - 1], 10);
+        return isNaN(n) ? null : n;
+      }
+      var s = rightNum(startLn), e = rightNum(endLn);
+      if (s && e) { out.startLine = Math.min(s,e); out.endLine = Math.max(s,e); }
+    }
+    return out;
+  }
+  return out;
+}
+
+function sendPasteToTerm(text) {
+  if (!ws || ws.readyState !== 1) {
+    showToast('Terminal not connected', 'err');
+    return false;
+  }
+  // xterm bracketed-paste sequence + Enter
+  var BEGIN = '\\u001b[200~';
+  var END = '\\u001b[201~';
+  // Decode escape literals; pty sees raw bytes
+  ws.send('\\u001b[200~'); // ESC [ 200 ~  (start paste)
+  ws.send(text);
+  ws.send('\\u001b[201~'); // end paste
+  ws.send('\\r');
+  return true;
+}
+
+window.askAboutSelection = async function() {
+  if (!state.currentFile) return;
+  var sel = getCurrentSelection();
+  var snippet = sel.text;
+  var lineNote = '';
+  if (snippet) {
+    if (sel.startLine && sel.endLine) {
+      lineNote = ' (lines ' + sel.startLine +
+        (sel.endLine !== sel.startLine ? '-' + sel.endLine : '') + ')';
+    }
+  } else {
+    // No selection: offer the whole file but warn if huge
+    snippet = state.fileOnDisk || '';
+    if (snippet.length > 8000) {
+      showToast('No selection; file is large \u2014 select a region first.', 'warn');
+      return;
+    }
+    lineNote = ' (entire file, ' + snippet.split('\\n').length + ' lines)';
+  }
+  // Trim trailing whitespace per line to keep prompt tidy; keep leading indentation
+  var trimmed = snippet.replace(/[ \\t]+$/gm, '');
+  showAskModal({
+    file: state.currentFile,
+    lineNote: lineNote,
+    snippet: trimmed,
+    lang: detectLang(state.currentFile),
+  });
+};
+
+function showAskModal(opts) {
+  // Build a richer modal with two textareas
+  var bd = document.createElement('div'); bd.className = 'modal-bd';
+  var html = '<div class="modal" style="width:600px">' +
+    '<h3>Ask Sapper about this</h3>' +
+    '<label>File</label>' +
+    '<div class="hint" style="font-family:ui-monospace,monospace;color:var(--muted);font-size:11px">' +
+      esc(opts.file) + esc(opts.lineNote || '') + '</div>' +
+    '<label>Your comment / question</label>' +
+    '<textarea id="askComment" placeholder="What should Sapper do with this? (e.g. \\'explain\\', \\'refactor\\', \\'why did this change?\\')" ' +
+      'style="width:100%;box-sizing:border-box;height:60px;background:var(--bg);color:var(--fg);' +
+      'border:1px solid var(--border);border-radius:4px;padding:7px 9px;' +
+      'font-family:inherit;font-size:12px;outline:none;resize:vertical"></textarea>' +
+    '<label>Snippet (editable)</label>' +
+    '<textarea id="askSnippet" spellcheck="false" ' +
+      'style="width:100%;box-sizing:border-box;height:240px;background:var(--bg);color:var(--fg);' +
+      'border:1px solid var(--border);border-radius:4px;padding:7px 9px;' +
+      'font-family:ui-monospace,\\'SF Mono\\',monospace;font-size:11.5px;line-height:1.5;' +
+      'outline:none;white-space:pre;overflow:auto;resize:vertical"></textarea>' +
+    '<div class="actions">' +
+      '<button id="askCancel">Cancel</button>' +
+      '<button id="askSend" class="primary">Send to Sapper</button>' +
+    '</div></div>';
+  bd.innerHTML = html;
+  document.body.appendChild(bd);
+  var ta = bd.querySelector('#askSnippet');
+  ta.value = opts.snippet;
+  var ca = bd.querySelector('#askComment');
+  ca.focus();
+  var cancel = function(){ bd.remove(); };
+  bd.querySelector('#askCancel').addEventListener('click', cancel);
+  bd.addEventListener('click', function(e){ if (e.target === bd) cancel(); });
+  bd.querySelector('#askSend').addEventListener('click', function(){
+    var comment = ca.value.trim();
+    var code = ta.value;
+    if (!comment && !code) { cancel(); return; }
+    var lang = opts.lang || '';
+    var fence = BT + BT + BT;
+    var msg = '';
+    if (comment) msg += comment + '\\n\\n';
+    msg += 'From ' + BT + opts.file + BT + (opts.lineNote || '') + ':\\n';
+    msg += fence + lang + '\\n' + code + '\\n' + fence;
+    var ok = sendPasteToTerm(msg);
+    if (ok) { showToast('Sent to Sapper'); cancel(); term && term.focus(); }
+  });
+  // Cmd/Ctrl+Enter = send
+  ca.addEventListener('keydown', function(e){
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { bd.querySelector('#askSend').click(); }
+    if (e.key === 'Escape') cancel();
+  });
+}
+function ensureEditor() {
+  if (cm || !window.CodeMirror) return cm;
+  CodeMirror.modeURL = 'https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/%N/%N.min.js';
+  var ta = document.getElementById('pedit');
+  cm = CodeMirror.fromTextArea(ta, {
+    lineNumbers: true,
+    theme: 'material-darker',
+    matchBrackets: true,
+    autoCloseBrackets: true,
+    styleActiveLine: true,
+    indentUnit: 2,
+    tabSize: 2,
+    smartIndent: true,
+    lineWrapping: false,
+    extraKeys: {
+      'Cmd-S': function(){ window.saveEdit(); },
+      'Ctrl-S': function(){ window.saveEdit(); },
+      'Cmd-F': 'findPersistent',
+      'Ctrl-F': 'findPersistent',
+      'Esc': function(){ window.cancelEdit(); },
+      'Tab': function(c){ if (c.somethingSelected()) c.indentSelection('add'); else c.replaceSelection(Array(c.getOption('indentUnit')+1).join(' ')); }
+    }
+  });
+  cm.on('cursorActivity', function(){
+    var p = cm.getCursor();
+    var el = document.getElementById('edPos');
+    if (el) el.textContent = 'L' + (p.line+1) + ':' + (p.ch+1);
+  });
+  var lnBtn = document.getElementById('edLines');
+  if (lnBtn) lnBtn.onclick = function(){ cm.setOption('lineNumbers', !cm.getOption('lineNumbers')); };
+  var wrBtn = document.getElementById('edWrap');
+  if (wrBtn) wrBtn.onclick = function(){ cm.setOption('lineWrapping', !cm.getOption('lineWrapping')); cm.refresh(); };
+  return cm;
+}
+
+// Extras CodeMirror's meta.js doesn't always cover well
+var EXTRA_MODES = {
+  erl: { mime: 'text/x-erlang', mode: 'erlang' },
+  hrl: { mime: 'text/x-erlang', mode: 'erlang' },
+  ex:  { mime: 'text/x-elixir', mode: 'elixir' }, // not bundled in CM5; falls back gracefully
+  exs: { mime: 'text/x-elixir', mode: 'elixir' },
+  rs:  { mime: 'text/x-rustsrc', mode: 'rust' },
+  kt:  { mime: 'text/x-kotlin', mode: 'clike' },
+  kts: { mime: 'text/x-kotlin', mode: 'clike' },
+  swift:{ mime: 'text/x-swift', mode: 'swift' },
+  dart:{ mime: 'application/dart', mode: 'dart' },
+  zig: { mime: 'text/x-csrc', mode: 'clike' },
+  toml:{ mime: 'text/x-toml', mode: 'toml' },
+  vue: { mime: 'text/html', mode: 'htmlmixed' },
+  svelte:{ mime: 'text/html', mode: 'htmlmixed' },
+  mjs: { mime: 'application/javascript', mode: 'javascript' },
+  cjs: { mime: 'application/javascript', mode: 'javascript' },
+  jsx: { mime: 'text/jsx', mode: 'jsx' },
+  tsx: { mime: 'text/typescript-jsx', mode: 'jsx' },
+  ts:  { mime: 'application/typescript', mode: 'javascript' },
+  ipynb:{ mime: 'application/json', mode: 'javascript' },
+  log: { mime: 'text/plain', mode: 'null' },
+  env: { mime: 'text/x-sh', mode: 'shell' },
+  dockerfile:{ mime: 'text/x-dockerfile', mode: 'dockerfile' }
+};
+
+function setEditorMode(path) {
+  if (!cm || !window.CodeMirror) return;
+  var name = (path || '').split('/').pop() || '';
+  var ext = (name.split('.').pop() || '').toLowerCase();
+  var info = null;
+  if (CodeMirror.findModeByFileName) info = CodeMirror.findModeByFileName(name);
+  if (!info && EXTRA_MODES[ext]) info = EXTRA_MODES[ext];
+  if (!info && CodeMirror.findModeByExtension) info = CodeMirror.findModeByExtension(ext);
+  if (!info) info = { mime: 'text/plain', mode: 'null' };
+  cm.setOption('mode', info.mime || info.mode);
+  if (info.mode && info.mode !== 'null' && CodeMirror.autoLoadMode) {
+    try { CodeMirror.autoLoadMode(cm, info.mode); } catch(e){}
+  }
+  var langEl = document.getElementById('edLang');
+  if (langEl) langEl.textContent = (info.name || info.mode || 'text');
+}
 
 // ─── Config tab ──────────────────────────────────────────────
 window.reloadConfig = function() {
@@ -1713,6 +2207,57 @@ window.sendOpenPrompt = async function() {
 connectPty();
 connectEvents();
 loadTree();
+setupResizers();
+
+function setupResizers() {
+  initResizer('sideRes', 'side', 'right');   // drag adjusts #side width
+  initResizer('prevRes', 'preview', 'left'); // drag adjusts #preview width
+  // Hide preview resizer while preview is hidden
+  updateResizerVisibility();
+}
+function updateResizerVisibility() {
+  var prev = document.getElementById('preview');
+  var pr = document.getElementById('prevRes');
+  if (pr) pr.classList.toggle('hidden', prev.classList.contains('hidden'));
+  var side = document.getElementById('side');
+  var sr = document.getElementById('sideRes');
+  if (sr) sr.classList.toggle('hidden', side.classList.contains('hidden'));
+}
+function initResizer(barId, paneId, edge) {
+  var bar = document.getElementById(barId);
+  var pane = document.getElementById(paneId);
+  if (!bar || !pane) return;
+  bar.addEventListener('mousedown', function(ev){
+    if (pane.classList.contains('hidden')) return;
+    ev.preventDefault();
+    bar.classList.add('active');
+    document.body.classList.add('resizing');
+    var startX = ev.clientX;
+    var startW = pane.getBoundingClientRect().width;
+    function move(e){
+      var dx = e.clientX - startX;
+      var w = edge === 'right' ? startW + dx : startW - dx;
+      w = Math.max(180, Math.min(window.innerWidth - 320, w));
+      pane.style.width = w + 'px';
+      try { fit.fit(); } catch(e){}
+      if (cm) try { cm.refresh(); } catch(e){}
+    }
+    function up(){
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+      bar.classList.remove('active');
+      document.body.classList.remove('resizing');
+    }
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  });
+  // double-click to reset
+  bar.addEventListener('dblclick', function(){
+    pane.style.width = '';
+    try { fit.fit(); } catch(e){}
+    if (cm) try { cm.refresh(); } catch(e){}
+  });
+}
 </script>
 </body>
 </html>`;
@@ -1787,8 +2332,38 @@ const server = http.createServer(async (req, res) => {
         if (stat.size > 2 * 1024 * 1024) return json(res, { error: 'file too large (>2MB)', size: stat.size, binary: true }, 200);
         const buf = fs.readFileSync(abs);
         if (looksBinary(buf)) return json(res, { binary: true, size: stat.size });
-        return json(res, { content: buf.toString('utf8'), size: stat.size });
+        const text = buf.toString('utf8');
+        // seed snapshot so a subsequent edit can produce a diff
+        if (!snapshots.has(rel) && stat.size <= SNAP_MAX_BYTES) {
+          snapshots.set(rel, { prev: null, curr: text });
+        }
+        return json(res, { content: text, size: stat.size });
       } catch (e) { return json(res, { error: e.message }, 500); }
+    }
+
+    // ── Diff: compare last-known snapshot vs current content
+    if (req.method === 'GET' && path === '/api/diff') {
+      const rel = url.searchParams.get('path') || '';
+      const abs = safePath(rel);
+      if (!abs) return json(res, { error: 'invalid path' }, 400);
+      const snap = snapshots.get(rel);
+      let curr = '';
+      try {
+        if (fs.existsSync(abs)) {
+          const st = fs.statSync(abs);
+          if (st.isFile() && st.size <= SNAP_MAX_BYTES) {
+            const buf = fs.readFileSync(abs);
+            if (!looksBinary(buf)) curr = buf.toString('utf8');
+            else return json(res, { error: 'binary file' }, 200);
+          } else if (st.size > SNAP_MAX_BYTES) {
+            return json(res, { error: 'file too large for diff (>' + Math.round(SNAP_MAX_BYTES/1024) + 'KB)' }, 200);
+          }
+        }
+      } catch (e) { return json(res, { error: e.message }, 500); }
+      if (!snap || snap.prev == null) {
+        return json(res, { prev: null, curr, message: 'No prior snapshot — open the file again before the next change to enable diff.' });
+      }
+      return json(res, { prev: snap.prev, curr });
     }
 
     // ── File raw (images)
@@ -2049,6 +2624,52 @@ const eventsClients = new Set();
 const recentEvents = new Map(); // path -> timestamp (dedupe burst events)
 const knownPaths = new Set(); // paths we have seen exist (for create vs delete detection)
 const recentActivity = []; // last N classified events for late-joining clients
+const SNAP_MAX_BYTES = 512 * 1024; // per-file snapshot cap (512KB)
+const SNAP_MAX_FILES = 200;
+const snapshots = new Map(); // path -> { prev: string|null, curr: string }
+
+function isSnapshottable(abs) {
+  try {
+    const st = fs.statSync(abs);
+    if (!st.isFile()) return false;
+    if (st.size > SNAP_MAX_BYTES) return false;
+    return true;
+  } catch { return false; }
+}
+
+function readTextMaybe(abs) {
+  try {
+    const buf = fs.readFileSync(abs);
+    // Quick binary probe: count NULs in first 4KB
+    const slice = buf.subarray(0, Math.min(buf.length, 4096));
+    for (let i = 0; i < slice.length; i++) if (slice[i] === 0) return null;
+    return buf.toString('utf8');
+  } catch { return null; }
+}
+
+function bumpSnapshot(rel, abs, kind) {
+  if (kind === 'deleted') {
+    const prev = snapshots.get(rel);
+    if (prev) snapshots.set(rel, { prev: prev.curr, curr: '' });
+    return;
+  }
+  if (!isSnapshottable(abs)) return;
+  const text = readTextMaybe(abs);
+  if (text == null) return;
+  const existing = snapshots.get(rel);
+  if (existing) {
+    if (existing.curr === text) return; // no actual change
+    snapshots.set(rel, { prev: existing.curr, curr: text });
+  } else {
+    // first time we see this file — no prior version available
+    snapshots.set(rel, { prev: null, curr: text });
+  }
+  // simple LRU-ish cap
+  if (snapshots.size > SNAP_MAX_FILES) {
+    const firstKey = snapshots.keys().next().value;
+    if (firstKey) snapshots.delete(firstKey);
+  }
+}
 
 function classifyEvent(rawEvent, rel, abs) {
   // fs.watch only gives 'rename' or 'change'
@@ -2093,6 +2714,8 @@ function startWatcher() {
       const kind = classifyEvent(event, rel, abs);
       if (kind === 'deleted') knownPaths.delete(rel);
       else knownPaths.add(rel);
+      // capture old/new content snapshot for diff (text files only, async-safe)
+      try { bumpSnapshot(rel, abs, kind); } catch {}
       let isDir = false;
       try { isDir = fs.statSync(abs).isDirectory(); } catch {}
       const enriched = { event, kind, path: rel, isDir, ts: now };
