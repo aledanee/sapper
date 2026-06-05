@@ -1019,6 +1019,12 @@ let _useNativeToolsFlag = false;
 // Models known to reject `think:true` (populated lazily on first failure).
 const modelsWithoutThinking = new Set();
 
+// Models known to emit malformed native tool calls (e.g. broken XML that
+// Ollama's parser rejects with "element <function> closed by </parameter>").
+// Once a model lands here we stop sending `tools` to it for the rest of the
+// session — it falls back to text-marker tools, which any model can produce.
+const modelsWithBrokenNativeTools = new Set();
+
 function buildSystemPrompt(agentContent = null, skillContents = []) {
   const now = new Date();
   const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -3013,7 +3019,8 @@ const COMMAND_GROUPS = Object.freeze([
     rows: [
       ['@ or /attach', 'Pick files to attach interactively'],
       ['@file', 'Attach a file inline, for example @src/app.js'],
-      ['/scan', 'Scan the codebase into context'],
+      ['/scan [path]', 'Scan a folder (code files only) into context'],
+      ['/include [path]', 'Attach every readable file in a folder (deep)'],
       ['/index', 'Rebuild the workspace graph'],
       ['/graph file', 'Show related files from the graph'],
       ['/symbol name', 'Search indexed functions and classes'],
@@ -4183,6 +4190,50 @@ function scanCodebase(dir = '.', depth = 0, maxDepth = 5) {
   }
   
   return { files, totalSize };
+}
+
+// Walk a folder and read every readable text file's contents (broader than
+// scanCodebase, which is restricted to CODE_EXTENSIONS). Used by /include
+// when the user wants ALL files in a folder attached (not just a tree+code).
+function includeFolderContents(dir, depth = 0, maxDepth = 8, acc = null) {
+  acc = acc || { files: [], totalSize: 0, skipped: [], reachedCap: false };
+  if (acc.reachedCap || depth > maxDepth) return acc;
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+  catch (e) { return acc; }
+  for (const entry of entries) {
+    if (acc.reachedCap) break;
+    const fullPath = dir === '.' ? entry.name : `${dir}/${entry.name}`;
+    if (entry.isDirectory()) {
+      if (shouldIgnore(entry.name) || entry.name.startsWith('.')) continue;
+      includeFolderContents(fullPath, depth + 1, maxDepth, acc);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    if (shouldIgnore(fullPath) || shouldIgnore(entry.name)) continue;
+    let stats;
+    try { stats = fs.statSync(fullPath); } catch (e) { continue; }
+    if (stats.size > getMaxFileSize()) {
+      acc.skipped.push({ path: fullPath, size: stats.size, reason: 'too large' });
+      continue;
+    }
+    if (acc.totalSize + stats.size > getMaxScanSize()) {
+      acc.skipped.push({ path: fullPath, size: stats.size, reason: 'total limit reached' });
+      acc.reachedCap = true;
+      continue;
+    }
+    let content;
+    try { content = fs.readFileSync(fullPath, 'utf8'); }
+    catch (e) { acc.skipped.push({ path: fullPath, reason: e.message }); continue; }
+    // Skip binary-looking files (NUL byte in first 4KB)
+    if (content.length && content.slice(0, 4096).indexOf('\u0000') !== -1) {
+      acc.skipped.push({ path: fullPath, size: stats.size, reason: 'binary' });
+      continue;
+    }
+    acc.files.push({ path: fullPath, size: stats.size, content });
+    acc.totalSize += stats.size;
+  }
+  return acc;
 }
 
 // Scan directory for files (for @ file picker)
@@ -6262,6 +6313,12 @@ async function runSapper() {
       toolModeLabel = 'native tool calling';
     } else {
       toolModeLabel = 'text markers';
+    }
+    // If we previously caught this model emitting malformed tool XML, stay
+    // on text-marker tools for the whole session.
+    if (modelsWithBrokenNativeTools.has(selectedModel)) {
+      useNativeTools = false;
+      toolModeLabel = 'text markers (native tools disabled — model emits broken XML)';
     }
     // Extract context window size from model_info
     // Different model families use different keys: llama.context_length, qwen2.context_length, etc.
@@ -8424,6 +8481,61 @@ async function runSapper() {
         continue;
       }
 
+      // /include <path> — deep-attach every readable file in a folder
+      // (broader than /scan: not limited to code extensions). Used by the
+      // Index tray's "deep" toggle on folder chips.
+      if (input.toLowerCase() === '/include' || input.toLowerCase().startsWith('/include ')) {
+        let incTarget = '.';
+        const incRest = input.slice(8).trim();
+        if (incRest) {
+          if ((incRest.startsWith('"') && incRest.endsWith('"')) ||
+              (incRest.startsWith("'") && incRest.endsWith("'"))) {
+            incTarget = incRest.slice(1, -1);
+          } else {
+            incTarget = incRest;
+          }
+        }
+        if (!fs.existsSync(incTarget)) {
+          console.log(chalk.red(`Path not found: ${incTarget}`));
+          continue;
+        }
+        const incStat = fs.statSync(incTarget);
+        if (!incStat.isDirectory()) {
+          console.log(chalk.red(`Not a directory: ${incTarget}`));
+          continue;
+        }
+        console.log(uiCleanMode()
+          ? chalk.cyan(`\nIncluding all files in ${incTarget}...`)
+          : chalk.cyan(`\n📚 Including all files in ${incTarget}...`));
+        const incResult = includeFolderContents(incTarget);
+        if (incResult.files.length === 0) {
+          console.log(chalk.yellow(`No readable files found in ${incTarget}.`));
+          if (incResult.skipped.length) {
+            console.log(chalk.gray(`(${incResult.skipped.length} skipped — too large, binary, or ignored)`));
+          }
+          continue;
+        }
+        const incBlock = formatFileAttachments(incResult.files);
+        messages.push({
+          role: 'user',
+          content: `Including all readable files from ${incTarget}:\n${incBlock}`
+        });
+        console.log(uiCleanMode()
+          ? chalk.green(`Included ${incResult.files.length} files (~${Math.round(incResult.totalSize/1024)}KB) from ${incTarget}`)
+          : chalk.green(`✅ Included ${incResult.files.length} files (~${Math.round(incResult.totalSize/1024)}KB) from ${incTarget}`));
+        if (incResult.skipped.length > 0) {
+          console.log(uiCleanMode()
+            ? chalk.yellow(`Skipped ${incResult.skipped.length} files (too large, binary, or limit reached)`)
+            : chalk.yellow(`⏭️  Skipped ${incResult.skipped.length} files (too large, binary, or limit reached)`));
+        }
+        if (incResult.reachedCap) {
+          console.log(chalk.yellow(`⚠️  Hit total-size cap (~${Math.round(getMaxScanSize()/1024)}KB); some files were not included.`));
+        }
+        ensureSapperDir();
+        fs.writeFileSync(CONTEXT_FILE, JSON.stringify(messages, null, 2));
+        continue;
+      }
+
       if (input.startsWith('/') && !input.startsWith('//') && !agentHandled) {
         const commandToken = input.slice(1).trim().split(/\s+/)[0] || '';
         const suggestions = suggestSlashCommands(commandToken, 5);
@@ -8654,6 +8766,9 @@ async function runSapper() {
       let turnThinkingEnabled = shouldUseThinkingForInput(input);
       if (modelsWithoutThinking.has(selectedModel)) turnThinkingEnabled = false;
 
+      // Auto-recover once per turn if the model emits malformed native tool XML.
+      let nativeToolXmlRetried = false;
+
       let active = true;
       while (active) {
         if (stepMode) await safeQuestion(chalk.gray(promptLabel('questions.stepContinue', '[STEP] Press Enter to let AI think...')));
@@ -8866,8 +8981,31 @@ async function runSapper() {
             process.stdout.write(`\n${UI.slate('  └─')}\n`);
           }
           process.stdout.write('\r\x1b[K');
-          console.error(chalk.red(`\n❌ Stream error: ${streamErrored.message || streamErrored}`));
-          logEntry('error', { message: `Stream error: ${streamErrored.message || streamErrored}` });
+          const streamErrMsg = streamErrored.message || String(streamErrored);
+          // Detect malformed native-tool XML from small/quantized models.
+          // Ollama's parser surfaces this as e.g. "XML syntax error on line 3:
+          // element <function> closed by </parameter>". Disable native tools
+          // for this model and retry the same turn once.
+          const isXmlToolErr = /xml syntax|element <\w+> closed by|invalid character|unexpected end of/i.test(streamErrMsg);
+          if (isXmlToolErr && useNativeTools && !nativeToolXmlRetried) {
+            nativeToolXmlRetried = true;
+            modelsWithBrokenNativeTools.add(selectedModel);
+            useNativeTools = false;
+            toolModeLabel = 'text markers (auto: model emits broken tool XML)';
+            console.error(chalk.yellow(
+              `\n⚠ "${selectedModel}" emitted malformed tool XML — disabling native tool calling for this session and retrying.`
+            ));
+            console.error(chalk.gray('  Tip: a larger / instruction-tuned model (e.g. qwen2.5:7b, llama3.1) will not hit this.'));
+            logEntry('warn', { message: `Disabled native tools for ${selectedModel}: ${streamErrMsg}` });
+            // Reset per-attempt state and try this same turn again without tools.
+            msg = '';
+            thinkMsg = '';
+            nativeToolCalls = [];
+            streamErrored = null;
+            continue;
+          }
+          console.error(chalk.red(`\n❌ Stream error: ${streamErrMsg}`));
+          logEntry('error', { message: `Stream error: ${streamErrMsg}` });
           active = false;
           continue;
         }

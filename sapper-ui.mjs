@@ -313,6 +313,12 @@ function buildHTML() {
   #indexPanel .chip .cp { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #indexPanel .chip .cx { cursor: pointer; opacity: .55; padding: 0 3px; font-size: 12px; }
   #indexPanel .chip .cx:hover { opacity: 1; color: var(--red); }
+  #indexPanel .chip .cdeep { cursor: pointer; font-size: 9px; line-height: 1;
+    padding: 1px 5px; border-radius: 7px; border: 1px solid var(--border2);
+    background: rgba(255,255,255,.04); color: var(--muted); text-transform: uppercase;
+    letter-spacing: .04em; user-select: none; }
+  #indexPanel .chip .cdeep:hover { color: var(--fg); border-color: var(--accent); }
+  #indexPanel .chip .cdeep.on { color: #fff; background: var(--accent); border-color: var(--accent); }
   #indexPanel .empty { padding: 8px 10px; color: var(--dim); font-style: italic; }
   #indexPanel .icmt { display: block; margin: 4px 10px 8px; width: calc(100% - 20px);
     box-sizing: border-box; background: var(--panel); color: var(--fg);
@@ -388,6 +394,32 @@ function buildHTML() {
   .modal .actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   .modal .actions button.primary:hover { filter: brightness(1.1); }
   .modal .actions button.danger { background: var(--red); color: #fff; border-color: var(--red); }
+
+  /* ─── Terminal Settings modal ─── */
+  #tsModal .modal { width: 520px; max-height: 92vh; overflow-y: auto; }
+  .ts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+  .ts-full { grid-column: 1 / -1; }
+  .ts-row { display: flex; align-items: center; gap: 8px; margin: 2px 0 6px; }
+  .ts-row input[type=range] { flex: 1; accent-color: var(--accent); cursor: pointer; }
+  .ts-row .tsv { min-width: 34px; text-align: right; font-size: 11px;
+    color: var(--accent); font-family: ui-monospace,'SF Mono',monospace; }
+  .ts-row select, .ts-row input[type=color], .ts-row input[type=text] { flex: 1; }
+  .ts-row input[type=color] { height: 28px; padding: 2px; border-radius: 4px;
+    border: 1px solid var(--border2); background: var(--bg); cursor: pointer; }
+  .ts-swatches { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
+  .ts-swatch { display: flex; flex-direction: column; align-items: center; gap: 3px;
+    cursor: pointer; user-select: none; }
+  .ts-swatch .tsb { width: 44px; height: 30px; border-radius: 6px; border: 2px solid transparent;
+    transition: border-color .15s, transform .1s; }
+  .ts-swatch:hover .tsb { transform: scale(1.06); }
+  .ts-swatch.active .tsb { border-color: var(--accent); }
+  .ts-swatch span { font-size: 9px; color: var(--muted); }
+  .ts-section { font-size: 10px; color: var(--dim); text-transform: uppercase;
+    letter-spacing: .6px; margin: 12px 0 6px; padding-bottom: 4px;
+    border-bottom: 1px solid var(--border); }
+  .ts-check { display: flex; align-items: center; gap: 6px; margin: 4px 0 8px;
+    font-size: 12px; color: var(--muted); cursor: pointer; }
+  .ts-check input { accent-color: var(--accent); cursor: pointer; }
 
   /* Config / Agents / Skills lists */
   .pane-section { padding: 10px 14px; }
@@ -617,6 +649,7 @@ function buildHTML() {
     <button onclick="sendCmd('/model')">model</button>
     <button onclick="sendCmd('/clear')">clear</button>
     <button onclick="restartSapper()">restart</button>
+    <button title="Terminal appearance settings" onclick="openTermSettings()" style="font-size:13px;padding:3px 7px;">&#9881;</button>
   </div>
 
   <div id="body">
@@ -741,6 +774,114 @@ function buildHTML() {
 </div>
 <div id="toast"></div>
 
+<!-- Terminal Settings Modal -->
+<div id="tsModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:12000;display:none;align-items:center;justify-content:center;">
+  <div class="modal" style="width:520px;max-height:92vh;overflow-y:auto;">
+    <h3>&#9881; Terminal Appearance</h3>
+
+    <div class="ts-section">Themes</div>
+    <div class="ts-swatches" id="tsSwatches"></div>
+
+    <div class="ts-section">Colors</div>
+    <div class="ts-grid">
+      <div>
+        <label>Background</label>
+        <div class="ts-row">
+          <input type="color" id="tsBg" />
+          <input type="text" id="tsBgHex" placeholder="#0a0e14" style="width:90px;flex:none;font-family:ui-monospace,monospace;font-size:11px;" />
+        </div>
+      </div>
+      <div>
+        <label>Foreground</label>
+        <div class="ts-row">
+          <input type="color" id="tsFg" />
+          <input type="text" id="tsFgHex" placeholder="#e6edf3" style="width:90px;flex:none;font-family:ui-monospace,monospace;font-size:11px;" />
+        </div>
+      </div>
+      <div>
+        <label>Cursor</label>
+        <div class="ts-row">
+          <input type="color" id="tsCursor" />
+          <input type="text" id="tsCursorHex" placeholder="#58a6ff" style="width:90px;flex:none;font-family:ui-monospace,monospace;font-size:11px;" />
+        </div>
+      </div>
+      <div>
+        <label>Selection</label>
+        <div class="ts-row">
+          <input type="color" id="tsSel" />
+          <input type="text" id="tsSelHex" placeholder="#58a6ff" style="width:90px;flex:none;font-family:ui-monospace,monospace;font-size:11px;" />
+        </div>
+      </div>
+    </div>
+
+    <div class="ts-section">Font</div>
+    <div class="ts-grid">
+      <div class="ts-full">
+        <label>Font Family</label>
+        <div class="ts-row">
+          <select id="tsFont">
+            <option value='"SF Mono","Fira Code","JetBrains Mono",Menlo,ui-monospace,monospace'>SF Mono / Fira Code</option>
+            <option value='"JetBrains Mono","Fira Code",ui-monospace,monospace'>JetBrains Mono</option>
+            <option value='"Fira Code","Source Code Pro",ui-monospace,monospace'>Fira Code</option>
+            <option value='"Cascadia Code","Consolas",ui-monospace,monospace'>Cascadia Code</option>
+            <option value='"Monaco",Menlo,ui-monospace,monospace'>Monaco</option>
+            <option value='Menlo,ui-monospace,monospace'>Menlo</option>
+            <option value='"Courier New",monospace'>Courier New</option>
+            <option value='ui-monospace,monospace'>System Mono</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label>Size &mdash; <span id="tsFontSzV">13</span>px</label>
+        <div class="ts-row">
+          <input type="range" id="tsFontSz" min="9" max="28" step="1" value="13" oninput="document.getElementById('tsFontSzV').textContent=this.value" />
+        </div>
+      </div>
+      <div>
+        <label>Line Height &mdash; <span id="tsLhV">1.25</span></label>
+        <div class="ts-row">
+          <input type="range" id="tsLh" min="1.0" max="2.0" step="0.05" value="1.25" oninput="document.getElementById('tsLhV').textContent=parseFloat(this.value).toFixed(2)" />
+        </div>
+      </div>
+    </div>
+
+    <div class="ts-section">Cursor &amp; Behavior</div>
+    <div class="ts-grid">
+      <div>
+        <label>Cursor Style</label>
+        <div class="ts-row">
+          <select id="tsCursorStyle">
+            <option value="bar">Bar |</option>
+            <option value="block">Block &#9646;</option>
+            <option value="underline">Underline _</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <label>Scrollback Lines</label>
+        <div class="ts-row">
+          <select id="tsScrollback">
+            <option value="1000">1,000</option>
+            <option value="5000">5,000</option>
+            <option value="10000" selected>10,000</option>
+            <option value="50000">50,000</option>
+          </select>
+        </div>
+      </div>
+      <div class="ts-full">
+        <label class="ts-check"><input type="checkbox" id="tsCursorBlink" checked /> Cursor blink</label>
+        <label class="ts-check"><input type="checkbox" id="tsLigatures" /> Font ligatures (requires compatible font)</label>
+      </div>
+    </div>
+
+    <div class="modal-actions" style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+      <button onclick="tsReset()" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:6px 12px;font-size:12px;cursor:pointer;">Reset defaults</button>
+      <button onclick="document.getElementById('tsModal').style.display='none'" style="background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:6px 12px;font-size:12px;cursor:pointer;">Close</button>
+      <button onclick="tsApply(true)" style="background:var(--accent);color:#fff;border:1px solid var(--accent);border-radius:5px;padding:6px 14px;font-size:12px;cursor:pointer;">Apply &amp; Save</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
@@ -824,7 +965,184 @@ try { term.loadAddon(new WebLinksAddon.WebLinksAddon()); } catch(e){}
 term.open(document.getElementById('term-wrap'));
 setTimeout(function(){ try { fit.fit(); } catch(e){} }, 30);
 
-var ws = null, reconnectTimer = null;
+// ─── Terminal Settings ────────────────────────────────────────
+var TS_DEFAULTS = {
+  fontSize: 13, lineHeight: 1.25, fontFamily: '"SF Mono","Fira Code","JetBrains Mono",Menlo,ui-monospace,monospace',
+  cursorStyle: 'bar', cursorBlink: true, scrollback: 10000, ligatures: false,
+  bg: '#0a0e14', fg: '#e6edf3', cursor: '#58a6ff', sel: '#58a6ff'
+};
+
+var TS_THEMES = [
+  { name:'Sapper Dark', bg:'#0a0e14', fg:'#e6edf3', cursor:'#58a6ff', sel:'#58a6ff',
+    colors:['#0a0e14','#484f58','#ff7b72','#3fb950','#d29922','#58a6ff','#bc8cff','#39c5cf'] },
+  { name:'GitHub Dark', bg:'#161b22', fg:'#c9d1d9', cursor:'#58a6ff', sel:'#388bfd',
+    colors:['#161b22','#484f58','#ff7b72','#3fb950','#d29922','#58a6ff','#bc8cff','#39c5cf'] },
+  { name:'Dracula', bg:'#282a36', fg:'#f8f8f2', cursor:'#ff79c6', sel:'#44475a',
+    colors:['#282a36','#44475a','#ff5555','#50fa7b','#f1fa8c','#6272a4','#ff79c6','#8be9fd'] },
+  { name:'One Dark', bg:'#282c34', fg:'#abb2bf', cursor:'#528bff', sel:'#3e4451',
+    colors:['#282c34','#3e4451','#e06c75','#98c379','#e5c07b','#61afef','#c678dd','#56b6c2'] },
+  { name:'Monokai', bg:'#272822', fg:'#f8f8f2', cursor:'#f8f8f2', sel:'#49483e',
+    colors:['#272822','#75715e','#f92672','#a6e22e','#f4bf75','#66d9e8','#ae81ff','#a1efe4'] },
+  { name:'Solarized', bg:'#002b36', fg:'#839496', cursor:'#268bd2', sel:'#073642',
+    colors:['#002b36','#073642','#dc322f','#859900','#b58900','#268bd2','#d33682','#2aa198'] },
+  { name:'Nord', bg:'#2e3440', fg:'#d8dee9', cursor:'#88c0d0', sel:'#4c566a',
+    colors:['#2e3440','#4c566a','#bf616a','#a3be8c','#ebcb8b','#5e81ac','#b48ead','#88c0d0'] },
+  { name:'Light', bg:'#ffffff', fg:'#24292e', cursor:'#0366d6', sel:'#0366d6',
+    colors:['#ffffff','#f6f8fa','#d73a49','#22863a','#b08800','#0366d6','#6f42c1','#005cc5'] }
+];
+
+var tsSettings = {};
+try { tsSettings = JSON.parse(localStorage.getItem('sapperTermSettings') || '{}') || {}; } catch(e) {}
+
+function tsGet(k) { return tsSettings[k] !== undefined ? tsSettings[k] : TS_DEFAULTS[k]; }
+
+function tsApplyToTerm(s) {
+  s = s || tsSettings;
+  var fontSize = s.fontSize !== undefined ? s.fontSize : TS_DEFAULTS.fontSize;
+  var lineHeight = s.lineHeight !== undefined ? s.lineHeight : TS_DEFAULTS.lineHeight;
+  var fontFamily = s.fontFamily !== undefined ? s.fontFamily : TS_DEFAULTS.fontFamily;
+  var cursorStyle = s.cursorStyle !== undefined ? s.cursorStyle : TS_DEFAULTS.cursorStyle;
+  var cursorBlink = s.cursorBlink !== undefined ? s.cursorBlink : TS_DEFAULTS.cursorBlink;
+  var scrollback  = s.scrollback !== undefined ? s.scrollback  : TS_DEFAULTS.scrollback;
+  var bg     = s.bg     !== undefined ? s.bg     : TS_DEFAULTS.bg;
+  var fg     = s.fg     !== undefined ? s.fg     : TS_DEFAULTS.fg;
+  var cursor = s.cursor !== undefined ? s.cursor : TS_DEFAULTS.cursor;
+  var sel    = s.sel    !== undefined ? s.sel    : TS_DEFAULTS.sel;
+
+  term.options.fontSize    = parseInt(fontSize, 10);
+  term.options.lineHeight  = parseFloat(lineHeight);
+  term.options.fontFamily  = fontFamily;
+  term.options.cursorStyle = cursorStyle;
+  term.options.cursorBlink = !!cursorBlink;
+  term.options.scrollback  = parseInt(scrollback, 10);
+  term.options.theme = {
+    background: bg, foreground: fg,
+    cursor: cursor, cursorAccent: bg,
+    selectionBackground: sel + '59',
+    black:'#484f58', red:'#ff7b72', green:'#3fb950', yellow:'#d29922',
+    blue:'#58a6ff', magenta:'#bc8cff', cyan:'#39c5cf', white:'#e6edf3',
+    brightBlack:'#6e7681', brightRed:'#ffa198', brightGreen:'#56d364',
+    brightYellow:'#e3b341', brightBlue:'#79c0ff', brightMagenta:'#d2a8ff',
+    brightCyan:'#56d4dd', brightWhite:'#f0f6fc'
+  };
+  // Also update the page background to match terminal background
+  document.documentElement.style.setProperty('--bg', bg);
+  document.documentElement.style.setProperty('--fg', fg);
+  document.documentElement.style.setProperty('--accent', cursor);
+  document.documentElement.style.setProperty('--accent2', cursor);
+  // Also update the xterm viewport background directly
+  document.querySelectorAll('.xterm .xterm-viewport').forEach(function(el){ el.style.backgroundColor = bg; });
+  try { fit.fit(); } catch(e) {}
+}
+
+// Apply saved settings on load (if any)
+(function(){
+  if (Object.keys(tsSettings).length > 0) tsApplyToTerm(tsSettings);
+})();
+
+function tsColorInputPair(colorId, hexId) {
+  var col = document.getElementById(colorId);
+  var hex = document.getElementById(hexId);
+  if (!col || !hex) return;
+  col.addEventListener('input', function() {
+    hex.value = col.value;
+  });
+  hex.addEventListener('change', function() {
+    var v = hex.value.trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(v)) col.value = v;
+  });
+  hex.addEventListener('input', function() {
+    var v = hex.value.trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(v)) col.value = v;
+  });
+}
+
+function tsApply(save) {
+  var s = {
+    fontSize:    parseInt(document.getElementById('tsFontSz').value, 10),
+    lineHeight:  parseFloat(document.getElementById('tsLh').value),
+    fontFamily:  document.getElementById('tsFont').value,
+    cursorStyle: document.getElementById('tsCursorStyle').value,
+    cursorBlink: document.getElementById('tsCursorBlink').checked,
+    scrollback:  parseInt(document.getElementById('tsScrollback').value, 10),
+    ligatures:   document.getElementById('tsLigatures').checked,
+    bg:     document.getElementById('tsBgHex').value || document.getElementById('tsBg').value,
+    fg:     document.getElementById('tsFgHex').value || document.getElementById('tsFg').value,
+    cursor: document.getElementById('tsCursorHex').value || document.getElementById('tsCursor').value,
+    sel:    document.getElementById('tsSelHex').value || document.getElementById('tsSel').value,
+  };
+  tsApplyToTerm(s);
+  if (save) {
+    tsSettings = s;
+    try { localStorage.setItem('sapperTermSettings', JSON.stringify(s)); } catch(e) {}
+    document.getElementById('tsModal').style.display = 'none';
+    showToast('Terminal settings saved');
+  }
+}
+
+function tsReset() {
+  tsSettings = {};
+  try { localStorage.removeItem('sapperTermSettings'); } catch(e) {}
+  tsApplyToTerm(TS_DEFAULTS);
+  tsLoadIntoForm(TS_DEFAULTS);
+  showToast('Reset to defaults');
+}
+
+function tsLoadIntoForm(s) {
+  var get = function(k){ return s[k] !== undefined ? s[k] : TS_DEFAULTS[k]; };
+  document.getElementById('tsFontSz').value = get('fontSize');
+  document.getElementById('tsFontSzV').textContent = get('fontSize');
+  document.getElementById('tsLh').value = get('lineHeight');
+  document.getElementById('tsLhV').textContent = parseFloat(get('lineHeight')).toFixed(2);
+  document.getElementById('tsFont').value = get('fontFamily');
+  document.getElementById('tsCursorStyle').value = get('cursorStyle');
+  document.getElementById('tsCursorBlink').checked = !!get('cursorBlink');
+  document.getElementById('tsScrollback').value = get('scrollback');
+  document.getElementById('tsLigatures').checked = !!get('ligatures');
+  var bg = get('bg'); document.getElementById('tsBg').value = bg; document.getElementById('tsBgHex').value = bg;
+  var fg = get('fg'); document.getElementById('tsFg').value = fg; document.getElementById('tsFgHex').value = fg;
+  var c  = get('cursor'); document.getElementById('tsCursor').value = c; document.getElementById('tsCursorHex').value = c;
+  var sl = get('sel'); document.getElementById('tsSel').value = sl; document.getElementById('tsSelHex').value = sl;
+}
+
+function tsBuildSwatches() {
+  var cont = document.getElementById('tsSwatches');
+  if (!cont) return;
+  cont.innerHTML = TS_THEMES.map(function(t, i) {
+    var grad = 'background:linear-gradient(135deg,' + t.bg + ' 55%,' + t.cursor + ' 100%)';
+    return '<div class="ts-swatch" data-i="' + i + '" title="' + t.name + '">' +
+      '<div class="tsb" style="' + grad + '"></div>' +
+      '<span>' + t.name + '</span></div>';
+  }).join('');
+  cont.querySelectorAll('.ts-swatch').forEach(function(el) {
+    el.addEventListener('click', function() {
+      cont.querySelectorAll('.ts-swatch').forEach(function(e){ e.classList.remove('active'); });
+      el.classList.add('active');
+      var t = TS_THEMES[parseInt(el.getAttribute('data-i'), 10)];
+      document.getElementById('tsBg').value = t.bg; document.getElementById('tsBgHex').value = t.bg;
+      document.getElementById('tsFg').value = t.fg; document.getElementById('tsFgHex').value = t.fg;
+      document.getElementById('tsCursor').value = t.cursor; document.getElementById('tsCursorHex').value = t.cursor;
+      document.getElementById('tsSel').value = t.sel; document.getElementById('tsSelHex').value = t.sel;
+      tsApply(false); // live preview
+    });
+  });
+}
+
+window.openTermSettings = function() {
+  var modal = document.getElementById('tsModal');
+  tsLoadIntoForm(tsSettings);
+  tsBuildSwatches();
+  // Wire color input pairs
+  tsColorInputPair('tsBg','tsBgHex');
+  tsColorInputPair('tsFg','tsFgHex');
+  tsColorInputPair('tsCursor','tsCursorHex');
+  tsColorInputPair('tsSel','tsSelHex');
+  modal.style.display = 'flex';
+  // Close on backdrop click
+  modal.onclick = function(ev){ if (ev.target === modal) modal.style.display = 'none'; };
+};
+
+
 
 function connectPty() {
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1895,9 +2213,19 @@ function renderIndex() {
     var info = state.indexSet[p];
     var cls = info.isDir ? 'chip dir' : 'chip';
     var ico = info.isDir ? '&#128193;' : '&#128462;';
+    var deepBtn = '';
+    if (info.isDir) {
+      var deepOn = info.deep ? ' on' : '';
+      var deepLabel = info.deep ? 'deep' : 'scan';
+      var deepTitle = info.deep
+        ? 'Deep: include the contents of every readable file in this folder'
+        : 'Scan: list the folder and include code-file contents (smaller payload). Click to switch to deep.';
+      deepBtn = '<span class="cdeep' + deepOn + '" data-p="' + esc(p) + '" title="' + deepTitle + '">' + deepLabel + '</span>';
+    }
     return '<span class="' + cls + '" title="' + esc(p) + '">' +
       '<span>' + ico + '</span>' +
       '<span class="cp">' + esc(p) + '</span>' +
+      deepBtn +
       '<span class="cx" data-p="' + esc(p) + '" title="Remove">&times;</span>' +
       '</span>';
   }).join('');
@@ -1907,23 +2235,42 @@ function renderIndex() {
       toggleIndex(el.getAttribute('data-p'), state.indexSet[el.getAttribute('data-p')] && state.indexSet[el.getAttribute('data-p')].isDir);
     });
   });
+  chips.querySelectorAll('.cdeep').forEach(function(el){
+    el.addEventListener('click', function(ev){
+      ev.stopPropagation();
+      var p = el.getAttribute('data-p');
+      var info = state.indexSet[p];
+      if (!info || !info.isDir) return;
+      info.deep = !info.deep;
+      saveIndex();
+      renderIndex();
+    });
+  });
 }
 
 window.sendIndexToChat = function() {
   var paths = Object.keys(state.indexSet);
   if (!paths.length) { showToast('Index is empty', 'err'); return; }
   if (!ws || ws.readyState !== 1) { showToast('Terminal not connected', 'err'); return; }
-  var files = [], dirs = [];
+  var files = [], dirsShallow = [], dirsDeep = [];
   paths.forEach(function(p){
-    if (state.indexSet[p] && state.indexSet[p].isDir) dirs.push(p); else files.push(p);
+    var info = state.indexSet[p];
+    if (!info) return;
+    if (info.isDir) {
+      if (info.deep) dirsDeep.push(p); else dirsShallow.push(p);
+    } else {
+      files.push(p);
+    }
   });
   // Helper: quote paths that contain spaces, leave plain otherwise.
   function quoteIfNeeded(p) {
     return /\\s/.test(p) ? '"' + p.replace(/"/g, '\\\\"') + '"' : p;
   }
-  // 1) /scan each folder (each sent as its own command + Enter)
-  dirs.forEach(function(d){ sendPasteToTerm('/scan ' + quoteIfNeeded(d)); });
-  // 2) Build attachments token for files
+  // 1) /scan for shallow folders (file tree + code-file contents)
+  dirsShallow.forEach(function(d){ sendPasteToTerm('/scan ' + quoteIfNeeded(d)); });
+  // 2) /include for deep folders (every readable file's contents)
+  dirsDeep.forEach(function(d){ sendPasteToTerm('/include ' + quoteIfNeeded(d)); });
+  // 3) Build attachments token for files
   var atTokens = files.map(function(f){ return '@' + quoteIfNeeded(f); }).join(' ');
   var comment = (document.getElementById('idxComment') || {}).value || '';
   comment = comment.trim();
@@ -1936,8 +2283,10 @@ window.sendIndexToChat = function() {
     // Stage at cursor — no Enter, so the user can type their question
     sendRawToTerm(atTokens + ' ');
   }
+  var dirsTotal = dirsShallow.length + dirsDeep.length;
   showToast('Sent ' + files.length + ' file' + (files.length === 1 ? '' : 's') +
-            (dirs.length ? ' and ' + dirs.length + ' folder' + (dirs.length === 1 ? '' : 's') : '') +
+            (dirsTotal ? ' and ' + dirsTotal + ' folder' + (dirsTotal === 1 ? '' : 's') +
+              (dirsDeep.length ? ' (' + dirsDeep.length + ' deep)' : '') : '') +
             ' to chat');
   // Clear comment, clear index, refocus terminal
   var cmt = document.getElementById('idxComment'); if (cmt) cmt.value = '';
