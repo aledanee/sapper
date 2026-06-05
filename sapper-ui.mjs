@@ -161,7 +161,104 @@ function buildHTML() {
     --red: #f85149;
     --yellow: #d29922;
     --purple: #bc8cff;
+    --radius: 6px;
   }
+
+  /* ─── Studio theme — calmer palette, card-based composer (toggle in top bar) ─── */
+  body.studio {
+    --bg: #131316;
+    --panel: #18181b;
+    --panel2: #1f1f23;
+    --border: #2a2a30;
+    --border2: #3a3a42;
+    --fg: #ececef;
+    --muted: #9b9ba4;
+    --dim: #6c6c75;
+    --accent: #7aa2f7;
+    --accent2: #9eb8ff;
+    --radius: 10px;
+  }
+  body.studio #bar { height: 44px; background: var(--bg); border-bottom: 1px solid var(--border); }
+  body.studio #bar button { border-radius: 8px; padding: 5px 12px; }
+  body.studio #side, body.studio #preview { background: var(--bg); }
+  body.studio .tabs { padding: 6px 8px 0; gap: 4px; }
+  body.studio .tabs button { border-radius: 8px 8px 0 0; }
+  body.studio .item { border-radius: 8px; margin: 2px 8px; padding: 8px 12px; border-left: none; }
+  body.studio .item:hover { background: var(--panel2); }
+  body.studio .row { border-radius: 7px; margin: 1px 6px; padding: 4px 8px; }
+  /* Center becomes a calm canvas with a floating composer card */
+  body.studio #center { background: var(--bg); }
+  body.studio #qa {
+    margin: 14px auto 0; max-width: 760px; width: calc(100% - 28px);
+    background: var(--panel); border: 1px solid var(--border2);
+    border-radius: 14px; padding: 10px 12px; gap: 8px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.35);
+  }
+  body.studio #qa .qabtn { border-radius: 9px; background: var(--panel2); border-color: var(--border2); }
+  body.studio #qa .qabtn:hover { background: var(--border); }
+  body.studio #term-wrap {
+    max-width: 760px; width: calc(100% - 28px); margin: 10px auto 14px;
+    background: var(--panel); border: 1px solid var(--border2);
+    border-radius: 14px; padding: 12px 14px 0; flex: 1;
+    box-shadow: 0 8px 28px rgba(0,0,0,.35);
+  }
+  body.studio .modal, body.studio #indexPanel, body.studio #activityPanel { border-radius: 12px; }
+  body.studio .switch { border-radius: 9px; }
+  body.studio #bar button.toggle.on { background: rgba(122,162,247,.14); }
+
+  /* ─── Chat view (Studio) — reskins the live terminal stream as a chat transcript ─── */
+  #chat { display: none; flex: 1; min-height: 0; min-width: 0; flex-direction: column;
+    background: var(--bg); overflow: hidden; }
+  body.studio #qa, body.studio #term-wrap { display: none; }
+  body.studio #chat { display: flex; }
+  body.studio.rawterm #chat { display: none; }
+  body.studio.rawterm #qa { display: flex; }
+  body.studio.rawterm #term-wrap { display: block; }
+
+  #chatLog { flex: 1; min-height: 0; overflow-y: auto; padding: 22px 0 8px;
+    display: flex; flex-direction: column; gap: 14px; }
+  #chatLog::-webkit-scrollbar { width: 9px; }
+  #chatLog::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 5px; }
+  .cmsg { max-width: 760px; width: calc(100% - 36px); margin: 0 auto; display: flex; gap: 10px; }
+  .cmsg .avatar { width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 13px;
+    background: var(--panel2); border: 1px solid var(--border2); }
+  .cmsg.user .avatar { background: rgba(122,162,247,.16); border-color: rgba(122,162,247,.4); color: var(--accent); }
+  .cmsg .body { flex: 1; min-width: 0; }
+  .cmsg .who { font-size: 11px; color: var(--dim); margin-bottom: 4px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .5px; }
+  .cmsg .bubble { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 10px 14px; font-size: 13px; line-height: 1.55;
+    color: var(--fg); white-space: pre-wrap; word-break: break-word;
+    font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', monospace; overflow-x: auto; }
+  .cmsg.user .bubble { background: rgba(122,162,247,.10); border-color: rgba(122,162,247,.28);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; }
+  .cmsg .bubble.system { background: transparent; border-style: dashed; color: var(--muted); font-size: 12px; }
+
+  #chatComposer { flex-shrink: 0; max-width: 760px; width: calc(100% - 36px);
+    margin: 0 auto 16px; background: var(--panel); border: 1px solid var(--border2);
+    border-radius: 14px; padding: 10px 12px 8px; box-shadow: 0 8px 28px rgba(0,0,0,.35); }
+  #chatComposer:focus-within { border-color: var(--accent); }
+  #chatBox { width: 100%; background: transparent; border: none; outline: none; resize: none;
+    color: var(--fg); font-size: 14px; line-height: 1.5; font-family: inherit;
+    max-height: 200px; overflow-y: auto; padding: 2px 2px 6px; }
+  #chatBox::placeholder { color: var(--dim); }
+  .ccbar { display: flex; align-items: center; gap: 8px; }
+  .ccbar .ccmeta { font-size: 11px; color: var(--dim); display: inline-flex; align-items: center; gap: 5px; }
+  .ccbar .ccsp { flex: 1; }
+  .ccbar button { background: var(--panel2); color: var(--muted); border: 1px solid var(--border2);
+    border-radius: 8px; cursor: pointer; font-family: inherit; transition: all .12s; }
+  .ccbar .ccslash { width: 28px; height: 28px; font-size: 14px; font-weight: 700; }
+  .ccbar .ccslash:hover { color: var(--accent); border-color: var(--accent); }
+  .ccbar .ccsend { width: 32px; height: 28px; font-size: 14px; color: #fff;
+    background: var(--accent); border-color: var(--accent); }
+  .ccbar .ccsend:hover { filter: brightness(1.08); }
+  #chatLog .typing { color: var(--dim); font-size: 12px; padding: 2px 0; }
+  #chatLog .typing i { display: inline-block; width: 5px; height: 5px; margin: 0 1px;
+    border-radius: 50%; background: var(--dim); animation: tdot 1s infinite; }
+  #chatLog .typing i:nth-child(2){ animation-delay:.15s; } #chatLog .typing i:nth-child(3){ animation-delay:.3s; }
+  @keyframes tdot { 0%,60%,100%{opacity:.25;transform:translateY(0);} 30%{opacity:1;transform:translateY(-2px);} }
+
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; width: 100%; max-width: 100vw; overflow: hidden;
     background: var(--bg); color: var(--fg);
@@ -673,6 +770,8 @@ function buildHTML() {
     <span class="spacer"></span>
     <button id="btnSide" class="toggle on" onclick="toggleSide()">Sidebar</button>
     <button id="btnPrev" class="toggle" onclick="togglePreview()">Preview</button>
+    <button id="btnStudio" class="toggle" title="Toggle Studio theme — a calmer, card-based layout" onclick="toggleStudio()">Studio</button>
+    <button id="btnRawTerm" class="toggle" title="Show the raw terminal instead of the chat view" onclick="toggleRawTerm()" style="display:none">Terminal</button>
     <button onclick="sendCmd('/help')">/help</button>
     <button onclick="sendCmd('/agents')">agents</button>
     <button onclick="sendCmd('/model')">model</button>
@@ -769,6 +868,19 @@ function buildHTML() {
         <input type="file" id="qaFile" multiple style="display:none">
       </div>
       <div id="term-wrap"></div>
+      <!-- Chat view (Studio mode) — reskins the live terminal stream as a chat transcript -->
+      <div id="chat">
+        <div id="chatLog"></div>
+        <div id="chatComposer">
+          <textarea id="chatBox" rows="1" placeholder="Message Sapper…  (Enter to send, Shift+Enter for newline)"></textarea>
+          <div class="ccbar">
+            <span class="ccmeta" id="chatMeta">Sapper</span>
+            <span class="ccsp"></span>
+            <button class="ccslash" title="Slash commands" onclick="chatSlashMenu(event)">/</button>
+            <button class="ccsend" id="chatSendBtn" onclick="chatSend()" title="Send (Enter)">&#10148;</button>
+          </div>
+        </div>
+      </div>
       <div id="dropOverlay">
         <div class="drop-card">
           <div class="drop-icon">&#128229;</div>
@@ -1195,6 +1307,7 @@ function connectPty() {
       } catch(e){}
     } else {
       term.write(new Uint8Array(ev.data));
+      chatFeed(new Uint8Array(ev.data));
     }
   };
   ws.onclose = function() {
@@ -1218,6 +1331,150 @@ window.addEventListener('resize', function(){ clearTimeout(rTimer); rTimer = set
 window.sendCmd = function(cmd) { if (ws && ws.readyState === 1) ws.send(cmd + '\\r'); term.focus(); };
 window.restartSapper = function() { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type:'restart' })); };
 document.getElementById('term-wrap').addEventListener('click', function(){ term.focus(); });
+
+// ─── Chat view: reskin the live terminal stream as a chat transcript ──────────
+var chatRaw = '';                 // ANSI-stripped rolling buffer of all pty output
+var chatDecoder = (typeof TextDecoder !== 'undefined') ? new TextDecoder('utf-8', { fatal:false }) : null;
+var CHAT_PROMPT = '\\u203a';        // '›' — Sapper's readline prompt glyph
+var chatRenderTimer = null;
+var CHAT_MAX_RAW = 400000;        // cap buffer so long sessions stay snappy
+
+function chatStripAnsi(s) {
+  // CSI / SGR sequences
+  s = s.replace(/\\u001b\\[[0-9;?]*[ -\\/]*[@-~]/g, '');
+  // OSC sequences (window title etc.)
+  s = s.replace(/\\u001b\\][^\\u0007\\u001b]*(?:\\u0007|\\u001b\\\\)/g, '');
+  // misc single-char escapes
+  s = s.replace(/\\u001b[=>NOM78()][AB0-2]?/g, '');
+  s = s.replace(/[\\u0000\\u0007]/g, '');
+  return s;
+}
+
+function chatCollapseCR(text) {
+  // Resolve carriage-return overwrites (spinners) line by line: last write wins.
+  return text.split('\\n').map(function(line){
+    if (line.indexOf('\\r') === -1) return line;
+    var parts = line.split('\\r');
+    var out = '';
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i];
+      // overwrite from column 0: keep the longer tail
+      out = p.length >= out.length ? p : p + out.slice(p.length);
+    }
+    return out;
+  }).join('\\n');
+}
+
+function chatFeed(bytes) {
+  if (!chatDecoder) return;
+  var chunk = chatDecoder.decode(bytes, { stream: true });
+  chatRaw += chatStripAnsi(chunk);
+  if (chatRaw.length > CHAT_MAX_RAW) chatRaw = chatRaw.slice(-CHAT_MAX_RAW);
+  if (chatRenderTimer) return;
+  chatRenderTimer = setTimeout(function(){ chatRenderTimer = null; chatRender(); }, 90);
+}
+
+function chatParseTurns(raw) {
+  var text = chatCollapseCR(raw);
+  var lines = text.split('\\n');
+  var turns = [];
+  var cur = null; // { role, lines: [] }
+  function push(role){ cur = { role: role, lines: [] }; turns.push(cur); }
+  push('system');
+  for (var i = 0; i < lines.length; i++) {
+    var ln = lines[i];
+    var stripped = ln.replace(/^\\s+/, '');
+    if (stripped.charAt(0) === '\\u203a') {
+      // prompt line → the user's submitted input is the rest of the line
+      var userText = stripped.replace(/^\\u203a\\s*/, '');
+      push('user'); cur.lines.push(userText);
+      push('ai'); // assistant output follows until the next prompt
+    } else {
+      cur.lines.push(ln);
+    }
+  }
+  // trim + drop empties
+  return turns.map(function(t){
+    return { role: t.role, text: t.lines.join('\\n').replace(/\\s+$/,'').replace(/^\\n+/,'') };
+  }).filter(function(t){ return t.text.trim().length > 0; });
+}
+
+function chatRender() {
+  var log = document.getElementById('chatLog');
+  if (!log) return;
+  var atBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 60;
+  var turns = chatParseTurns(chatRaw);
+  var html = '';
+  for (var i = 0; i < turns.length; i++) {
+    var t = turns[i];
+    var who = t.role === 'user' ? 'You' : (t.role === 'system' ? 'Session' : 'Sapper');
+    var av = t.role === 'user' ? '&#128100;' : (t.role === 'system' ? '&#9889;' : '&#129302;');
+    var bubbleCls = t.role === 'system' ? 'bubble system' : 'bubble';
+    html += '<div class="cmsg ' + t.role + '">' +
+      '<div class="avatar">' + av + '</div>' +
+      '<div class="body"><div class="who">' + who + '</div>' +
+      '<div class="' + bubbleCls + '">' + esc(t.text) + '</div></div></div>';
+  }
+  log.innerHTML = html || '<div class="cmsg ai"><div class="avatar">&#129302;</div>' +
+    '<div class="body"><div class="who">Sapper</div><div class="bubble system">Waiting for Sapper…</div></div></div>';
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+window.chatSend = function() {
+  var box = document.getElementById('chatBox');
+  if (!box) return;
+  var t = box.value;
+  if (!t.trim()) return;
+  if (ws && ws.readyState === 1) ws.send(t.replace(/\\n/g, ' ') + '\\r');
+  box.value = '';
+  chatAutoGrow();
+};
+
+// Forward a raw key sequence straight to the live process (for interactive prompts)
+function chatSendKey(seq) {
+  if (ws && ws.readyState === 1) ws.send(seq);
+}
+
+window.chatSlashMenu = function(ev) {
+  if (ev) ev.preventDefault();
+  var box = document.getElementById('chatBox');
+  if (box) { box.value = (box.value ? box.value + ' ' : '') + '/'; box.focus(); chatAutoGrow(); }
+};
+
+function chatAutoGrow() {
+  var box = document.getElementById('chatBox');
+  if (!box) return;
+  box.style.height = 'auto';
+  box.style.height = Math.min(box.scrollHeight, 200) + 'px';
+}
+
+(function wireChatInput(){
+  var box = document.getElementById('chatBox');
+  if (!box) return;
+  box.addEventListener('input', chatAutoGrow);
+  box.addEventListener('keydown', function(ev){
+    var empty = !box.value.trim();
+    // Forward navigation keys to the live process so interactive prompts
+    // (model picker, change-review, etc.) can be driven from the chat box.
+    if (ev.key === 'ArrowUp') { ev.preventDefault(); chatSendKey('\\u001b[A'); return; }
+    if (ev.key === 'ArrowDown') { ev.preventDefault(); chatSendKey('\\u001b[B'); return; }
+    if (ev.key === 'Tab') { ev.preventDefault(); chatSendKey('\\t'); return; }
+    if (ev.key === 'Escape') { ev.preventDefault(); chatSendKey('\\u001b'); return; }
+    if (ev.key === 'Enter' && !ev.shiftKey) {
+      ev.preventDefault();
+      if (empty) chatSendKey('\\r'); // confirm current selection / send blank line
+      else chatSend();
+    }
+  });
+})();
+
+window.toggleRawTerm = function(force) {
+  var on = typeof force === 'boolean' ? force : !document.body.classList.contains('rawterm');
+  document.body.classList.toggle('rawterm', on);
+  var btn = document.getElementById('btnRawTerm');
+  if (btn) btn.classList.toggle('on', on);
+  setTimeout(function(){ try { fit.fit(); } catch(e){} if (on) term.focus(); else chatRender(); }, 60);
+};
 
 // ─── FS events WS ────────────────────────────────────────────
 function connectEvents() {
@@ -1519,6 +1776,18 @@ window.togglePreview = function() {
   if (typeof updateResizerVisibility === 'function') updateResizerVisibility();
   setTimeout(doFit, 50);
   if (cm && !p.classList.contains('hidden')) setTimeout(function(){ cm.refresh(); }, 80);
+};
+window.toggleStudio = function(force) {
+  var on = typeof force === 'boolean' ? force : !document.body.classList.contains('studio');
+  document.body.classList.toggle('studio', on);
+  var btn = document.getElementById('btnStudio');
+  if (btn) btn.classList.toggle('on', on);
+  var rawBtn = document.getElementById('btnRawTerm');
+  if (rawBtn) rawBtn.style.display = on ? '' : 'none';
+  if (!on) document.body.classList.remove('rawterm');
+  try { localStorage.setItem('sapperStudio', on ? '1' : '0'); } catch(e) {}
+  if (on) chatRender();
+  setTimeout(function(){ try { fit.fit(); } catch(e){} if (cm) try { cm.refresh(); } catch(e){} }, 60);
 };
 
 // ─── File tree ───────────────────────────────────────────────
@@ -2780,6 +3049,7 @@ window.sendOpenPrompt = async function() {
 };
 
 // ─── Boot ────────────────────────────────────────────────────
+try { if (localStorage.getItem('sapperStudio') === '1') toggleStudio(true); } catch(e) {}
 connectPty();
 connectEvents();
 loadTree();
