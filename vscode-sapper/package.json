@@ -7,14 +7,23 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["AI", "Other"],
-  "keywords": ["ai", "ollama", "coding assistant", "sapper", "local ai"],
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "ollama",
+    "coding assistant",
+    "sapper",
+    "local ai"
+  ],
   "icon": "images/icon.png",
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
-      "activitybar": [
+      "secondarySidebar": [
         {
           "id": "sapper",
           "title": "Sapper",
@@ -90,6 +99,27 @@
           "type": "boolean",
           "default": true,
           "description": "Allow Sapper to run shell commands (with confirmation)"
+        },
+        "sapper.systemPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Custom system prompt override. Leave empty to use the default Sapper prompt. Variables: {workingDir}, {date}, {time}"
+        },
+        "sapper.disabledTools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "List of tool names to disable (e.g. [\"SHELL\", \"FETCH\"])"
+        },
+        "sapper.maxContextTokens": {
+          "type": "number",
+          "default": 0,
+          "description": "Token window size for context trimming. Oldest messages are dropped when the estimated token count exceeds this. Set to your model's context window (e.g. 8192, 32768, 131072). 0 = no limit."
+        },
+        "sapper.summarizeTriggerPercent": {
+          "type": "number",
+          "default": 65,
+          "description": "Trigger auto-summarization when estimated tokens reach this % of the context limit."
         }
       }
     }
@@ -101,6 +131,8 @@
     "package": "npx @vscode/vsce package --no-dependencies"
   },
   "dependencies": {
+    "highlight.js": "^11.11.1",
+    "marked": "^18.0.3",
     "ollama": "^0.5.0"
   },
   "devDependencies": {

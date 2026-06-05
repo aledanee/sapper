@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1e1e2e"/>
+      <stop offset="100%" stop-color="#12121c"/>
+    </linearGradient>
+    <linearGradient id="grad" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#4fc1ff"/>
+      <stop offset="100%" stop-color="#b48cff"/>
+    </linearGradient>
+    <linearGradient id="gradS" x1="10" y1="25" x2="90" y2="75" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#4fc1ff"/>
+      <stop offset="100%" stop-color="#b48cff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background hexagon -->
+  <polygon points="50,4 93,27.5 93,72.5 50,96 7,72.5 7,27.5"
+    fill="url(#bg)" stroke="url(#grad)" stroke-width="2.5"/>
+
+  <!-- Circuit traces — horizontal lines -->
+  <line x1="18" y1="38" x2="30" y2="38" stroke="#4fc1ff" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
+  <line x1="70" y1="62" x2="82" y2="62" stroke="#b48cff" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
+  <!-- Small dots at trace ends -->
+  <circle cx="18" cy="38" r="2" fill="#4fc1ff" opacity="0.6"/>
+  <circle cx="82" cy="62" r="2" fill="#b48cff" opacity="0.6"/>
+  <!-- Vertical short traces -->
+  <line x1="30" y1="34" x2="30" y2="38" stroke="#4fc1ff" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>
+  <line x1="70" y1="62" x2="70" y2="66" stroke="#b48cff" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>
+  <circle cx="30" cy="33" r="2" fill="#4fc1ff" opacity="0.5"/>
+  <circle cx="70" cy="67" r="2" fill="#b48cff" opacity="0.5"/>
+
+  <!-- Bold "S" letterform -->
+  <path d="
+    M 62 30
+    C 62 30 54 24 43 26
+    C 34 28 30 34 32 40
+    C 34 46 41 48 50 50
+    C 59 52 67 55 67 62
+    C 67 69 61 75 50 76
+    C 40 77 33 72 33 72
+  "
+    stroke="url(#gradS)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+
+  <!-- Top horizontal terminal of S -->
+  <line x1="38" y1="26" x2="62" y2="26" stroke="url(#gradS)" stroke-width="4" stroke-linecap="round"/>
+  <!-- Bottom horizontal terminal of S -->
+  <line x1="33" y1="75" x2="57" y2="75" stroke="url(#gradS)" stroke-width="4" stroke-linecap="round"/>
+</svg>
