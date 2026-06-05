@@ -245,6 +245,33 @@ function buildHTML() {
     position: relative; }
   .files-toolbar .ftb sup { font-size: 9px; color: var(--green); margin-left: 1px; }
   .files-toolbar .ftb:hover { background: rgba(255,255,255,.05); color: var(--fg); border-color: var(--border); }
+  .files-toolbar .ftb.on { color: var(--accent); border-color: var(--accent); background: rgba(88,166,255,.08); }
+
+  /* Activity feed */
+  #activityPanel { display: none; border-bottom: 1px solid var(--border);
+    background: var(--panel2); max-height: 180px; overflow-y: auto;
+    font-family: ui-monospace, 'SF Mono', monospace; font-size: 11px; }
+  #activityPanel.on { display: block; }
+  #activityPanel .ah { display: flex; align-items: center; padding: 5px 10px;
+    border-bottom: 1px solid var(--border); color: var(--dim); font-size: 10px;
+    text-transform: uppercase; letter-spacing: .5px; position: sticky; top: 0;
+    background: var(--panel2); z-index: 1; }
+  #activityPanel .ah .acl { margin-left: auto; color: var(--accent); cursor: pointer;
+    text-transform: none; letter-spacing: 0; font-size: 10px; }
+  #activityPanel .ai { display: flex; align-items: center; gap: 6px; padding: 4px 10px;
+    color: var(--muted); cursor: pointer; border-left: 2px solid transparent; }
+  #activityPanel .ai:hover { background: rgba(255,255,255,.04); color: var(--fg); }
+  #activityPanel .ai .ak { font-size: 9px; text-transform: uppercase; letter-spacing: .5px;
+    width: 56px; flex-shrink: 0; font-weight: 600; }
+  #activityPanel .ai .ap { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #activityPanel .ai .at { color: var(--dim); font-size: 9px; flex-shrink: 0; }
+  #activityPanel .ai.kind-created { border-left-color: var(--green); }
+  #activityPanel .ai.kind-modified { border-left-color: var(--yellow); }
+  #activityPanel .ai.kind-deleted { border-left-color: var(--red); }
+  #activityPanel .ai.kind-created .ak { color: var(--green); }
+  #activityPanel .ai.kind-modified .ak { color: var(--yellow); }
+  #activityPanel .ai.kind-deleted .ak { color: var(--red); }
+  #activityPanel .empty { padding: 12px; color: var(--dim); text-align: center; font-size: 11px; }
   .tree { font-family: ui-monospace, 'SF Mono', monospace; font-size: 12px; padding-bottom: 12px; }
   .row { display: flex; align-items: center; gap: 4px; padding: 3px 8px; cursor: pointer; color: var(--muted);
     white-space: nowrap; user-select: none; position: relative; }
@@ -255,6 +282,19 @@ function buildHTML() {
   .row .name { overflow: hidden; text-overflow: ellipsis; }
   .row .badge { margin-left: auto; font-size: 9px; color: var(--yellow); opacity: 0; transition: opacity .2s; }
   .row.changed .badge { opacity: 1; }
+  .row .actdot { display: none; width: 7px; height: 7px; border-radius: 50%;
+    margin-left: 4px; flex-shrink: 0; box-shadow: 0 0 6px currentColor; }
+  .row.act-created .actdot { display: inline-block; background: var(--green); color: var(--green); }
+  .row.act-modified .actdot { display: inline-block; background: var(--yellow); color: var(--yellow); }
+  .row.act-deleted .actdot { display: inline-block; background: var(--red); color: var(--red); }
+  .row.act-fresh .actdot { animation: pulse 1.4s ease-out 2; }
+  .row.act-created .name { color: #56d364; }
+  .row.act-modified .name { color: #e3b341; }
+  .row.act-deleted .name { color: #ffa198; text-decoration: line-through; opacity: .7; }
+  @keyframes pulse { 0%{transform:scale(1);} 50%{transform:scale(1.6);} 100%{transform:scale(1);} }
+  .row .actcount { display: none; font-size: 9px; color: var(--dim);
+    font-family: ui-monospace, monospace; margin-left: 2px; }
+  .row.act-multi .actcount { display: inline-block; }
   .row .rmenu { margin-left: auto; color: var(--dim); font-size: 14px; padding: 0 4px;
     opacity: 0; flex-shrink: 0; line-height: 1; border-radius: 3px; }
   .row.changed .rmenu { margin-left: 4px; }
@@ -344,7 +384,24 @@ function buildHTML() {
 
   /* ─── Terminal area ─── */
   #center { flex: 1; min-width: 0; min-height: 0; display: flex;
-    flex-direction: column; background: var(--bg); overflow: hidden; }
+    flex-direction: column; background: var(--bg); overflow: hidden; position: relative; }
+  #qa { display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+    background: var(--panel2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  #qa .qabtn { background: transparent; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 5px; padding: 4px 10px; font-size: 11px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px; font-family: inherit; line-height: 1; }
+  #qa .qabtn:hover { color: var(--accent); border-color: var(--accent); }
+  #qa .qabtn .qaico { font-size: 13px; }
+  #qa .qabtn.rec.on { color: var(--red); border-color: var(--red); background: rgba(248,81,73,.08); }
+  #qa .qa-sp { flex: 1; }
+  #qa .rec-dot { display: none; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--red); animation: blink 1s infinite; }
+  #qa .rec-dot.on { display: inline-block; }
+  #qa .rec-time { display: none; font-family: ui-monospace, 'SF Mono', monospace;
+    font-size: 11px; color: var(--red); font-variant-numeric: tabular-nums; }
+  #qa .rec-time.on { display: inline-block; }
+  @keyframes blink { 0%,100%{opacity:1;} 50%{opacity:.3;} }
+
   #term-wrap { flex: 1; min-height: 0; min-width: 0; padding: 6px 0 0 10px;
     overflow: hidden; position: relative; }
   #term-wrap .terminal, #term-wrap .xterm { height: 100% !important; width: 100% !important; }
@@ -353,6 +410,16 @@ function buildHTML() {
   .xterm-viewport::-webkit-scrollbar { width: 8px; }
   .xterm-viewport::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
   .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+
+  /* drag-drop overlay */
+  #dropOverlay { position: absolute; inset: 0; display: none; z-index: 200;
+    background: rgba(10,14,20,.85); align-items: center; justify-content: center;
+    border: 2px dashed var(--accent); pointer-events: none; }
+  #dropOverlay.on { display: flex; }
+  #dropOverlay .drop-card { text-align: center; }
+  #dropOverlay .drop-icon { font-size: 48px; margin-bottom: 8px; }
+  #dropOverlay .drop-text { color: var(--accent); font-size: 16px; font-weight: 600; }
+  #dropOverlay .drop-text span { color: var(--muted); font-weight: 400; font-size: 12px; }
 
   /* ─── Preview panel ─── */
   #preview {
@@ -462,9 +529,15 @@ function buildHTML() {
         <div class="files-toolbar">
           <button class="ftb" title="New file" onclick="newItemPrompt('file','')">&#128462;<sup>+</sup></button>
           <button class="ftb" title="New folder" onclick="newItemPrompt('folder','')">&#128193;<sup>+</sup></button>
+          <button class="ftb" id="ftbAct" title="Show activity log" onclick="toggleActivity()">&#9737;</button>
           <span class="ftb-spacer"></span>
+          <button class="ftb" title="Clear change marks" onclick="clearAllMarks()">&#10005;</button>
           <button class="ftb" title="Refresh tree" onclick="loadTree()">&#8634;</button>
           <button class="ftb" title="Collapse all" onclick="collapseAll()">&#8676;</button>
+        </div>
+        <div id="activityPanel">
+          <div class="ah">Recent activity<span class="acl" onclick="clearActivity()">clear</span></div>
+          <div id="activityList"></div>
         </div>
         <div class="tree" id="tree"></div>
       </div>
@@ -501,7 +574,28 @@ function buildHTML() {
 
     <!-- Center: terminal -->
     <main id="center">
+      <div id="qa">
+        <button class="qabtn" title="Attach files (sends @path to Sapper)" onclick="pickAndUpload()">
+          <span class="qaico">&#128206;</span><span class="qalbl">Attach</span>
+        </button>
+        <button class="qabtn rec" title="Record voice (auto-transcribed by Sapper)" onclick="toggleRecord()" id="qaRec">
+          <span class="qaico">&#127908;</span><span class="qalbl">Record</span>
+        </button>
+        <span id="recDot" class="rec-dot"></span>
+        <span id="recTime" class="rec-time"></span>
+        <span class="qa-sp"></span>
+        <button class="qabtn" title="Send /attach (interactive)" onclick="sendCmd('/attach')">/attach</button>
+        <button class="qabtn" title="Open file by path" onclick="sendOpenPrompt()">/open</button>
+        <button class="qabtn" title="Compact context" onclick="sendCmd('/summary')">/summary</button>
+        <input type="file" id="qaFile" multiple style="display:none">
+      </div>
       <div id="term-wrap"></div>
+      <div id="dropOverlay">
+        <div class="drop-card">
+          <div class="drop-icon">&#128229;</div>
+          <div class="drop-text">Drop files to upload<br><span>They will be attached to Sapper with <code>@path</code></span></div>
+        </div>
+      </div>
     </main>
 
     <!-- Right: preview -->
@@ -543,6 +637,9 @@ var state = {
   editing: false,
   expanded: { '': true },
   fsWS: null,
+  marks: {},            // path -> { kind, count, ts }
+  activity: [],         // ordered list of {kind, path, isDir, ts}
+  activityOpen: false,
 };
 
 function esc(s) {
@@ -679,20 +776,21 @@ function handleStats(msg) {
 }
 
 function handleFsEvent(msg) {
-  if (!msg || !msg.path) return;
-  // Flag the file in the tree
-  var row = document.querySelector('.row[data-path="' + cssEscape(msg.path) + '"]');
-  if (row) {
-    row.classList.add('changed');
-    setTimeout(function(){ row.classList.remove('changed'); }, 4000);
+  if (!msg) return;
+  if (msg.type === 'activity-replay') {
+    if (Array.isArray(msg.items)) msg.items.forEach(applyActivityItem);
+    return;
   }
-  // Refresh tree (parent dir) if a file was added/removed
-  if (msg.event === 'rename') {
+  if (!msg.path) return;
+  applyActivityItem(msg);
+  // Re-fetch tree (parent dir) for create/delete so the new/removed file appears
+  if (msg.kind === 'created' || msg.kind === 'deleted') {
     var parent = msg.path.split('/').slice(0, -1).join('/');
     refreshDir(parent);
   }
   // If the current preview file changed, auto-refresh (or show indicator if editing)
   if (state.currentFile === msg.path) {
+    if (msg.kind === 'deleted') return; // file gone; leave preview state
     if (state.editing) {
       document.getElementById('pInd').classList.add('show');
     } else {
@@ -700,6 +798,119 @@ function handleFsEvent(msg) {
     }
   }
 }
+
+function applyActivityItem(item) {
+  // bump persistent mark
+  var prev = state.marks[item.path];
+  var count = prev ? (prev.count + 1) : 1;
+  state.marks[item.path] = { kind: item.kind, count: count, ts: item.ts };
+  var row = document.querySelector('.row[data-path="' + cssEscape(item.path) + '"]');
+  if (row) applyMark(row, state.marks[item.path]);
+  // push into activity log (dedupe consecutive entries for same path)
+  var last = state.activity[state.activity.length - 1];
+  if (last && last.path === item.path && last.kind === item.kind && (item.ts - last.ts) < 1500) {
+    last.count = (last.count || 1) + 1;
+    last.ts = item.ts;
+  } else {
+    state.activity.push({ kind: item.kind, path: item.path, isDir: item.isDir, ts: item.ts, count: 1 });
+    if (state.activity.length > 100) state.activity.shift();
+  }
+  renderActivity();
+  // Highlight parent dirs subtly so user notices nested change even when collapsed
+  var parts = item.path.split('/');
+  for (var i = 1; i < parts.length; i++) {
+    var dirPath = parts.slice(0, i).join('/');
+    var dirRow = document.querySelector('.row[data-path="' + cssEscape(dirPath) + '"]');
+    if (dirRow && !dirRow.classList.contains('act-created') && !dirRow.classList.contains('act-modified') && !dirRow.classList.contains('act-deleted')) {
+      dirRow.classList.add('act-modified', 'act-fresh');
+      setTimeout((function(r){ return function(){ r.classList.remove('act-fresh'); }; })(dirRow), 1500);
+    }
+  }
+}
+
+function applyMark(row, mark) {
+  row.classList.remove('act-created', 'act-modified', 'act-deleted', 'act-multi', 'act-fresh');
+  row.classList.add('act-' + mark.kind, 'act-fresh');
+  if (mark.count > 1) {
+    row.classList.add('act-multi');
+    var cnt = row.querySelector('.actcount');
+    if (cnt) cnt.textContent = String(mark.count);
+  }
+  setTimeout(function(){ row.classList.remove('act-fresh'); }, 1500);
+}
+
+function renderActivity() {
+  var host = document.getElementById('activityList');
+  if (!host) return;
+  if (!state.activity.length) {
+    host.innerHTML = '<div class="empty">No changes yet. Ask Sapper to edit something.</div>';
+    return;
+  }
+  var items = state.activity.slice(-30).reverse();
+  host.innerHTML = items.map(function(a){
+    var rel = relTime(a.ts);
+    var ct = a.count > 1 ? ' &times;' + a.count : '';
+    return '<div class="ai kind-' + a.kind + '" data-path="' + esc(a.path) + '">' +
+      '<span class="ak">' + a.kind + ct + '</span>' +
+      '<span class="ap">' + esc(a.path) + '</span>' +
+      '<span class="at">' + rel + '</span></div>';
+  }).join('');
+  Array.from(host.querySelectorAll('.ai')).forEach(function(el){
+    el.addEventListener('click', function(){
+      var p = el.dataset.path;
+      var mark = state.marks[p];
+      if (mark && mark.kind === 'deleted') { showToast(p + ' (deleted)'); return; }
+      // expand ancestor dirs then open
+      var parts = p.split('/');
+      var soFar = '';
+      for (var i = 0; i < parts.length - 1; i++) {
+        soFar = soFar ? soFar + '/' + parts[i] : parts[i];
+        state.expanded[soFar] = true;
+      }
+      loadTree();
+      setTimeout(function(){ openFile(p); }, 80);
+      // clear that file's mark since the user has acknowledged it
+      clearMark(p);
+    });
+  });
+}
+
+function relTime(ts) {
+  var s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 5) return 'now';
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  return Math.floor(s / 3600) + 'h';
+}
+
+function clearMark(path) {
+  delete state.marks[path];
+  var row = document.querySelector('.row[data-path="' + cssEscape(path) + '"]');
+  if (row) row.classList.remove('act-created', 'act-modified', 'act-deleted', 'act-multi', 'act-fresh');
+}
+
+window.toggleActivity = function() {
+  state.activityOpen = !state.activityOpen;
+  document.getElementById('activityPanel').classList.toggle('on', state.activityOpen);
+  document.getElementById('ftbAct').classList.toggle('on', state.activityOpen);
+  if (state.activityOpen) renderActivity();
+};
+
+window.clearActivity = function() {
+  state.activity = [];
+  renderActivity();
+};
+
+window.clearAllMarks = function() {
+  state.marks = {};
+  document.querySelectorAll('.row').forEach(function(r){
+    r.classList.remove('act-created', 'act-modified', 'act-deleted', 'act-multi', 'act-fresh');
+  });
+  showToast('Cleared change marks');
+};
+
+// Periodically refresh "rel time" labels in the activity panel
+setInterval(function(){ if (state.activityOpen) renderActivity(); }, 30000);
 
 function cssEscape(s) { return s.replace(/(["\\\\])/g, '\\\\$1'); }
 
@@ -785,6 +996,8 @@ function renderEntries(container, basePath, entries, depth) {
       '<span class="chev">' + chev + '</span>' +
       '<span class="ico">' + fileIcon(entry.name, entry.isDir) + '</span>' +
       '<span class="name">' + esc(entry.name) + '</span>' +
+      '<span class="actdot"></span>' +
+      '<span class="actcount"></span>' +
       '<span class="badge">&#9679;</span>' +
       '<span class="rmenu" title="Options">&#8943;</span>';
     row.addEventListener('click', function(ev){
@@ -801,6 +1014,9 @@ function renderEntries(container, basePath, entries, depth) {
       openRowMenu({ getBoundingClientRect: function(){ return { left: ev.clientX, bottom: ev.clientY, right: ev.clientX, top: ev.clientY }; } }, path, entry.isDir);
     });
     container.appendChild(row);
+    // Re-apply any persistent activity mark for this path
+    var m = state.marks[path];
+    if (m) applyMark(row, m);
     if (entry.isDir && state.expanded[path]) {
       // Load children if not already loaded
       fetch('/api/tree?path=' + encodeURIComponent(path)).then(function(r){return r.json();}).then(function(d){
@@ -1055,6 +1271,8 @@ window.openFile = function(path, isReload) {
   document.querySelectorAll('.row.active').forEach(function(r){ r.classList.remove('active'); });
   var row = document.querySelector('.row[data-path="' + cssEscape(path) + '"]');
   if (row) row.classList.add('active');
+  // Clear any pending change-mark for this file since the user is acknowledging it
+  if (!isReload && state.marks[path]) clearMark(path);
 
   state.currentFile = path;
   state.editing = false;
@@ -1298,6 +1516,199 @@ function loadSkills() {
   });
 }
 
+// ─── Quick actions: upload + voice record ────────────────────
+
+function uploadBlob(blob, filename, targetDir) {
+  return fetch('/api/upload', {
+    method: 'POST',
+    headers: {
+      'Content-Type': blob.type || 'application/octet-stream',
+      'X-Filename': encodeURIComponent(filename),
+      'X-Target-Dir': encodeURIComponent(targetDir || 'uploads'),
+    },
+    body: blob,
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if (d.error) throw new Error(d.error);
+    return d.path;
+  });
+}
+
+window.pickAndUpload = function() {
+  var inp = document.getElementById('qaFile');
+  inp.value = '';
+  inp.onchange = function() {
+    var files = Array.from(inp.files || []);
+    if (!files.length) return;
+    uploadFileList(files, 'uploads');
+  };
+  inp.click();
+};
+
+async function uploadFileList(files, targetDir) {
+  var paths = [];
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i];
+    showToast('Uploading ' + f.name + '…');
+    try {
+      var p = await uploadBlob(f, f.name, targetDir);
+      paths.push(p);
+    } catch (e) {
+      showToast('Upload failed: ' + e.message, 'err');
+    }
+  }
+  if (paths.length) {
+    loadTree();
+    // Send "@path1 @path2 " to terminal so user can keep typing
+    if (ws && ws.readyState === 1) {
+      ws.send(paths.map(function(p){ return '@' + p; }).join(' ') + ' ');
+    }
+    showToast(paths.length + ' file' + (paths.length > 1 ? 's' : '') + ' attached');
+    term.focus();
+  }
+}
+
+// ─── Drag-drop on terminal area ──────────────────────────────
+(function setupDropZone(){
+  var center = document.getElementById('center');
+  var ov = document.getElementById('dropOverlay');
+  var depth = 0;
+  function show(){ ov.classList.add('on'); }
+  function hide(){ ov.classList.remove('on'); depth = 0; }
+  center.addEventListener('dragenter', function(e){
+    if (!e.dataTransfer || !e.dataTransfer.types || e.dataTransfer.types.indexOf('Files') < 0) return;
+    e.preventDefault(); depth++; show();
+  });
+  center.addEventListener('dragover', function(e){
+    if (!e.dataTransfer || !e.dataTransfer.types || e.dataTransfer.types.indexOf('Files') < 0) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = 'copy';
+  });
+  center.addEventListener('dragleave', function(e){
+    depth--; if (depth <= 0) hide();
+  });
+  center.addEventListener('drop', function(e){
+    if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) { hide(); return; }
+    e.preventDefault(); hide();
+    uploadFileList(Array.from(e.dataTransfer.files), 'uploads');
+  });
+})();
+
+// ─── Audio recording (16 kHz mono WAV for Whisper) ───────────
+var recState = null;
+
+window.toggleRecord = async function() {
+  if (recState) return stopRecording();
+  await startRecording();
+};
+
+async function startRecording() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showToast('Microphone API not available (use HTTPS or localhost)', 'err');
+    return;
+  }
+  try {
+    var stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+    var Ctx = window.AudioContext || window.webkitAudioContext;
+    var ctx = new Ctx({ sampleRate: 16000 });
+    // Resume in case of autoplay policy
+    if (ctx.state === 'suspended') { try { await ctx.resume(); } catch(_){} }
+    var src = ctx.createMediaStreamSource(stream);
+    var proc = ctx.createScriptProcessor(4096, 1, 1);
+    var chunks = [];
+    proc.onaudioprocess = function(e) {
+      var d = e.inputBuffer.getChannelData(0);
+      chunks.push(new Float32Array(d));
+    };
+    src.connect(proc);
+    proc.connect(ctx.destination);
+    var startedAt = Date.now();
+    recState = { stream: stream, ctx: ctx, src: src, proc: proc, chunks: chunks, sr: ctx.sampleRate, startedAt: startedAt };
+    document.getElementById('qaRec').classList.add('on');
+    document.getElementById('recDot').classList.add('on');
+    document.getElementById('recTime').classList.add('on');
+    recState.timer = setInterval(function(){
+      var sec = Math.floor((Date.now() - startedAt) / 1000);
+      var m = Math.floor(sec / 60), s = sec % 60;
+      document.getElementById('recTime').textContent = m + ':' + (s < 10 ? '0' : '') + s;
+    }, 250);
+    showToast('Recording… click again to stop');
+  } catch (e) {
+    showToast('Mic permission: ' + e.message, 'err');
+  }
+}
+
+async function stopRecording() {
+  var r = recState; if (!r) return;
+  recState = null;
+  document.getElementById('qaRec').classList.remove('on');
+  document.getElementById('recDot').classList.remove('on');
+  document.getElementById('recTime').classList.remove('on');
+  document.getElementById('recTime').textContent = '';
+  clearInterval(r.timer);
+  try { r.proc.disconnect(); } catch(_){}
+  try { r.src.disconnect(); } catch(_){}
+  try { r.stream.getTracks().forEach(function(t){ t.stop(); }); } catch(_){}
+  try { await r.ctx.close(); } catch(_){}
+
+  var len = 0; for (var i = 0; i < r.chunks.length; i++) len += r.chunks[i].length;
+  if (len < r.sr / 4) { showToast('Too short (< 250 ms)', 'warn'); return; }
+  var merged = new Float32Array(len);
+  var off = 0;
+  for (var j = 0; j < r.chunks.length; j++) { merged.set(r.chunks[j], off); off += r.chunks[j].length; }
+  var wav = encodeWAV(merged, r.sr);
+  var stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+  showToast('Uploading recording…');
+  try {
+    var rel = await uploadBlob(new Blob([wav], { type: 'audio/wav' }),
+                               'rec-' + stamp + '.wav',
+                               '.sapper/voice/incoming');
+    loadTree();
+    sendCmd('/voice file ' + rel);
+    showToast('Sent to Sapper for transcription');
+  } catch (e) {
+    showToast('Upload failed: ' + e.message, 'err');
+  }
+}
+
+function encodeWAV(samples, sampleRate) {
+  var bytesPerSample = 2;
+  var buffer = new ArrayBuffer(44 + samples.length * bytesPerSample);
+  var view = new DataView(buffer);
+  function writeStr(o, s) { for (var i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); }
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * bytesPerSample, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);    // PCM
+  view.setUint16(22, 1, true);    // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * bytesPerSample, true);
+  view.setUint16(32, bytesPerSample, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, samples.length * bytesPerSample, true);
+  var o = 44;
+  for (var i = 0; i < samples.length; i++) {
+    var s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    o += 2;
+  }
+  return buffer;
+}
+
+window.sendOpenPrompt = async function() {
+  var v = await showModal({
+    title: 'Open file in Sapper',
+    label: 'Path',
+    placeholder: 'src/index.ts',
+    okLabel: 'Open',
+  });
+  if (v == null || !v.trim()) return;
+  sendCmd('/open ' + v.trim());
+};
+
 // ─── Boot ────────────────────────────────────────────────────
 connectPty();
 connectEvents();
@@ -1498,6 +1909,53 @@ const server = http.createServer(async (req, res) => {
       } catch (e) { return json(res, { error: e.message }, 500); }
     }
 
+    // ── Upload (raw body; headers carry filename + target dir)
+    if (req.method === 'POST' && path === '/api/upload') {
+      try {
+        let name = decodeURIComponent(req.headers['x-filename'] || 'upload.bin');
+        let dir = decodeURIComponent(req.headers['x-target-dir'] || 'uploads');
+        // sanitize filename (strip slashes), keep extension
+        name = name.replace(/[\\/:*?"<>|]/g, '_').slice(0, 200) || 'upload.bin';
+        dir = dir.replace(/^[\\/]+/, '');
+        const absDir = safePath(dir);
+        if (!absDir) return json(res, { error: 'invalid target dir' }, 400);
+        ensureDir(absDir);
+        let target = join(absDir, name);
+        // de-dupe if exists
+        if (fs.existsSync(target)) {
+          const dot = name.lastIndexOf('.');
+          const stem = dot > 0 ? name.slice(0, dot) : name;
+          const ext = dot > 0 ? name.slice(dot) : '';
+          for (let i = 1; i < 1000; i++) {
+            const cand = join(absDir, stem + '-' + i + ext);
+            if (!fs.existsSync(cand)) { target = cand; break; }
+          }
+        }
+        const ws = fs.createWriteStream(target);
+        let size = 0; let aborted = false;
+        const MAX = 50 * 1024 * 1024;
+        req.on('data', (c) => {
+          size += c.length;
+          if (size > MAX && !aborted) {
+            aborted = true;
+            ws.destroy();
+            try { fs.unlinkSync(target); } catch {}
+            json(res, { error: 'upload too large (>50MB)' }, 413);
+            req.destroy();
+          }
+        });
+        req.pipe(ws);
+        await new Promise((resolve, reject) => {
+          ws.on('finish', resolve);
+          ws.on('error', reject);
+          req.on('error', reject);
+        });
+        if (aborted) return;
+        const rel = relative(workingDir, target).split(sep).join('/');
+        return json(res, { ok: true, path: rel, size });
+      } catch (e) { return json(res, { error: e.message }, 500); }
+    }
+
     // ── Config read/write
     if (req.method === 'GET' && path === '/api/config') {
       return json(res, { config: readJSON(CONFIG_FILE, {}), path: relative(workingDir, CONFIG_FILE) });
@@ -1589,8 +2047,33 @@ wssPty.on('connection', (ws) => {
 let watcher = null;
 const eventsClients = new Set();
 const recentEvents = new Map(); // path -> timestamp (dedupe burst events)
+const knownPaths = new Set(); // paths we have seen exist (for create vs delete detection)
+const recentActivity = []; // last N classified events for late-joining clients
+
+function classifyEvent(rawEvent, rel, abs) {
+  // fs.watch only gives 'rename' or 'change'
+  const exists = fs.existsSync(abs);
+  if (rawEvent === 'change') return exists ? 'modified' : 'deleted';
+  // 'rename' = created, deleted, or moved-in/out
+  if (!exists) return 'deleted';
+  return knownPaths.has(rel) ? 'modified' : 'created';
+}
+
+function seedKnownPaths(dir, rel = '') {
+  try {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (IGNORE_NAMES.has(ent.name)) continue;
+      const sub = rel ? rel + '/' + ent.name : ent.name;
+      knownPaths.add(sub);
+      if (ent.isDirectory() && knownPaths.size < 20000) {
+        seedKnownPaths(join(dir, ent.name), sub);
+      }
+    }
+  } catch {}
+}
 
 function startWatcher() {
+  seedKnownPaths(workingDir);
   try {
     watcher = fs.watch(workingDir, { recursive: true }, (event, filename) => {
       if (!filename) return;
@@ -1606,7 +2089,17 @@ function startWatcher() {
         const cutoff = now - 10000;
         for (const [k, t] of recentEvents) if (t < cutoff) recentEvents.delete(k);
       }
-      const payload = JSON.stringify({ event, path: rel, ts: now });
+      const abs = pathResolve(workingDir, rel);
+      const kind = classifyEvent(event, rel, abs);
+      if (kind === 'deleted') knownPaths.delete(rel);
+      else knownPaths.add(rel);
+      let isDir = false;
+      try { isDir = fs.statSync(abs).isDirectory(); } catch {}
+      const enriched = { event, kind, path: rel, isDir, ts: now };
+      // remember for new clients (cap at 50)
+      recentActivity.push(enriched);
+      if (recentActivity.length > 50) recentActivity.shift();
+      const payload = JSON.stringify(enriched);
       for (const c of eventsClients) {
         if (c.readyState === c.OPEN) { try { c.send(payload); } catch {} }
       }
@@ -1620,6 +2113,10 @@ function startWatcher() {
 wssEvents.on('connection', (ws) => {
   eventsClients.add(ws);
   dbg('events client connected (total=' + eventsClients.size + ')');
+  // Replay last activity so the new tab sees recent changes
+  if (recentActivity.length) {
+    try { ws.send(JSON.stringify({ type: 'activity-replay', items: recentActivity.slice(-25) })); } catch {}
+  }
   if (lastStats) { try { ws.send(lastStats); } catch {} }
   ws.on('close', () => { eventsClients.delete(ws); });
 });
