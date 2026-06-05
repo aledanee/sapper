@@ -1120,7 +1120,7 @@ const DEFAULT_CONFIG = Object.freeze({
     enabled: true,                                                      // Feature available (still triggered manually via /voice)
     whisperBin: 'whisper-cli',                                          // whisper.cpp CLI binary on PATH
     whisperStreamBin: 'whisper-stream',                                 // whisper.cpp streaming binary (live mode)
-    model: '/Users/ibrahimihsan/models/ggml-medium.bin',                // Path to a ggml-*.bin (whisper.cpp format)
+    model: join(os.homedir(), 'models', 'ggml-medium.bin'),            // Path to a ggml-*.bin (whisper.cpp format) — use /v model to pick
     language: 'auto',                                                   // 'auto' for detection, or 'en' / 'ar' / etc.
     recorder: 'ffmpeg',                                                 // 'ffmpeg' or 'sox'
     recordSeconds: 8,                                                   // Default mic-record duration

@@ -1,73 +1,94 @@
+<div align="center">
+
 # Sapper
 
-[![npm version](https://img.shields.io/npm/v/sapper-iq.svg?style=flat-square)](https://www.npmjs.com/package/sapper-iq)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D16.0.0-brightgreen?style=flat-square)](https://nodejs.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
-[![npm downloads](https://img.shields.io/npm/dm/sapper-iq?style=flat-square)](https://www.npmjs.com/package/sapper-iq)
+**Terminal-first AI coding assistant powered by local Ollama models.**
 
-**Terminal-first AI coding assistant for real developer workflows.**
+[![npm version](https://img.shields.io/npm/v/sapper-iq.svg?style=flat-square&color=cb3837)](https://www.npmjs.com/package/sapper-iq)
+[![npm downloads](https://img.shields.io/npm/dm/sapper-iq?style=flat-square&color=cb3837)](https://www.npmjs.com/package/sapper-iq)
+[![Node.js](https://img.shields.io/badge/node-%E2%89%A516-brightgreen?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
+[![Local-first](https://img.shields.io/badge/local--first-100%25-success?style=flat-square)](#)
 
-Sapper is a Node.js CLI that connects to locally running Ollama models and acts as an autonomous development agent — reading, writing, searching, running shell commands, managing git, and browsing the web, all from a single conversational interface in your terminal.
+[Install](#installation) · [Quick Start](#quick-start) · [Commands](#commands) · [Tools](#tool-catalog) · [Voice](#voice--whisper) · [Config](#configuration)
+
+</div>
+
+---
+
+Sapper is a Node.js CLI that pairs with locally-running Ollama models to act as an autonomous development agent. It reads and writes files, runs shell commands, manages git, browses the web, and now transcribes your voice — all from a single conversational loop in your terminal.
+
+> **100% local. 100% private. Zero telemetry.** Your code, prompts, and audio never leave your machine.
 
 ---
 
 ## Table of Contents
 
-- [Terminal Interface](#terminal-interface)
-- [Architecture](#architecture)
-- [Features](#features)
-- [Prerequisites](#prerequisites)
+- [Highlights](#highlights)
+- [Screens](#screens)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [How It Works](#how-it-works)
 - [Commands](#commands)
 - [Tool Catalog](#tool-catalog)
-- [Agents and Skills](#agents-and-skills)
+- [Voice / Whisper](#voice--whisper)
+- [Agents & Skills](#agents--skills)
 - [Configuration](#configuration)
 - [Session Memory](#session-memory)
+- [Project Layout](#project-layout)
 - [Development](#development)
 - [License](#license)
 
 ---
 
-## Terminal Interface
+## Highlights
 
-Sapper presents three distinct screens during a session, each with a focused purpose.
+| | |
+|---|---|
+| **Local-first** | Connects to any Ollama model on your machine — no API keys, no cloud calls |
+| **28+ built-in tools** | Files, shell, git, web, AST symbols, embeddings |
+| **Native tool calling** | First-class support for Ollama's function-calling API, with a legacy text-marker fallback |
+| **Voice input** | Talk to Sapper with Whisper (`/v live`) — interactive model picker, archive, push-to-stop, Arabic + multilingual |
+| **Auto-summarization** | Compresses old turns when the context window fills, transparently |
+| **Custom agents & skills** | Drop a Markdown file in `.sapper/agents/` or `.sapper/skills/` and it's live |
+| **Background shell** | Long-running commands hand off to tracked background sessions you can read/stop |
+| **Approval gate** | Inline approval prompts with feedback for shell and write operations |
+| **Semantic memory** | Embedding-based recall surfaces relevant past context automatically |
+| **Per-project state** | Everything lives in `.sapper/` — clean, portable, gitignore-friendly |
 
-### Startup — Session Dashboard
+---
 
-When Sapper launches it immediately displays the full state of the current working directory before asking for any input.
+## Screens
+
+### Startup Dashboard
+
+On launch, Sapper shows the full state of your workspace before asking for input.
 
 ```
 Sapper  terminal coding workspace
 Local models, live tools, and focused coding in one loop
-/your/project  ·  v1.1.38
+/your/project  ·  v1.1.40
 
 Quick start  @file attach  ·  /commands palette  ·  /agents modes
 
 ┌──────────────────────────────────────────────────────────────┐
 │ [workspace]  5 files  ·  0 symbols  ·  indexed 36103m ago    │
 │ [memory]     .sapper/  ·  auto-attach on                     │
-│ [prompt]     default prompt                                   │
-│ [thinking]   mode auto                                        │
-│ [tools]      limit 40 rounds                                  │
+│ [prompt]     default prompt                                  │
+│ [thinking]   mode auto                                       │
+│ [tools]      limit 40 rounds                                 │
 │ [shell]      stream on  ·  bg auto  ·  0 active              │
-│ [stream]     heartbeat on  ·  phases on                       │
-│ [summary]    phases on  ·  trigger 65%                        │
-│ [agents]     3  ·  [skills]  2                                │
+│ [stream]     heartbeat on  ·  phases on                      │
+│ [summary]    phases on  ·  trigger 65%                       │
+│ [voice]      whisper-cli  ·  archive on                      │
+│ [agents]     3  ·  [skills]  2                               │
 └──────────────────────────────────────────────────────────────┘
 
 Previous session found in .sapper/context.json
 Resume session? [y/N]
 ```
 
-The dashboard shows workspace indexing state, memory configuration, active agents and skills count, shell mode, and context summarization trigger. If a previous session exists, Sapper offers to resume it.
-
----
-
-### Model Selection — Interactive Picker
-
-Before each session, Sapper reads the locally available Ollama models and presents an interactive picker. Models are listed with their disk footprint and last-used time.
+### Model Picker
 
 ```
 Model selection  use ↑↓ or j/k, enter to confirm
@@ -82,21 +103,11 @@ Preview
   Selected   gemma4:e4b-mlx-bf16
   Footprint  14.9 GB
   Updated    54m ago
-  Profile    safetensors
-  Quant      default
 ```
 
-Keyboard controls: `↑` `↓` or `j` / `k` to navigate, `Enter` to confirm. A live preview panel shows model metadata before committing.
-
----
-
-### Active Session — Context Bar
-
-Once a model is selected the prompt loop begins. A persistent context bar at the bottom of each turn shows token consumption against the configured limit.
+### Live Session
 
 ```
-Session
-
   [model]    gemma4:e4b-mlx-bf16
   [tools]    native tool calling
   [context]  35,000 tokens  (custom limit, model: 131,072)
@@ -106,83 +117,38 @@ Session
   >
 ```
 
-The bar updates after every turn. When usage approaches the configured `summarizeTriggerPercent` threshold, Sapper automatically compresses older turns into a summary and continues without interruption.
-
----
-
-### .sapper/ Data Folder
-
-All persistent state is isolated inside `.sapper/` at the root of each project, keeping your workspace clean.
-
-```
-.sapper/
-├── config.json       runtime configuration (hot-reload)
-├── context.json      conversation history for session resume
-├── embeddings.json   semantic vector memory, cosine similarity recall
-├── workspace.json    file index and dependency graph
-├── agents/           custom agent definitions (.md + YAML frontmatter)
-├── skills/           reusable instruction blocks (.md + YAML frontmatter)
-└── logs/             per-session activity audit logs (.md)
-```
+The context bar updates after every turn. When usage approaches the `summarizeTriggerPercent` threshold, Sapper compresses older turns into a summary and continues — no interruption.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         SAPPER CLI                          │
-│                                                             │
-│   User Input  ──►  Prompt Builder  ──►  Ollama API         │
-│                         │                    │             │
-│                    Context / Memory      Streaming         │
-│                    Embeddings            Response          │
-│                    Agent / Skills            │             │
-│                         │                    ▼             │
-│                    Tool Parser  ◄────  AI Response         │
-│                         │                                   │
-│         ┌───────────────┼───────────────────┐              │
-│         ▼               ▼                   ▼              │
-│    File System       Shell               Git / Web         │
-│  READ WRITE PATCH   SHELL SHELL(bg)   COMMIT PUSH FETCH    │
-└─────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                          SAPPER CLI                            │
+│                                                                │
+│   User Input  ──►  Prompt Builder  ──►  Ollama (local)         │
+│      ▲                  │                    │                 │
+│      │            Context / Memory      Streaming              │
+│      │            Embeddings            Response               │
+│      │            Agent / Skills            │                  │
+│      │                  │                   ▼                  │
+│      └──── Tool Parser ◄────  AI Response (native or text)     │
+│                  │                                             │
+│        ┌─────────┼──────────┬──────────┬────────────┐          │
+│        ▼         ▼          ▼          ▼            ▼          │
+│   File System  Shell    Git / Web   Voice       AST / Memory   │
+│   READ WRITE   SHELL    PUSH FETCH  WHISPER     SYMBOL RECALL  │
+└────────────────────────────────────────────────────────────────┘
 ```
-
-```
-.sapper/
-├── config.json        ← Runtime configuration
-├── context.json       ← Conversation history
-├── embeddings.json    ← Vector memory store
-├── workspace.json     ← Project dependency graph
-├── agents/            ← Custom agent definitions (.md)
-├── skills/            ← Reusable skill definitions (.md)
-└── logs/              ← Per-session activity logs (.md)
-```
-
----
-
-## Features
-
-| Area | Capability |
-|---|---|
-| AI Integration | Connects to any local Ollama model; model picker on startup |
-| Tool Execution | 28 built-in tools covering files, shell, git, and web |
-| Context Management | Auto-summarization when context window approaches limit |
-| Session Memory | Embedding-based semantic memory with cosine similarity recall |
-| Agents & Skills | Custom `.md` agent files with YAML frontmatter and tool restrictions |
-| Background Shell | Long-running commands hand off to tracked background sessions |
-| Approval Gate | Prompted approval with inline feedback for shell and write operations |
-| Activity Logging | Every tool call and AI turn is logged to `.sapper/logs/` |
-| AST Parsing | Symbol extraction (functions, classes) with `/symbol` search |
-| Streaming | Live token-by-token output with heartbeat and phase status |
 
 ---
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org) >= 16.0.0
-- [Ollama](https://ollama.ai) installed and running locally
-- At least one model pulled, for example:
+- **[Node.js](https://nodejs.org)** ≥ 16.0.0
+- **[Ollama](https://ollama.ai)** installed and running locally with at least one model
+- *(optional, for voice)* **[whisper.cpp](https://github.com/ggerganov/whisper.cpp)** and **ffmpeg** — see [Voice / Whisper](#voice--whisper)
 
 ```bash
 ollama pull llama3
@@ -196,24 +162,37 @@ ollama pull llama3
 npm install -g sapper-iq
 ```
 
+Or run it without installing:
+
+```bash
+npx sapper-iq
+```
+
 ---
 
 ## Quick Start
 
 ```bash
+cd /path/to/your/project
 sapper
 ```
 
-Sapper will prompt you to select a model, then you can start conversing immediately.
+Pick a model, then start talking:
 
 ```
-  Model: llama3
-  Working directory: /your/project
-
-> analyze this project and list what it does
+> analyze this project and tell me what it does
 > add a REST endpoint for user authentication
 > run the tests and fix any failures
 > commit the changes with a descriptive message
+```
+
+Or use your voice:
+
+```
+> /v lang en
+> /v live
+🔴 Live preview — press any key to stop.
+> [you speak]  →  transcript is sent to the AI
 ```
 
 ---
@@ -260,39 +239,63 @@ User prompt
 
 ## Commands
 
-Run these inside Sapper at the prompt:
+Run these inside Sapper at the prompt. Press `Tab` for slash-command autocomplete.
+
+### Session
 
 | Command | Description |
 |---|---|
-| `/help` | Show the full command palette |
-| `/commands` | Alias for `/help` |
-| `Tab` | Autocomplete slash commands while typing |
-| `/reset` | Start a new conversation session |
-| `/clear-session` | Alias for `/reset` |
+| `/help`, `/commands` | Show the full command palette |
+| `/reset`, `/clear-session` | Start a new conversation session |
 | `/session-info` | Display current session metadata |
-| `/summary` | View or change auto-summarization settings |
-| `/summary phases off` | Hide summarization step list |
-| `/summary trigger 60` | Set summarization trigger to 60 % of context |
-| `/ui` | Show current frontend style and compact mode |
-| `/ui style clean` | Switch to a cleaner Codex/OpenCode-like frontend style |
-| `/ui style ultra` | Switch to an ultra-clean single-line frontend style |
-| `/ui style sapper` | Switch back to the default Sapper frontend style |
-| `/ui compact auto` | Set responsive compact rendering mode |
-| `/shell` | Inspect shell config and list tracked background sessions |
-| `/shell read <id>` | Read buffered output from a background session |
-| `/shell stop <id>` | Stop a tracked background shell session |
-| `/step` | Toggle step-by-step tool approval mode |
-| `/tools` | Browse the built-in tool catalog |
-| `/git` | Inspect repository state and git shortcuts |
-| `/symbol <name>` | Search for a code symbol via AST index |
-| `/recall <query>` | Search semantic memory for past context |
-| `/memory` | Inspect markdown long-memory notes |
-| `/memory add <title> ::: <note> ::: <tags>` | Save durable project notes/patterns in markdown |
-| `/memory search <query>` | Search markdown long-memory notes |
 | `/log` | View the current session activity log |
 | `/attach <file>` | Attach a file to the next prompt |
 | `//text` | Send literal text that starts with `/` |
 | `exit` | Exit Sapper |
+
+### Model & Tools
+
+| Command | Description |
+|---|---|
+| `/model` | Switch the active Ollama model mid-session |
+| `/tools` | Browse the built-in tool catalog |
+| `/step` | Toggle step-by-step tool approval mode |
+| `/symbol <name>` | Search for a code symbol via the AST index |
+
+### Memory
+
+| Command | Description |
+|---|---|
+| `/recall <query>` | Search semantic embeddings for past context |
+| `/memory` | Inspect markdown long-memory notes |
+| `/memory add <title> ::: <note> ::: <tags>` | Save a durable project note |
+| `/memory search <query>` | Search markdown long-memory notes |
+
+### Voice
+
+| Command | Description |
+|---|---|
+| `/v`, `/voice` | Show voice status and settings |
+| `/v live`, `/v stream` | Live preview while you speak, clean final transcript on stop |
+| `/v record [seconds]` | Record from mic (push-to-stop, or fixed duration) |
+| `/v talk` | Alias for push-to-stop recording |
+| `/v file <path>` | Transcribe an existing audio file |
+| `/v model` | Interactive picker — list available Whisper models |
+| `/v lang <code>` | Lock language (e.g. `en`, `ar`, `auto`) |
+| `/v archive on\|off\|open` | Toggle or reveal the recordings archive |
+
+### Shell, UI & Summary
+
+| Command | Description |
+|---|---|
+| `/shell` | Inspect shell config and tracked background sessions |
+| `/shell read <id>` | Read buffered output from a background session |
+| `/shell stop <id>` | Stop a tracked background shell session |
+| `/git` | Inspect repository state and git shortcuts |
+| `/summary` | View or change auto-summarization settings |
+| `/summary trigger 60` | Set summarization trigger to 60 % of context |
+| `/ui style sapper\|clean\|ultra` | Switch the frontend style |
+| `/ui compact auto\|on\|off` | Responsive compact rendering |
 
 ---
 
@@ -352,7 +355,56 @@ Run these inside Sapper at the prompt:
 
 ---
 
-## Agents and Skills
+## Voice / Whisper
+
+Sapper can transcribe your voice using local [whisper.cpp](https://github.com/ggerganov/whisper.cpp). Nothing is sent to the cloud — audio and transcripts stay on your machine.
+
+### Setup (macOS)
+
+```bash
+brew install whisper-cpp ffmpeg
+mkdir -p ~/models
+curl -L -o ~/models/ggml-large-v3-turbo.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
+```
+
+Then in Sapper:
+
+```
+/v model           # pick from auto-detected models
+/v lang ar         # lock language for best quality (or 'en', 'auto', etc.)
+/v live            # press any key to stop, transcript goes to AI
+```
+
+### Modes
+
+| Mode | What it does |
+|---|---|
+| `/v live` | Streams a live preview as you speak, then runs one clean pass on the full WAV for the final transcript |
+| `/v record` | Push-to-stop recording with live ticker |
+| `/v record 8` | Fixed N-second capture |
+| `/v file <path>` | Transcribe an existing audio file |
+
+### Archive
+
+Every recording is saved (when archive is on) to:
+
+```
+<project>/.sapper/voice/YYYY-MM-DD/HHMMSS-<mode>.{wav,txt}
+```
+
+Use `/v archive open` to reveal it in Finder, `/v archive off` to disable.
+
+### Quality tips
+
+- **Lock the language** with `/v lang <code>` — `auto` works but per-chunk detection can bleed between languages
+- Use **`ggml-large-v3-turbo`** for the best speed/quality trade-off (~1.5 GB)
+- `large-v3` is slower but slightly more accurate (~2.9 GB)
+- Sapper auto-strips common silence hallucinations (`[BLANK_AUDIO]`, `"you"`, `"Thank you."`, subtitle credits, etc.)
+
+---
+
+## Agents & Skills
 
 Sapper supports custom agents and reusable skills defined as Markdown files with YAML frontmatter, stored in `.sapper/agents/` and `.sapper/skills/`.
 
@@ -465,26 +517,32 @@ Configuration is hot-reloaded — edit the file while Sapper is running and chan
 
 ## Session Memory
 
-Sapper maintains two layers of memory per project:
+Sapper maintains three layers of memory per project — all stored locally under `.sapper/`:
+
+| Layer | File | Purpose |
+|---|---|---|
+| **Short-term** | `.sapper/context.json` | Full conversation history; auto-summarized as the context window fills |
+| **Semantic** | `.sapper/embeddings.json` | Chunked text with cosine-similarity recall; auto-surfaced on relevant prompts. Search with `/recall <query>` |
+| **Durable** | `.sapper/long-memory.md` | Markdown project patterns, decisions, fixes. Managed with `/memory add` / `/memory search` |
+
+Every tool call and AI turn is also logged to `.sapper/logs/session-<timestamp>.md` for auditing.
+
+---
+
+## Project Layout
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Short-term  →  .sapper/context.json                │
-│  Full conversation history for the current session  │
-│  Auto-summarized as the context window fills up     │
-├─────────────────────────────────────────────────────┤
-│  Long-term   →  .sapper/embeddings.json             │
-│  Chunked text embedded with cosine similarity       │
-│  Recalled automatically on relevant prompts         │
-│  Searchable manually with /recall <query>           │
-├─────────────────────────────────────────────────────┤
-│  Durable notes →  .sapper/long-memory.md            │
-│  Markdown project patterns/decisions/fixes          │
-│  Managed with /memory add, /memory search, /memory  │
-└─────────────────────────────────────────────────────┘
+.sapper/
+├── config.json         runtime configuration (hot-reload, JSONC)
+├── context.json        conversation history for session resume
+├── embeddings.json     semantic vector memory
+├── workspace.json      file index and dependency graph
+├── long-memory.md      durable project notes
+├── voice/              audio + transcript archive (YYYY-MM-DD/)
+├── agents/             custom agents (.md + YAML frontmatter)
+├── skills/             reusable skill blocks (.md + YAML frontmatter)
+└── logs/               per-session activity audit logs
 ```
-
-All activity is also written to `.sapper/logs/session-<timestamp>.md` for auditing.
 
 ---
 
@@ -498,16 +556,24 @@ chmod +x sapper.mjs
 node sapper.mjs
 ```
 
-CI runs automatically on push to `main` across Node.js 16, 18, and 20.
+CI runs on push to `main` across Node.js 16, 18, and 20.
+
+### Releasing
+
+See [PUBLISHING.md](PUBLISHING.md) for the full npm release flow.
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT — see [LICENSE](LICENSE).
 
 ---
 
-**Author:** Ibrahim Ihsan  
-**Package:** [sapper-iq on npm](https://www.npmjs.com/package/sapper-iq)  
-**Repository:** [github.com/aledanee/sapper](https://github.com/aledanee/sapper)
+<div align="center">
+
+**Built by [Ibrahim Ihsan](https://github.com/aledanee)** · [npm](https://www.npmjs.com/package/sapper-iq) · [GitHub](https://github.com/aledanee/sapper) · [Issues](https://github.com/aledanee/sapper/issues)
+
+<sub>If Sapper saves you time, a ⭐ on GitHub means a lot.</sub>
+
+</div>
