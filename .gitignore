@@ -30,7 +30,6 @@ Thumbs.db
 
 # Project-private / optional files
 PUBLISHING.md
-sapper-ui.mjs
 old/
 SAPPER_WORK_REPORT.md
 images/
