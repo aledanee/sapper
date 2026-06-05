@@ -3126,41 +3126,98 @@ function spawnSapper(cols, rows) {
   });
 }
 
+// ─── Persistent PTY (survives browser refresh) ───────────────────
+// The pty process lives at module scope so it outlives any WS connection.
+// All output is stored in a ring buffer; new clients replay it on connect.
+
+const PTY_SCROLLBACK_MAX = 512 * 1024; // 512 KB replay buffer
+let sharedPty = null;
+let ptyScrollback = '';          // raw bytes (utf-8) for replay
+let ptyCols = 220, ptyRows = 50;  // last known size
+
+function appendPtyScrollback(chunk) {
+  ptyScrollback += chunk;
+  if (ptyScrollback.length > PTY_SCROLLBACK_MAX) {
+    // Drop oldest half to stay near cap without constant slicing
+    ptyScrollback = ptyScrollback.slice(ptyScrollback.length - Math.floor(PTY_SCROLLBACK_MAX * 0.6));
+  }
+}
+
+function ensurePty(cols, rows) {
+  if (sharedPty) return;
+  ptyCols = cols || 220; ptyRows = rows || 50;
+  try {
+    sharedPty = spawnSapper(ptyCols, ptyRows);
+  } catch (e) {
+    console.error('[ui] spawn failed:', e.message);
+    return;
+  }
+  dbg('pty pid=' + sharedPty.pid + ' ' + ptyCols + 'x' + ptyRows);
+  sharedPty.onData((d) => {
+    appendPtyScrollback(d);
+    // Broadcast to every connected pty client
+    for (const ws of ptyClients) {
+      if (ws.readyState === ws.OPEN) {
+        try { ws.send(Buffer.from(d, 'utf8')); } catch {}
+      }
+    }
+  });
+  sharedPty.onExit(({ exitCode, signal }) => {
+    dbg('pty exit code=' + exitCode);
+    sharedPty = null;
+    // Notify all clients so they can show "exited" badge
+    const msg = JSON.stringify({ type: 'exit', code: exitCode, signal });
+    for (const ws of ptyClients) {
+      if (ws.readyState === ws.OPEN) { try { ws.send(msg); } catch {} }
+    }
+  });
+}
+
+const ptyClients = new Set(); // all currently-connected pty websockets
+
 wssPty.on('connection', (ws) => {
   dbg('pty client connected');
-  let pty = null; let initialized = false;
-
-  function start(cols, rows) {
-    if (pty) { try { pty.kill(); } catch {} }
-    try { pty = spawnSapper(cols, rows); }
-    catch (e) {
-      console.error('[ui] spawn failed:', e.message);
-      try { ws.send(Buffer.from('\x1b[31mFailed to spawn sapper: ' + e.message + '\x1b[0m\r\n', 'utf8')); } catch {}
-      return;
-    }
-    dbg('pty pid=' + pty.pid + ' ' + cols + 'x' + rows);
-    pty.onData((d) => { if (ws.readyState === ws.OPEN) ws.send(Buffer.from(d, 'utf8')); });
-    pty.onExit(({ exitCode, signal }) => {
-      dbg('pty exit code=' + exitCode);
-      if (ws.readyState === ws.OPEN) { try { ws.send(JSON.stringify({ type: 'exit', code: exitCode, signal })); } catch {} }
-    });
-    try { ws.send(JSON.stringify({ type: 'cwd', path: workingDir })); } catch {}
-  }
+  ptyClients.add(ws);
 
   ws.on('message', (raw, isBinary) => {
     const str = raw.toString('utf8');
     if (!isBinary && str.startsWith('{')) {
       try {
         const m = JSON.parse(str);
-        if (m.type === 'init') { if (!initialized) { initialized = true; start(m.cols, m.rows); } return; }
-        if (m.type === 'resize' && pty) { try { pty.resize(m.cols || 100, m.rows || 30); } catch {} return; }
-        if (m.type === 'restart') { initialized = true; start(100, 30); return; }
+        if (m.type === 'init') {
+          // Spawn pty if not running yet
+          ensurePty(m.cols, m.rows);
+          // Replay scrollback so the refreshed browser sees prior output
+          if (ptyScrollback.length > 0) {
+            try { ws.send(Buffer.from(ptyScrollback, 'utf8')); } catch {}
+          }
+          // Always send current cwd
+          try { ws.send(JSON.stringify({ type: 'cwd', path: workingDir })); } catch {}
+          return;
+        }
+        if (m.type === 'resize' && sharedPty) {
+          ptyCols = m.cols || ptyCols; ptyRows = m.rows || ptyRows;
+          try { sharedPty.resize(ptyCols, ptyRows); } catch {}
+          return;
+        }
+        if (m.type === 'restart') {
+          // Kill current pty and start fresh; clear scrollback
+          if (sharedPty) { try { sharedPty.kill(); } catch {} sharedPty = null; }
+          ptyScrollback = '';
+          ensurePty(ptyCols, ptyRows);
+          try { ws.send(JSON.stringify({ type: 'cwd', path: workingDir })); } catch {}
+          return;
+        }
       } catch {}
     }
-    if (pty) pty.write(str);
+    if (sharedPty) sharedPty.write(str);
   });
 
-  ws.on('close', () => { if (pty) { try { pty.kill(); } catch {} pty = null; } });
+  ws.on('close', () => {
+    ptyClients.delete(ws);
+    // Do NOT kill the pty — keep it alive for the next reconnect.
+    dbg('pty client disconnected (' + ptyClients.size + ' remaining)');
+  });
 });
 
 // ── FS watcher: broadcast to all /events clients ─────────────────
@@ -3437,5 +3494,11 @@ server.on('listening', () => {
 
 tryListen(PORT);
 
-process.on('SIGINT', () => { console.log('\nShutting down…'); try { watcher && watcher.close(); } catch {} process.exit(0); });
-process.on('SIGTERM', () => process.exit(0));
+function shutdown() {
+  console.log('\nShutting down…');
+  try { watcher && watcher.close(); } catch {}
+  if (sharedPty) { try { sharedPty.kill(); } catch {} }
+  process.exit(0);
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
