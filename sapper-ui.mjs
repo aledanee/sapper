@@ -285,6 +285,47 @@ function buildHTML() {
     font-style: italic; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
   #activityPanel .note:before { content: '💬  '; margin-right: 2px; font-style: normal; }
   #activityPanel .empty { padding: 12px; color: var(--dim); text-align: center; font-size: 11px; }
+
+  /* Index tray — multi-select files/folders to send into chat */
+  #indexPanel { display: none; border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, rgba(88,166,255,.08), rgba(88,166,255,.02));
+    font-family: ui-monospace, 'SF Mono', monospace; font-size: 11px; }
+  #indexPanel.on { display: block; }
+  #indexPanel .ih { display: flex; align-items: center; gap: 6px; padding: 5px 10px;
+    border-bottom: 1px solid var(--border); color: var(--accent); font-size: 10px;
+    text-transform: uppercase; letter-spacing: .5px; }
+  #indexPanel .ih .icnt { color: var(--muted); text-transform: none; letter-spacing: 0; }
+  #indexPanel .ih .iact { margin-left: auto; display: inline-flex; gap: 4px; }
+  #indexPanel .ih .iact button { background: transparent; color: var(--accent);
+    border: 1px solid var(--border2); border-radius: 3px; padding: 1px 7px; font-size: 10px;
+    cursor: pointer; font-family: inherit; line-height: 1.3; }
+  #indexPanel .ih .iact button:hover { border-color: var(--accent); }
+  #indexPanel .ih .iact button.primary { color: #fff; background: var(--accent); border-color: var(--accent); }
+  #indexPanel .ih .iact button.primary:hover { background: var(--accent2); border-color: var(--accent2); }
+  #indexPanel .ih .iact button.danger { color: var(--muted); }
+  #indexPanel .ih .iact button.danger:hover { color: var(--red); border-color: var(--red); }
+  #indexPanel .chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 10px 4px;
+    max-height: 110px; overflow-y: auto; }
+  #indexPanel .chip { display: inline-flex; align-items: center; gap: 4px;
+    background: rgba(88,166,255,.12); border: 1px solid rgba(88,166,255,.3);
+    border-radius: 10px; padding: 1px 4px 1px 8px; font-size: 10px; color: var(--fg); }
+  #indexPanel .chip.dir { background: rgba(210,153,34,.12); border-color: rgba(210,153,34,.3); }
+  #indexPanel .chip .cp { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #indexPanel .chip .cx { cursor: pointer; opacity: .55; padding: 0 3px; font-size: 12px; }
+  #indexPanel .chip .cx:hover { opacity: 1; color: var(--red); }
+  #indexPanel .empty { padding: 8px 10px; color: var(--dim); font-style: italic; }
+  #indexPanel .icmt { display: block; margin: 4px 10px 8px; width: calc(100% - 20px);
+    box-sizing: border-box; background: var(--panel); color: var(--fg);
+    border: 1px solid var(--border2); border-radius: 4px; padding: 4px 6px;
+    font-size: 11px; font-family: inherit; resize: vertical; min-height: 26px; max-height: 80px; }
+  #indexPanel .icmt:focus { outline: none; border-color: var(--accent); }
+  /* Per-row index checkbox (visible only when index mode is on) */
+  .row .chk { display: none; width: 12px; flex-shrink: 0; color: var(--dim);
+    text-align: center; font-size: 11px; line-height: 1; }
+  body.indexmode .row .chk { display: inline-block; cursor: pointer; }
+  body.indexmode .row .chk:hover { color: var(--accent); }
+  .row .chk.on { color: var(--accent); }
+  .ftb.on { color: var(--accent); }
   .tree { font-family: ui-monospace, 'SF Mono', monospace; font-size: 12px; padding-bottom: 12px; }
   .row { display: flex; align-items: center; gap: 4px; padding: 3px 8px; cursor: pointer; color: var(--muted);
     white-space: nowrap; user-select: none; position: relative; }
@@ -592,6 +633,7 @@ function buildHTML() {
           <button class="ftb" title="New file" onclick="newItemPrompt('file','')">&#128462;<sup>+</sup></button>
           <button class="ftb" title="New folder" onclick="newItemPrompt('folder','')">&#128193;<sup>+</sup></button>
           <button class="ftb" id="ftbAct" title="Show activity log" onclick="toggleActivity()">&#9737;</button>
+          <button class="ftb" id="ftbIdx" title="Index files/folders into chat (multi-select)" onclick="toggleIndexMode()">&#128218;</button>
           <span class="ftb-spacer"></span>
           <button class="ftb" title="Clear change marks" onclick="clearAllMarks()">&#10005;</button>
           <button class="ftb" title="Refresh tree" onclick="loadTree()">&#8634;</button>
@@ -600,6 +642,17 @@ function buildHTML() {
         <div id="activityPanel">
           <div class="ah">Recent activity<span class="acl" onclick="clearActivity()">clear</span></div>
           <div id="activityList"></div>
+        </div>
+        <div id="indexPanel">
+          <div class="ih">
+            <span>Index</span><span class="icnt" id="idxCount">0 items</span>
+            <span class="iact">
+              <button class="primary" title="Send to chat (Enter sends if a prompt is filled, otherwise files are staged at the cursor)" onclick="sendIndexToChat()">Send</button>
+              <button class="danger" title="Clear all" onclick="clearIndex()">Clear</button>
+            </span>
+          </div>
+          <div class="chips" id="idxChips"></div>
+          <textarea class="icmt" id="idxComment" placeholder="Optional prompt — fill this to send immediately. Empty = stage at cursor so you can keep typing."></textarea>
         </div>
         <div class="tree" id="tree"></div>
       </div>
@@ -721,6 +774,8 @@ var state = {
   marks: {},            // path -> { kind, count, ts }
   activity: [],         // ordered list of {kind, path, isDir, ts}
   activityOpen: false,
+  indexMode: false,     // true = show checkboxes on tree rows
+  indexSet: {},         // path -> { isDir, ts } selected for "Index to chat"
 };
 
 var cm = null; // CodeMirror instance (lazy)
@@ -1172,7 +1227,10 @@ function renderEntries(container, basePath, entries, depth) {
     row.dataset.isdir = entry.isDir ? '1' : '0';
     row.style.paddingLeft = (8 + depth * 14) + 'px';
     var chev = entry.isDir ? (state.expanded[path] ? '&#9662;' : '&#9656;') : '';
+    var chkOn = state.indexSet[path] ? ' on' : '';
+    var chkChar = state.indexSet[path] ? '&#9745;' : '&#9744;'; // ☑ / ☐
     row.innerHTML =
+      '<span class="chk' + chkOn + '" title="Add to index">' + chkChar + '</span>' +
       '<span class="chev">' + chev + '</span>' +
       '<span class="ico">' + fileIcon(entry.name, entry.isDir) + '</span>' +
       '<span class="name">' + esc(entry.name) + '</span>' +
@@ -1181,6 +1239,11 @@ function renderEntries(container, basePath, entries, depth) {
       '<span class="badge">&#9679;</span>' +
       '<span class="rmenu" title="Options">&#8943;</span>';
     row.addEventListener('click', function(ev){
+      if (ev.target && ev.target.classList && ev.target.classList.contains('chk')) {
+        ev.stopPropagation();
+        toggleIndex(path, entry.isDir);
+        return;
+      }
       if (ev.target && ev.target.classList && ev.target.classList.contains('rmenu')) {
         ev.stopPropagation();
         openRowMenu(ev.target, path, entry.isDir);
@@ -1280,6 +1343,12 @@ function openRowMenu(anchor, path, isDir) {
   items.push({ label: 'Duplicate', fn: function(){ duplicateItem(path); } });
   items.push({ label: 'Copy path', fn: function(){ copyText(path); showToast('Path copied'); } });
   items.push({ label: 'Copy name', fn: function(){ copyText(path.split('/').pop()); showToast('Name copied'); } });
+  items.push({ sep: true });
+  var inIdx = !!state.indexSet[path];
+  items.push({
+    label: (inIdx ? '&#128218; Remove from index' : '&#128218; Add to index'),
+    fn: function(){ toggleIndex(path, isDir); if (!state.indexMode) toggleIndexMode(true); }
+  });
   items.push({ sep: true });
   items.push({ label: 'Reveal in Finder', fn: function(){
     fetch('/api/fs/reveal', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ path: path }) });
@@ -1747,6 +1816,123 @@ function sendPasteToTerm(text) {
   ws.send('\\r');
   return true;
 }
+
+function sendRawToTerm(text) {
+  if (!ws || ws.readyState !== 1) {
+    showToast('Terminal not connected', 'err');
+    return false;
+  }
+  ws.send(text);
+  return true;
+}
+
+// ─── Index tray: multi-select files/folders into the chat ────────
+try { state.indexSet = JSON.parse(localStorage.getItem('sapperIndex') || '{}') || {}; } catch(e) { state.indexSet = {}; }
+function saveIndex() {
+  try { localStorage.setItem('sapperIndex', JSON.stringify(state.indexSet)); } catch(e) {}
+}
+
+window.toggleIndexMode = function(forceOn) {
+  state.indexMode = (forceOn === true) ? true : !state.indexMode;
+  document.body.classList.toggle('indexmode', state.indexMode);
+  var btn = document.getElementById('ftbIdx');
+  if (btn) btn.classList.toggle('on', state.indexMode);
+  var panel = document.getElementById('indexPanel');
+  if (panel) panel.classList.toggle('on', state.indexMode);
+  if (state.indexMode) renderIndex();
+};
+
+window.toggleIndex = function(path, isDir) {
+  if (state.indexSet[path]) {
+    delete state.indexSet[path];
+  } else {
+    state.indexSet[path] = { isDir: !!isDir, ts: Date.now() };
+  }
+  saveIndex();
+  // Update the row checkbox without full rerender
+  var row = document.querySelector('.row[data-path="' + cssEscape(path) + '"]');
+  if (row) {
+    var chk = row.querySelector('.chk');
+    if (chk) {
+      var on = !!state.indexSet[path];
+      chk.classList.toggle('on', on);
+      chk.innerHTML = on ? '&#9745;' : '&#9744;';
+    }
+  }
+  renderIndex();
+};
+
+window.clearIndex = function() {
+  state.indexSet = {};
+  saveIndex();
+  document.querySelectorAll('.row .chk.on').forEach(function(el){
+    el.classList.remove('on'); el.innerHTML = '&#9744;';
+  });
+  renderIndex();
+  showToast('Index cleared');
+};
+
+function renderIndex() {
+  var panel = document.getElementById('indexPanel');
+  if (!panel) return;
+  var chips = document.getElementById('idxChips');
+  var count = document.getElementById('idxCount');
+  var paths = Object.keys(state.indexSet).sort();
+  if (count) count.textContent = paths.length + ' item' + (paths.length === 1 ? '' : 's');
+  if (!chips) return;
+  if (!paths.length) {
+    chips.innerHTML = '<div class="empty">Tick files or folders in the tree, or right-click &gt; Add to index.</div>';
+    return;
+  }
+  chips.innerHTML = paths.map(function(p){
+    var info = state.indexSet[p];
+    var cls = info.isDir ? 'chip dir' : 'chip';
+    var ico = info.isDir ? '&#128193;' : '&#128462;';
+    return '<span class="' + cls + '" title="' + esc(p) + '">' +
+      '<span>' + ico + '</span>' +
+      '<span class="cp">' + esc(p) + '</span>' +
+      '<span class="cx" data-p="' + esc(p) + '" title="Remove">&times;</span>' +
+      '</span>';
+  }).join('');
+  chips.querySelectorAll('.cx').forEach(function(el){
+    el.addEventListener('click', function(ev){
+      ev.stopPropagation();
+      toggleIndex(el.getAttribute('data-p'), state.indexSet[el.getAttribute('data-p')] && state.indexSet[el.getAttribute('data-p')].isDir);
+    });
+  });
+}
+
+window.sendIndexToChat = function() {
+  var paths = Object.keys(state.indexSet);
+  if (!paths.length) { showToast('Index is empty', 'err'); return; }
+  if (!ws || ws.readyState !== 1) { showToast('Terminal not connected', 'err'); return; }
+  var files = [], dirs = [];
+  paths.forEach(function(p){
+    if (state.indexSet[p] && state.indexSet[p].isDir) dirs.push(p); else files.push(p);
+  });
+  // 1) /scan each folder (each sent as its own command + Enter)
+  dirs.forEach(function(d){ sendPasteToTerm('/scan ' + d); });
+  // 2) Build attachments token for files
+  var atTokens = files.map(function(f){ return '@' + f; }).join(' ');
+  var comment = (document.getElementById('idxComment') || {}).value || '';
+  comment = comment.trim();
+  if (comment) {
+    // Send a complete message that Sapper will execute immediately
+    var msg = comment;
+    if (atTokens) msg = comment + ' ' + atTokens;
+    sendPasteToTerm(msg);
+  } else if (atTokens) {
+    // Stage at cursor — no Enter, so the user can type their question
+    sendRawToTerm(atTokens + ' ');
+  }
+  showToast('Sent ' + files.length + ' file' + (files.length === 1 ? '' : 's') +
+            (dirs.length ? ' and ' + dirs.length + ' folder' + (dirs.length === 1 ? '' : 's') : '') +
+            ' to chat');
+  // Clear comment, clear index, refocus terminal
+  var cmt = document.getElementById('idxComment'); if (cmt) cmt.value = '';
+  clearIndex();
+  try { term.focus(); } catch(e) {}
+};
 
 window.askAboutSelection = async function() {
   if (!state.currentFile) return;
