@@ -2839,8 +2839,33 @@ function startStatsPoll() {
 
 // ─── Launch ──────────────────────────────────────────────────────
 
-server.listen(PORT, () => {
-  const url = `http://localhost:${PORT}`;
+const PORT_RETRY_LIMIT = parseInt(process.env.SAPPER_UI_PORT_RETRIES || '20', 10);
+const portExplicit = !!process.env.SAPPER_UI_PORT;
+let portAttempt = 0;
+let activePort = PORT;
+
+function tryListen(port) {
+  activePort = port;
+  server.listen(port);
+}
+
+server.on('error', (err) => {
+  if (err && err.code === 'EADDRINUSE' && portAttempt < PORT_RETRY_LIMIT) {
+    portAttempt++;
+    const next = activePort + 1;
+    const reason = portExplicit
+      ? `port ${activePort} (from SAPPER_UI_PORT) is in use`
+      : `port ${activePort} is in use`;
+    console.log(`  \x1b[33m⚠\x1b[0m  ${reason}, trying ${next}…`);
+    setTimeout(() => tryListen(next), 50);
+    return;
+  }
+  console.error(`\n  \x1b[31m✖ Sapper Web failed to start:\x1b[0m ${err && err.message ? err.message : err}`);
+  process.exit(1);
+});
+
+server.on('listening', () => {
+  const url = `http://localhost:${activePort}`;
   console.log(`\n  \x1b[36m⚡ Sapper Web\x1b[0m running at \x1b[1m${url}\x1b[0m`);
   console.log(`  Working dir: ${workingDir}\n`);
   startWatcher();
@@ -2863,6 +2888,8 @@ server.listen(PORT, () => {
     } catch {}
   }
 });
+
+tryListen(PORT);
 
 process.on('SIGINT', () => { console.log('\nShutting down…'); try { watcher && watcher.close(); } catch {} process.exit(0); });
 process.on('SIGTERM', () => process.exit(0));
