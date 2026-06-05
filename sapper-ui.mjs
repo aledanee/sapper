@@ -628,6 +628,35 @@ function buildHTML() {
   .tmsg.warn { border-color: rgba(210,153,34,.5); }
   .tmsg.err { border-color: var(--red); }
   @keyframes slideIn { from { transform: translateX(10px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+  /* ─── Tooltip (! icon) ─── */
+  .tip {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 13px; height: 13px; border-radius: 50%;
+    border: 1px solid var(--border2); color: var(--dim);
+    font-size: 9px; font-weight: 700; cursor: help;
+    flex-shrink: 0; user-select: none; position: relative;
+    vertical-align: middle; margin-left: 4px; line-height: 1;
+    transition: color .12s, border-color .12s;
+  }
+  .tip:hover { color: var(--accent); border-color: var(--accent); }
+  .tip::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 7px);
+    left: 50%; transform: translateX(-50%);
+    background: var(--panel2); color: var(--fg);
+    border: 1px solid var(--border2);
+    border-radius: 6px; padding: 6px 10px;
+    font-size: 11px; font-weight: 400;
+    white-space: normal; width: 220px; line-height: 1.45;
+    pointer-events: none; opacity: 0;
+    z-index: 99999; box-shadow: 0 6px 20px rgba(0,0,0,.5);
+    transition: opacity .15s;
+  }
+  .tip:hover::after { opacity: 1; }
+  /* keep tip visible when near top of panel (flip below) */
+  .tip.below::after { bottom: auto; top: calc(100% + 7px); }
 </style>
 </head>
 <body>
@@ -656,17 +685,17 @@ function buildHTML() {
     <!-- Sidebar -->
     <aside id="side">
       <div class="tabs">
-        <button class="active" data-tab="files" onclick="switchTab('files')">Files</button>
-        <button data-tab="config" onclick="switchTab('config')">Config</button>
-        <button data-tab="agents" onclick="switchTab('agents')">Agents</button>
-        <button data-tab="skills" onclick="switchTab('skills')">Skills</button>
+        <button class="active" data-tab="files" onclick="switchTab('files')" title="Browse and manage workspace files">Files</button>
+        <button data-tab="config" onclick="switchTab('config')" title="Edit Sapper config.json settings">Config</button>
+        <button data-tab="agents" onclick="switchTab('agents')" title="Manage AI agent roles (.sapper/agents/)">Agents</button>
+        <button data-tab="skills" onclick="switchTab('skills')" title="Manage skills loaded into the AI (.sapper/skills/)">Skills</button>
       </div>
       <div class="pane active" id="pane-files">
         <div class="files-toolbar">
-          <button class="ftb" title="New file" onclick="newItemPrompt('file','')">&#128462;<sup>+</sup></button>
-          <button class="ftb" title="New folder" onclick="newItemPrompt('folder','')">&#128193;<sup>+</sup></button>
-          <button class="ftb" id="ftbAct" title="Show activity log" onclick="toggleActivity()">&#9737;</button>
-          <button class="ftb" id="ftbIdx" title="Index files/folders into chat (multi-select)" onclick="toggleIndexMode()">&#128218;</button>
+          <button class="ftb" title="Create a new file in the current directory" onclick="newItemPrompt('file','')">&#128462;<sup>+</sup></button>
+          <button class="ftb" title="Create a new folder in the current directory" onclick="newItemPrompt('folder','')">&#128193;<sup>+</sup></button>
+          <button class="ftb" id="ftbAct" title="Toggle activity feed — shows files recently created, modified, or deleted by Sapper" onclick="toggleActivity()">&#9737;</button>
+          <button class="ftb" id="ftbIdx" title="Index mode — check files/folders to bundle them into a single chat message" onclick="toggleIndexMode()">&#128218;</button>
           <span class="ftb-spacer"></span>
           <button class="ftb" title="Clear change marks" onclick="clearAllMarks()">&#10005;</button>
           <button class="ftb" title="Refresh tree" onclick="loadTree()">&#8634;</button>
@@ -725,18 +754,18 @@ function buildHTML() {
     <!-- Center: terminal -->
     <main id="center">
       <div id="qa">
-        <button class="qabtn" title="Attach files (sends @path to Sapper)" onclick="pickAndUpload()">
+        <button class="qabtn" title="Pick local files to attach — sends @filepath reference(s) into the terminal" onclick="pickAndUpload()">
           <span class="qaico">&#128206;</span><span class="qalbl">Attach</span>
         </button>
-        <button class="qabtn rec" title="Record voice (auto-transcribed by Sapper)" onclick="toggleRecord()" id="qaRec">
+        <button class="qabtn rec" title="Record a voice message — Sapper transcribes it with Whisper and sends it as a prompt" onclick="toggleRecord()" id="qaRec">
           <span class="qaico">&#127908;</span><span class="qalbl">Record</span>
         </button>
         <span id="recDot" class="rec-dot"></span>
         <span id="recTime" class="rec-time"></span>
         <span class="qa-sp"></span>
-        <button class="qabtn" title="Send /attach (interactive)" onclick="sendCmd('/attach')">/attach</button>
-        <button class="qabtn" title="Open file by path" onclick="sendOpenPrompt()">/open</button>
-        <button class="qabtn" title="Compact context" onclick="sendCmd('/summary')">/summary</button>
+        <button class="qabtn" title="Run /attach inside the terminal — lets Sapper interactively pick files with fuzzy search" onclick="sendCmd('/attach')">/attach</button>
+        <button class="qabtn" title="Open a file by path in the preview panel" onclick="sendOpenPrompt()">/open</button>
+        <button class="qabtn" title="Summarize and compress the conversation context to free up token space" onclick="sendCmd('/summary')">/summary</button>
         <input type="file" id="qaFile" multiple style="display:none">
       </div>
       <div id="term-wrap"></div>
@@ -2478,14 +2507,15 @@ function renderQuickConfig(cfg) {
   var host = document.getElementById('cfgQuickBody');
   host.innerHTML = '';
   function add(html) { host.insertAdjacentHTML('beforeend', html); }
-  add('<label>Default model</label><input type="text" id="qDefMod" placeholder="auto" value="' + esc(cfg.defaultModel || '') + '">');
-  add('<label>Default agent</label><input type="text" id="qDefAgent" placeholder="(none)" value="' + esc(cfg.defaultAgent || '') + '">');
-  add('<label>Context limit (tokens, blank = model default)</label><input type="number" id="qCtxLim" value="' + esc(cfg.contextLimit == null ? '' : cfg.contextLimit) + '">');
-  add('<label>Tool round limit</label><input type="number" id="qToolRnd" value="' + esc(cfg.toolRoundLimit != null ? cfg.toolRoundLimit : 40) + '">');
-  add('<div class="toggle-row"><span>Summary phases</span><div class="switch ' + (cfg.summaryPhases ? 'on' : '') + '" id="qSumPh"></div></div>');
-  add('<label>Summary trigger %</label><input type="number" id="qSumTr" value="' + esc(cfg.summarizeTriggerPercent != null ? cfg.summarizeTriggerPercent : 65) + '">');
-  add('<div class="toggle-row"><span>Debug mode</span><div class="switch ' + (cfg.debug ? 'on' : '') + '" id="qDebug"></div></div>');
-  add('<div class="toggle-row"><span>Auto-attach files</span><div class="switch ' + (cfg.autoAttach !== false ? 'on' : '') + '" id="qAutoAtt"></div></div>');
+  var T = function(tip, below) { return '<span class="tip' + (below ? ' below' : '') + '" data-tip="' + tip.replace(/"/g, '&quot;') + '">!</span>'; };
+  add('<label>Default model ' + T('The AI model used when no model is specified at startup. E.g. gpt-4o, claude-3-5-sonnet, qwen3.5. Leave blank to be prompted on launch.') + '</label><input type="text" id="qDefMod" placeholder="auto" value="' + esc(cfg.defaultModel || '') + '">');
+  add('<label>Default agent ' + T('Agent role (.sapper/agents/*.md) to activate automatically when Sapper starts. Leave blank for the default general-purpose assistant.') + '</label><input type="text" id="qDefAgent" placeholder="(none)" value="' + esc(cfg.defaultAgent || '') + '">');
+  add('<label>Context limit ' + T('Hard cap on tokens sent to the model per request. Leave blank to use the model\'s full context window. Useful to reduce cost or avoid slow responses.') + '</label><input type="number" id="qCtxLim" value="' + esc(cfg.contextLimit == null ? '' : cfg.contextLimit) + '">');
+  add('<label>Tool round limit ' + T('Maximum number of tool calls (file reads, shell commands, patches…) Sapper may make in a single response turn. Default is 40. Lower to prevent runaway loops.') + '</label><input type="number" id="qToolRnd" value="' + esc(cfg.toolRoundLimit != null ? cfg.toolRoundLimit : 40) + '">');
+  add('<div class="toggle-row"><span>Summary phases ' + T('When ON, Sapper displays a step-by-step progress bar while it compresses long conversations. Turn OFF for a quieter experience.') + '</span><div class="switch ' + (cfg.summaryPhases ? 'on' : '') + '" id="qSumPh"></div></div>');
+  add('<label>Summary trigger % ' + T('When the conversation reaches this percentage of the context window, Sapper automatically summarizes older messages to keep the window from overflowing. Default 65%.') + '</label><input type="number" id="qSumTr" value="' + esc(cfg.summarizeTriggerPercent != null ? cfg.summarizeTriggerPercent : 65) + '">');
+  add('<div class="toggle-row"><span>Debug mode ' + T('Enables verbose output — shows raw tool call details, API request sizes, and internal errors. Useful for troubleshooting but noisy during normal use.') + '</span><div class="switch ' + (cfg.debug ? 'on' : '') + '" id="qDebug"></div></div>');
+  add('<div class="toggle-row"><span>Auto-attach files ' + T('When ON, files you open in the sidebar are automatically referenced in the AI context so Sapper knows what you are looking at without you typing @filename.') + '</span><div class="switch ' + (cfg.autoAttach !== false ? 'on' : '') + '" id="qAutoAtt"></div></div>');
   add('<div class="row-btns"><button class="primary" onclick="saveQuickConfig()">Apply quick changes</button></div>');
 
   function bindSwitch(id) {
@@ -2837,13 +2867,20 @@ function listEntries(dirPath) {
 
 function looksBinary(buf) {
   const len = Math.min(buf.length, 4096);
-  let nonText = 0;
+  // Null byte is a definitive binary indicator
   for (let i = 0; i < len; i++) {
-    const c = buf[i];
-    if (c === 0) return true;
-    if ((c < 32 && c !== 9 && c !== 10 && c !== 13) || c >= 127) nonText++;
+    if (buf[i] === 0) return true;
   }
-  return nonText / Math.max(len, 1) > 0.3;
+  // Try decoding as UTF-8; replacement char U+FFFD signals invalid sequences (binary)
+  const sample = buf.slice(0, len).toString('utf8');
+  if (sample.includes('\uFFFD')) return true;
+  // Count true non-printable control chars (bytes < 32 excluding tab/LF/CR)
+  let nonText = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const c = sample.charCodeAt(i);
+    if (c < 32 && c !== 9 && c !== 10 && c !== 13) nonText++;
+  }
+  return nonText / Math.max(sample.length, 1) > 0.1;
 }
 
 const server = http.createServer(async (req, res) => {
