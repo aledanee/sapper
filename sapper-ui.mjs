@@ -3136,21 +3136,22 @@ function listEntries(dirPath) {
 }
 
 function looksBinary(buf) {
-  const len = Math.min(buf.length, 4096);
+  const len = buf.length;
   // Null byte is a definitive binary indicator
   for (let i = 0; i < len; i++) {
     if (buf[i] === 0) return true;
   }
-  // Try decoding as UTF-8; replacement char U+FFFD signals invalid sequences (binary)
-  const sample = buf.slice(0, len).toString('utf8');
-  if (sample.includes('\uFFFD')) return true;
+  // Decode the FULL buffer as UTF-8 (never a slice — slicing can cut a
+  // multibyte char and inject a false U+FFFD). Files are capped at 2MB.
+  const text = buf.toString('utf8');
+  if (text.includes('\uFFFD')) return true;
   // Count true non-printable control chars (bytes < 32 excluding tab/LF/CR)
   let nonText = 0;
-  for (let i = 0; i < sample.length; i++) {
-    const c = sample.charCodeAt(i);
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
     if (c < 32 && c !== 9 && c !== 10 && c !== 13) nonText++;
   }
-  return nonText / Math.max(sample.length, 1) > 0.1;
+  return nonText / Math.max(text.length, 1) > 0.1;
 }
 
 const server = http.createServer(async (req, res) => {
