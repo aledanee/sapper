@@ -1171,6 +1171,7 @@ const DEFAULT_CONFIG = Object.freeze({
     tools: ['read', 'read_chunk', 'list', 'search', 'grep', 'find', 'regex', 'head', 'tail', 'cat', 'pwd', 'changes', 'fetch_web', 'recall_memory', 'search_memory_notes', 'read_memory_notes'], // Read-only subset by default — no write / patch / shell / open / mkdir / rmdir.
     saveTranscripts: true,         // Persist every consultation to disk for audit.
     transcriptDir: '.sapper/consultations', // Where transcripts are written.
+    verbose: true,                 // Print full request, each tool call/result, and final answer to the terminal during the consultation.
     systemPrompt: '',              // Override the built-in consultant system prompt (empty = use default).
   }),
   prompt: Object.freeze({
@@ -1591,6 +1592,7 @@ function normalizeConsultantConfig(consultantConfig = {}) {
     transcriptDir: typeof consultantConfig.transcriptDir === 'string' && consultantConfig.transcriptDir.trim()
       ? consultantConfig.transcriptDir.trim()
       : D.transcriptDir,
+    verbose: normalizeBoolean(consultantConfig.verbose, D.verbose),
     systemPrompt: typeof consultantConfig.systemPrompt === 'string' ? consultantConfig.systemPrompt : D.systemPrompt,
   };
 }
@@ -5901,6 +5903,34 @@ async function consultExpert({ summary, question, goal, attempts, hints, files }
     'Consulting expert', 'magenta'
   ));
 
+  const verbose = cfg.verbose !== false;
+  const dim = chalk.gray;
+  const accent = chalk.hex('#b7b9ff'); // magenta tone
+  const log = (msg) => { if (verbose) console.log(msg); };
+  const logBlock = (label, body, max = 600) => {
+    if (!verbose) return;
+    const text = String(body ?? '').trim();
+    if (!text) { console.log(`${accent('[consult]')} ${dim(label + ': (empty)')}`); return; }
+    const truncated = text.length > max ? text.slice(0, max) + dim(`\n... (${text.length - max} more chars)`) : text;
+    console.log(`${accent('[consult]')} ${chalk.white(label)}:\n${dim('  ' + truncated.split('\\n').join('\n  '))}`);
+  };
+
+  // Show what we are about to send to the consultant
+  log(`${accent('[consult]')} ${chalk.white('request')} ${dim('to')} ${chalk.white(cfg.model)}`);
+  logBlock('goal', goal);
+  logBlock('question', question);
+  logBlock('summary', summaryText, 800);
+  if (attempts) logBlock('attempts', attempts);
+  if (hints) logBlock('hints', hints);
+  if (attachments.length > 0) {
+    log(`${accent('[consult]')} ${chalk.white('files')} ${dim(`(${attachments.length}, ${formatBytes(totalBytes)})`)}:`);
+    for (const a of attachments) {
+      log(`  ${a.error ? chalk.red('!') : chalk.green('+')} ${chalk.white(a.path)}${a.error ? dim(`  -- ${a.error}`) : ''}`);
+    }
+  } else {
+    log(`${accent('[consult]')} ${dim('files: none attached \u2014 consultant must rely on its own tools')}`);
+  }
+
   const consultantSpinner = ora(chalk.magenta(`Consultant (${cfg.model.split(':')[0]}) is thinking...`)).start();
   let finalAnswer = '';
   let rounds = 0;
@@ -5908,6 +5938,7 @@ async function consultExpert({ summary, question, goal, attempts, hints, files }
     while (true) {
       if (Date.now() > deadline) {
         consultantSpinner.stop();
+        log(`${chalk.red('[consult]')} timeout hit at ${Math.round((Date.now() - startedAt) / 1000)}s`);
         return `Consultant aborted: hit timeout of ${Math.round(cfg.timeoutMs / 1000)}s before finishing.\n\nPartial answer:\n${finalAnswer || '(none produced yet)'}`;
       }
 
@@ -5923,12 +5954,13 @@ async function consultExpert({ summary, question, goal, attempts, hints, files }
       if (cfg.thinking === 'on') chatOpts.think = true;
       if (useTools && consultantNativeTools.length) chatOpts.tools = consultantNativeTools;
 
+      const roundStart = Date.now();
       let resp;
       try {
         resp = await ollama.chat(chatOpts);
       } catch (err) {
-        const msg = err?.message || String(err);
-        if (/does not support thinking/i.test(msg) && chatOpts.think) {
+        const errMsg = err?.message || String(err);
+        if (/does not support thinking/i.test(errMsg) && chatOpts.think) {
           delete chatOpts.think;
           resp = await ollama.chat(chatOpts);
         } else {
@@ -5938,7 +5970,16 @@ async function consultExpert({ summary, question, goal, attempts, hints, files }
 
       const msg = resp?.message || {};
       const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
-      finalAnswer = msg.content || finalAnswer;
+      const replyContent = msg.content || '';
+      const replyThinking = msg.thinking || '';
+      finalAnswer = replyContent || finalAnswer;
+
+      consultantSpinner.stop();
+      if (replyThinking) logBlock(`round ${rounds} thinking (${Math.round((Date.now() - roundStart) / 1000)}s)`, replyThinking, 400);
+      if (replyContent) logBlock(`round ${rounds} content`, replyContent, 1200);
+      if (toolCalls.length > 0) {
+        log(`${accent('[consult]')} ${chalk.white(`round ${rounds} \u2192 ${toolCalls.length} tool call${toolCalls.length === 1 ? '' : 's'}`)}`);
+      }
 
       if (toolCalls.length === 0 || rounds >= cfg.toolRoundLimit) {
         break;
@@ -5947,37 +5988,60 @@ async function consultExpert({ summary, question, goal, attempts, hints, files }
       // Push assistant message with tool_calls
       consultMessages.push({ role: 'assistant', content: msg.content || '', tool_calls: toolCalls });
       rounds++;
-      consultantSpinner.text = chalk.magenta(`Consultant running tool round ${rounds}/${cfg.toolRoundLimit}...`);
+      consultantSpinner.start(chalk.magenta(`Consultant running tool round ${rounds}/${cfg.toolRoundLimit}...`));
 
       for (const tc of toolCalls) {
         const fn = tc.function || {};
         const args = fn.arguments || {};
         const mapped = normalizeToolName(fn.name || '');
+        const argPreview = (() => {
+          try {
+            const keys = Object.keys(args || {});
+            if (keys.length === 0) return '';
+            return keys.map(k => `${k}=${ellipsis(String(args[k] ?? ''), 60)}`).join(', ');
+          } catch { return ''; }
+        })();
+        consultantSpinner.stop();
+        log(`  ${accent('\u2192')} ${chalk.white(fn.name)}${argPreview ? dim('(' + argPreview + ')') : ''}`);
         if (!allowedSet.has(mapped)) {
+          log(`    ${chalk.red('blocked')} ${dim('not in allowed tools')}`);
           consultMessages.push({ role: 'tool', tool_name: fn.name, content: `Tool ${fn.name} is not allowed for the consultant (read-only restriction).` });
+          consultantSpinner.start(chalk.magenta(`Consultant running tool round ${rounds}/${cfg.toolRoundLimit}...`));
           continue;
         }
         let toolResult;
+        const tStart = Date.now();
         try {
           toolResult = await runConsultantToolCall(fn.name, args);
         } catch (err) {
           toolResult = `Error: ${err.message}`;
         }
+        const tMs = Date.now() - tStart;
+        const resultStr = String(toolResult ?? '');
+        const isErr = /^error/i.test(resultStr.trim());
+        log(`    ${isErr ? chalk.red('err') : chalk.green('ok')} ${dim(`${tMs}ms, ${resultStr.length} chars`)}: ${dim(ellipsis(resultStr.replace(/\s+/g, ' '), 200))}`);
         consultMessages.push({
           role: 'tool',
           tool_name: fn.name,
-          content: truncateToolText(String(toolResult ?? ''), 16000),
+          content: truncateToolText(resultStr, 16000),
         });
+        consultantSpinner.start(chalk.magenta(`Consultant running tool round ${rounds}/${cfg.toolRoundLimit}...`));
       }
     }
   } catch (err) {
     consultantSpinner.stop();
+    log(`${chalk.red('[consult]')} error during consultation: ${err.message}`);
     return `Error during consultation: ${err.message}`;
   }
   consultantSpinner.stop();
 
   const elapsed = Math.round((Date.now() - startedAt) / 1000);
   const answer = (finalAnswer || '').trim() || '(consultant returned no content)';
+
+  // Final summary box
+  log('');
+  log(`${accent('[consult]')} ${chalk.white('final answer')} ${dim(`(${elapsed}s, ${rounds} tool round${rounds === 1 ? '' : 's'})`)}:`);
+  logBlock('answer', answer, 2000);
 
   // Save transcript for audit
   const transcriptBody = [
@@ -8283,13 +8347,18 @@ async function runSapper() {
         }
         if (subcommand === 'transcripts' || subcommand === 'transcript') {
           if (['on', 'true', 'yes'].includes(value.toLowerCase())) { updateConsultant({ saveTranscripts: true }); console.log(chalk.green('Consultant transcripts: on')); continue; }
-          if (['off', 'false', 'no'].includes(value.toLowerCase())) { updateConsultant({ saveTranscripts: false }); console.log(chalk.yellow('Consultant transcripts: off')); continue; }
-          console.log(chalk.yellow('Usage: /consult transcripts on|off'));
+          if (['off', 'false', 'no'].includes(value.toLowerCase())) { updateConsultant({ saveTranscripts: false }); console.log(chalk.yellow('Consultant transcripts: off')); continue; }          console.log(chalk.yellow('Usage: /consult transcripts on|off'));
+          continue;
+        }
+        if (subcommand === 'verbose' || subcommand === 'log' || subcommand === 'logging') {
+          if (['on', 'true', 'yes', '1'].includes(value.toLowerCase())) { updateConsultant({ verbose: true }); console.log(chalk.green('Consultant verbose logging: on')); continue; }
+          if (['off', 'false', 'no', '0'].includes(value.toLowerCase())) { updateConsultant({ verbose: false }); console.log(chalk.yellow('Consultant verbose logging: off')); continue; }
+          console.log(chalk.yellow('Usage: /consult verbose on|off'));
           continue;
         }
 
         console.log(chalk.yellow(`Unknown consult option: ${subcommand}`));
-        console.log(chalk.gray('  Usage: /consult  |  /consult model <name>  |  /consult on|off  |  /consult tools <a,b,c>  |  /consult minwords <N>  |  /consult rounds <N>  |  /consult timeout <secs>  |  /consult thinking <auto|on|off>  |  /consult temp <0..2>  |  /consult transcripts on|off  |  /consult reset'));
+        console.log(chalk.gray('  Usage: /consult  |  /consult model <name>  |  /consult on|off  |  /consult tools <a,b,c>  |  /consult minwords <N>  |  /consult rounds <N>  |  /consult timeout <secs>  |  /consult thinking <auto|on|off>  |  /consult temp <0..2>  |  /consult transcripts on|off  |  /consult verbose on|off  |  /consult reset'));
         continue;
       }
 
