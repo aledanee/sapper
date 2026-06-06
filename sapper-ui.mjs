@@ -3437,7 +3437,23 @@ const server = http.createServer(async (req, res) => {
       const body = await readReqJSON(req);
       try {
         ensureDir(SAPPER_DIR);
-        fs.writeFileSync(CONFIG_FILE, JSON.stringify(body.config || {}, null, 2));
+        // Deep-merge incoming over existing on-disk config so that fields the
+        // Web UI doesn't know about (e.g. deepthink, consultant.verbose) are
+        // preserved instead of being silently wiped by a stale textarea save.
+        const existing = readJSON(CONFIG_FILE, {}) || {};
+        const incoming = body.config || {};
+        const isPlainObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
+        const deepMerge = (base, over) => {
+          if (!isPlainObj(base)) return over;
+          if (!isPlainObj(over)) return over;
+          const out = { ...base };
+          for (const k of Object.keys(over)) {
+            out[k] = isPlainObj(base[k]) && isPlainObj(over[k]) ? deepMerge(base[k], over[k]) : over[k];
+          }
+          return out;
+        };
+        const merged = deepMerge(existing, incoming);
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(merged, null, 2));
         return json(res, { ok: true });
       } catch (e) { return json(res, { error: e.message }, 500); }
     }
