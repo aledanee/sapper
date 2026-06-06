@@ -2752,10 +2752,17 @@ function setEditorMode(path) {
 
 // ─── Config tab ──────────────────────────────────────────────
 window.reloadConfig = function() {
-  fetch('/api/config').then(function(r){return r.json();}).then(function(d){
-    document.getElementById('cfgJson').value = JSON.stringify(d.config || {}, null, 2);
-    renderQuickConfig(d.config || {});
-  }).catch(function(e){ showToast('Config read failed: ' + e.message, 'err'); });
+  // Fetch local Ollama models first so the model dropdowns can populate, then load config.
+  var modelsPromise = fetch('/api/models')
+    .then(function(r){ return r.json(); })
+    .then(function(d){ window._sapperModels = (d && d.models) || []; })
+    .catch(function(){ window._sapperModels = window._sapperModels || []; });
+  modelsPromise.then(function(){
+    fetch('/api/config').then(function(r){return r.json();}).then(function(d){
+      document.getElementById('cfgJson').value = JSON.stringify(d.config || {}, null, 2);
+      renderQuickConfig(d.config || {});
+    }).catch(function(e){ showToast('Config read failed: ' + e.message, 'err'); });
+  });
 };
 window.saveConfig = function() {
   var raw = document.getElementById('cfgJson').value;
@@ -2777,15 +2784,36 @@ function renderQuickConfig(cfg) {
   host.innerHTML = '';
   function add(html) { host.insertAdjacentHTML('beforeend', html); }
   var T = function(tip, below) { return '<span class="tip' + (below ? ' below' : '') + '" data-tip="' + tip.replace(/"/g, '&quot;') + '">!</span>'; };
-  add('<label>Default model ' + T('The AI model used when no model is specified at startup. E.g. gpt-4o, claude-3-5-sonnet, qwen3.5. Leave blank to be prompted on launch.') + '</label><input type="text" id="qDefMod" placeholder="auto" value="' + esc(cfg.defaultModel || '') + '">');
+
+  // Build a <select> populated from local Ollama models, with a free-text fallback
+  // for models that are not (yet) installed locally.
+  function modelSelect(id, currentVal, allowEmpty) {
+    var opts = '';
+    if (allowEmpty) opts += '<option value="">(auto / prompt at launch)</option>';
+    var seen = false;
+    (window._sapperModels || []).forEach(function(m){
+      var sel = (m.name === currentVal) ? ' selected' : '';
+      if (m.name === currentVal) seen = true;
+      opts += '<option value="' + esc(m.name) + '"' + sel + '>' + esc(m.name) + (m.size ? ' \u2014 ' + esc(m.size) : '') + '</option>';
+    });
+    if (currentVal && !seen) opts += '<option value="' + esc(currentVal) + '" selected>' + esc(currentVal) + ' (not installed locally)</option>';
+    return '<select id="' + id + '">' + opts + '</select>';
+  }
+
+  var cConsult = (cfg.consultant && cfg.consultant.model) || '';
+  var cThink = (cfg.deepthink && cfg.deepthink.model) || '';
+
+  add('<label>Default model ' + T('The AI model used when no model is specified at startup. Pick one from your local Ollama models.') + '</label>' + modelSelect('qDefMod', cfg.defaultModel || '', true));
   add('<label>Default agent ' + T('Agent role (.sapper/agents/*.md) to activate automatically when Sapper starts. Leave blank for the default general-purpose assistant.') + '</label><input type="text" id="qDefAgent" placeholder="(none)" value="' + esc(cfg.defaultAgent || '') + '">');
+  add('<label>Consultant model ' + T('Heavyweight model used by the consult_expert tool. Pick something stronger than your main model \u2014 the consultant is supposed to be a deeper reasoner.') + '</label>' + modelSelect('qConsultMod', cConsult, false));
+  add('<label>Deep-think model ' + T('Model used by the deep_think tool for multi-turn back-and-forth reasoning. Pick a strong reasoning model.') + '</label>' + modelSelect('qThinkMod', cThink, false));
   add('<label>Context limit ' + T('Hard cap on tokens sent to the model per request. Leave blank to use the model\\'s full context window. Useful to reduce cost or avoid slow responses.') + '</label><input type="number" id="qCtxLim" value="' + esc(cfg.contextLimit == null ? '' : cfg.contextLimit) + '">');
   add('<label>Tool round limit ' + T('Maximum number of tool calls (file reads, shell commands, patches…) Sapper may make in a single response turn. Default is 40. Lower to prevent runaway loops.') + '</label><input type="number" id="qToolRnd" value="' + esc(cfg.toolRoundLimit != null ? cfg.toolRoundLimit : 40) + '">');
   add('<div class="toggle-row"><span>Summary phases ' + T('When ON, Sapper displays a step-by-step progress bar while it compresses long conversations. Turn OFF for a quieter experience.') + '</span><div class="switch ' + (cfg.summaryPhases ? 'on' : '') + '" id="qSumPh"></div></div>');
   add('<label>Summary trigger % ' + T('When the conversation reaches this percentage of the context window, Sapper automatically summarizes older messages to keep the window from overflowing. Default 65%.') + '</label><input type="number" id="qSumTr" value="' + esc(cfg.summarizeTriggerPercent != null ? cfg.summarizeTriggerPercent : 65) + '">');
   add('<div class="toggle-row"><span>Debug mode ' + T('Enables verbose output — shows raw tool call details, API request sizes, and internal errors. Useful for troubleshooting but noisy during normal use.') + '</span><div class="switch ' + (cfg.debug ? 'on' : '') + '" id="qDebug"></div></div>');
   add('<div class="toggle-row"><span>Auto-attach files ' + T('When ON, files you open in the sidebar are automatically referenced in the AI context so Sapper knows what you are looking at without you typing @filename.') + '</span><div class="switch ' + (cfg.autoAttach !== false ? 'on' : '') + '" id="qAutoAtt"></div></div>');
-  add('<div class="row-btns"><button class="primary" onclick="saveQuickConfig()">Apply quick changes</button></div>');
+  add('<div class="row-btns"><button onclick="refreshModelList()" title="Re-fetch local Ollama models">\u21bb Refresh models</button><button class="primary" onclick="saveQuickConfig()">Apply quick changes</button></div>');
 
   function bindSwitch(id) {
     var el = document.getElementById(id);
@@ -2793,6 +2821,18 @@ function renderQuickConfig(cfg) {
   }
   bindSwitch('qSumPh'); bindSwitch('qDebug'); bindSwitch('qAutoAtt');
 }
+
+window.refreshModelList = function() {
+  fetch('/api/models').then(function(r){return r.json();}).then(function(d){
+    window._sapperModels = (d && d.models) || [];
+    // Re-render with the current config so the dropdowns repopulate
+    try {
+      var cfg = JSON.parse(document.getElementById('cfgJson').value || '{}');
+      renderQuickConfig(cfg);
+      showToast('Loaded ' + window._sapperModels.length + ' local model' + (window._sapperModels.length === 1 ? '' : 's'));
+    } catch (e) {}
+  }).catch(function(e){ showToast('Could not list models: ' + e.message, 'err'); });
+};
 
 window.saveQuickConfig = function() {
   var current;
@@ -2803,6 +2843,10 @@ window.saveQuickConfig = function() {
   var v;
   v = val('qDefMod').trim();  current.defaultModel = v || null;
   v = val('qDefAgent').trim(); current.defaultAgent = v || null;
+  v = val('qConsultMod').trim();
+  if (v) { current.consultant = Object.assign({}, current.consultant || {}, { model: v }); }
+  v = val('qThinkMod').trim();
+  if (v) { current.deepthink = Object.assign({}, current.deepthink || {}, { model: v }); }
   v = val('qCtxLim').trim();   current.contextLimit = v === '' ? null : parseInt(v, 10);
   v = val('qToolRnd').trim();  current.toolRoundLimit = v === '' ? 40 : parseInt(v, 10);
   v = val('qSumTr').trim();    current.summarizeTriggerPercent = v === '' ? 65 : parseInt(v, 10);
@@ -3401,6 +3445,28 @@ const server = http.createServer(async (req, res) => {
     // ── Agents / Skills
     if (req.method === 'GET' && path === '/api/agents') return json(res, { agents: listMdDir(AGENTS_DIR) });
     if (req.method === 'GET' && path === '/api/skills') return json(res, { skills: listMdDir(SKILLS_DIR) });
+
+    // ── Local Ollama models (for model-picker dropdowns in the UI)
+    if (req.method === 'GET' && path === '/api/models') {
+      try {
+        const out = await new Promise((resolve) => {
+          let buf = '';
+          const p = spawn('ollama', ['list']);
+          const t = setTimeout(() => { try { p.kill(); } catch {} resolve(''); }, 4000);
+          p.stdout.on('data', (d) => { buf += d.toString(); });
+          p.on('error', () => { clearTimeout(t); resolve(''); });
+          p.on('close', () => { clearTimeout(t); resolve(buf); });
+        });
+        const models = out.split('\n').slice(1) // drop header
+          .map(line => line.trim()).filter(Boolean)
+          .map(line => {
+            const parts = line.split(/\s+/);
+            return { name: parts[0], size: parts.slice(1, 3).join(' '), modified: parts.slice(3).join(' ') };
+          })
+          .filter(m => m.name && !m.name.startsWith('NAME'));
+        return json(res, { models });
+      } catch (e) { return json(res, { error: e.message, models: [] }, 500); }
+    }
 
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Not found');

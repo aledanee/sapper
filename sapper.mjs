@@ -1164,7 +1164,7 @@ const DEFAULT_CONFIG = Object.freeze({
     // every invocation requires a written summary + a specific question + supporting files.
     // Use it when the agent is stuck or about to make an important / hard-to-reverse change.
     enabled: true,
-    model: 'juilpark/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-heretic:q4_k_m', // Default consultant model — change to any model you have via `ollama list`.
+    model: 'qwen3.5:9b-q8_0', // Default consultant model — change to any model you have via `ollama list`.
     contextLimit: null,            // Tokens to give the consultant (null = use model default).
     temperature: 0.2,              // Lower = more deliberate.
     thinking: 'on',                // 'on' | 'off' | 'auto' — reasoning models should stay on.
@@ -1189,7 +1189,7 @@ const DEFAULT_CONFIG = Object.freeze({
     // main agent can have a real back-and-forth: ask, get a thoughtful answer, ask follow-up,
     // refine, etc. Use when the main agent hits something unexpected or needs deep reasoning.
     enabled: true,
-    model: 'juilpark/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-heretic:q4_k_m', // Pick a strong reasoning model.
+    model: 'qwen3.5:9b-q8_0', // Pick a strong reasoning model.
     contextLimit: null,            // Tokens to give the thinker (null = use model default).
     temperature: 0.7,              // Higher than consultant — reasoning benefits from a little exploration.
     thinking: 'on',                // 'on' | 'off' | 'auto' — should usually stay on for reasoning models.
