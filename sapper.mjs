@@ -656,6 +656,14 @@ const TOOL_NAME_MAP = {
   'ask_expert': 'CONSULT',
   'expert': 'CONSULT',
   'advisor': 'CONSULT',
+  'think': 'DEEPTHINK',
+  'deepthink': 'DEEPTHINK',
+  'deep_think': 'DEEPTHINK',
+  'talk': 'DEEPTHINK',
+  'talk_about': 'DEEPTHINK',
+  'discuss': 'DEEPTHINK',
+  'moe': 'DEEPTHINK',
+  'reason': 'DEEPTHINK',
   'todo': 'LIST',   // alias — list tasks
 };
 
@@ -683,6 +691,7 @@ const TOOL_ALLOWED_BY = {
   OPEN: ['OPEN', 'SHELL'],
   SHELL: ['SHELL'],
   CONSULT: ['CONSULT'],
+  DEEPTHINK: ['DEEPTHINK'],
 };
 
 function normalizeToolName(toolName = '') {
@@ -1174,6 +1183,28 @@ const DEFAULT_CONFIG = Object.freeze({
     verbose: true,                 // Print full request, each tool call/result, and final answer to the terminal during the consultation.
     systemPrompt: '',              // Override the built-in consultant system prompt (empty = use default).
   }),
+  deepthink: Object.freeze({
+    // Multi-turn back-and-forth with a reasoning model — like Claude Opus thinking.
+    // Unlike the consultant (one-shot), this preserves a thought-session across calls so the
+    // main agent can have a real back-and-forth: ask, get a thoughtful answer, ask follow-up,
+    // refine, etc. Use when the main agent hits something unexpected or needs deep reasoning.
+    enabled: true,
+    model: 'juilpark/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-heretic:q4_k_m', // Pick a strong reasoning model.
+    contextLimit: null,            // Tokens to give the thinker (null = use model default).
+    temperature: 0.7,              // Higher than consultant — reasoning benefits from a little exploration.
+    thinking: 'on',                // 'on' | 'off' | 'auto' — should usually stay on for reasoning models.
+    maxTurnsPerSession: 30,        // Max back-and-forth exchanges in one thought session.
+    maxSessions: 5,                // Max concurrent thought sessions kept in memory.
+    sessionIdleTimeoutMs: 1800000, // 30 min — idle sessions are evicted.
+    perTurnTimeoutMs: 180000,      // 3 min hard cap on a single thought turn.
+    maxMessageChars: 16000,        // Reject incoming messages larger than this.
+    tools: ['read', 'read_chunk', 'list', 'search', 'grep', 'find', 'regex', 'head', 'tail', 'cat', 'pwd', 'changes', 'fetch_web', 'recall_memory', 'search_memory_notes', 'read_memory_notes'], // Read-only subset — thinker can verify code itself instead of needing everything inline. Set to [] to make the thinker tool-less (pure reasoning from the message).
+    toolRoundLimit: 6,             // Max tool-call rounds the thinker may run within a single turn before being forced to answer.
+    saveTranscripts: true,         // Persist every thought session to disk for audit.
+    transcriptDir: '.sapper/thinking', // Where thought transcripts are written.
+    verbose: true,                 // Print each thought exchange to the terminal.
+    systemPrompt: '',              // Override the built-in deep-think system prompt (empty = use default).
+  }),
   prompt: Object.freeze({
     prepend: '',
     append: '',
@@ -1193,7 +1224,7 @@ RULES:
 5. NO HALLUCINATIONS: If a file doesn't exist, don't guess its content. List the directory instead.`,
       nativeTools: `TOOLS:
 You have function-calling tools available. Call them directly — do NOT use [TOOL:...] text markers.
-Available tools: list_directory, read_file, search_files, write_file, patch_file, create_directory, ls, cat, head, tail, grep, find, regex_search, read_chunk, pwd, cd, rmdir, changes, fetch_web, recall_memory, save_memory_note, search_memory_notes, read_memory_notes, open_url, run_shell, consult_expert.
+Available tools: list_directory, read_file, search_files, write_file, patch_file, create_directory, ls, cat, head, tail, grep, find, regex_search, read_chunk, pwd, cd, rmdir, changes, fetch_web, recall_memory, save_memory_note, search_memory_notes, read_memory_notes, open_url, run_shell, consult_expert, deep_think.
 
 PATCH TIPS:
 - For patch_file, set old_text to "LINE:<number>" to replace a specific line by number (most reliable).
@@ -1220,6 +1251,12 @@ CONSULTANT (consult_expert):
 - consult_expert calls a separate, more capable model for advice. Use it ONLY when you are stuck after a real attempt OR before making an important / hard-to-reverse change (e.g. large refactor, schema change, security-sensitive code).
 - DO NOT call it casually. Every call requires: goal (what important thing you're doing), question (specific decision you need help with), summary (≥25 words of what you've explored and why you're stuck), and files (paths the consultant should read — use "path:start-end" for line ranges on large files).
 - The consultant is read-only. It will use its own tools to verify facts and will return a RECOMMENDATION / REASONING / RISKS / NEXT STEPS answer that you then act on.
+
+DEEP THINK (deep_think):
+- deep_think opens a multi-turn back-and-forth with a separate reasoning model (think Claude Opus thinking). Use when something is unexpected, the logic is twisted, or you want to think out loud with a smarter model across several turns.
+- The thinker has a small set of READ-ONLY tools (read_file, read_chunk, list_directory, search_files, grep, find, regex_search, head, tail, cat, pwd, changes, fetch_web, recall_memory, search_memory_notes, read_memory_notes — actual set is configurable). It can verify code itself, so you do NOT need to inline everything; mentioning paths and what to look at is enough. Still include relevant errors and constraints in the message.
+- Each call returns a session_id. To continue the SAME thought across multiple exchanges, pass that session_id back. To start fresh, omit session_id or set new_session: true.
+- Sessions are capped at a configured number of turns. Use them as real conversations, not one-shot queries: ask, get reply, then ask follow-up that builds on it.
 
 SHELL TIPS:
 - run_shell may keep long-running commands in a background session depending on config.
@@ -1254,6 +1291,9 @@ SHELL TIPS:
 - [TOOL:OPEN]https://example.com[/TOOL] - Open a URL in the default browser (asks for approval)
 - [TOOL:SHELL]command[/TOOL] - Run shell command
 - [TOOL:CONSULT]goal:::question:::summary (>=25 words):::attempts:::hints:::file1,file2:start-end[/TOOL] - Call the heavyweight consultant model for advice. ONLY when stuck or before an important change. Or pass a JSON blob: [TOOL:CONSULT]{"goal":"...","question":"...","summary":"...","files":["src/x.ts:40-120"]}[/TOOL]
+- [TOOL:THINK]<message>[/TOOL] - Open a multi-turn back-and-forth with a separate reasoning model. New session.
+- [TOOL:THINK]<session_id>:::<follow-up message>[/TOOL] - Continue a previous thought session (use the session_id from the prior reply).
+- [TOOL:THINK]{"message":"...","session_id":"think-abc-1"}[/TOOL] - JSON form for clarity.
 
 PATCH TIPS:
 - PREFER the LINE:number mode when you know which line to change. It is much more reliable than text matching.
@@ -1597,6 +1637,54 @@ function normalizeConsultantConfig(consultantConfig = {}) {
   };
 }
 
+function normalizeDeepthinkConfig(deepthinkConfig = {}) {
+  if (typeof deepthinkConfig === 'boolean') {
+    return { ...DEFAULT_CONFIG.deepthink, enabled: deepthinkConfig };
+  }
+  if (typeof deepthinkConfig === 'string') {
+    return { ...DEFAULT_CONFIG.deepthink, enabled: normalizeBoolean(deepthinkConfig, DEFAULT_CONFIG.deepthink.enabled) };
+  }
+  if (!deepthinkConfig || typeof deepthinkConfig !== 'object' || Array.isArray(deepthinkConfig)) {
+    return { ...DEFAULT_CONFIG.deepthink };
+  }
+  const D = DEFAULT_CONFIG.deepthink;
+  return {
+    enabled: normalizeBoolean(deepthinkConfig.enabled, D.enabled),
+    model: typeof deepthinkConfig.model === 'string' && deepthinkConfig.model.trim()
+      ? deepthinkConfig.model.trim()
+      : D.model,
+    contextLimit: normalizeContextLimit(deepthinkConfig.contextLimit),
+    temperature: (() => {
+      const v = Number(deepthinkConfig.temperature);
+      return Number.isFinite(v) && v >= 0 && v <= 2 ? v : D.temperature;
+    })(),
+    thinking: normalizeThinkingMode(deepthinkConfig.thinking),
+    maxTurnsPerSession: normalizeIntegerInRange(deepthinkConfig.maxTurnsPerSession, D.maxTurnsPerSession, 1, 500),
+    maxSessions: normalizeIntegerInRange(deepthinkConfig.maxSessions, D.maxSessions, 1, 50),
+    sessionIdleTimeoutMs: normalizeIntegerInRange(deepthinkConfig.sessionIdleTimeoutMs, D.sessionIdleTimeoutMs, 60000, 7200000),
+    perTurnTimeoutMs: normalizeIntegerInRange(deepthinkConfig.perTurnTimeoutMs, D.perTurnTimeoutMs, 10000, 1800000),
+    maxMessageChars: normalizeIntegerInRange(deepthinkConfig.maxMessageChars, D.maxMessageChars, 100, 200000),
+    tools: (() => {
+      const raw = deepthinkConfig.tools;
+      if (raw === undefined || raw === null) return [...D.tools];
+      if (Array.isArray(raw)) return raw.map(t => String(t || '').trim()).filter(Boolean);
+      if (typeof raw === 'string') {
+        const trimmed = raw.trim().toLowerCase();
+        if (trimmed === '' || trimmed === 'none' || trimmed === 'off') return [];
+        return raw.split(',').map(t => t.trim()).filter(Boolean);
+      }
+      return [...D.tools];
+    })(),
+    toolRoundLimit: normalizeIntegerInRange(deepthinkConfig.toolRoundLimit, D.toolRoundLimit, 0, 50),
+    saveTranscripts: normalizeBoolean(deepthinkConfig.saveTranscripts, D.saveTranscripts),
+    transcriptDir: typeof deepthinkConfig.transcriptDir === 'string' && deepthinkConfig.transcriptDir.trim()
+      ? deepthinkConfig.transcriptDir.trim()
+      : D.transcriptDir,
+    verbose: normalizeBoolean(deepthinkConfig.verbose, D.verbose),
+    systemPrompt: typeof deepthinkConfig.systemPrompt === 'string' ? deepthinkConfig.systemPrompt : D.systemPrompt,
+  };
+}
+
 function normalizePromptText(value) {
   if (typeof value === 'string') return value;
   if (value === null || value === undefined) return '';
@@ -1643,6 +1731,7 @@ function normalizeConfig(config = {}) {
     chunking: normalizeChunkingConfig(config.chunking),
     voice: normalizeVoiceConfig(config.voice),
     consultant: normalizeConsultantConfig(config.consultant),
+    deepthink: normalizeDeepthinkConfig(config.deepthink),
     prompt: normalizePromptConfig(config.prompt),
   };
 }
@@ -1774,6 +1863,13 @@ function renderConfigFile(config) {
   lines.push('  // Every call must include a summary, question, goal, and attached file paths. Calls are read-only by default.');
   lines.push('  // Tip: pick a stronger reasoning model than your main model — that is the whole point.');
   appendConfigProperty(lines, 'consultant', config.consultant);
+
+  lines.push('');
+  lines.push('  // Deep-think tool — multi-turn back-and-forth with a reasoning model.');
+  lines.push('  // Use when the agent hits something unexpected or needs deep reasoning.');
+  lines.push('  // Each call extends an ongoing thought session (pass session_id) or starts a new one.');
+  lines.push('  // Sessions cap at maxTurnsPerSession exchanges; idle sessions are evicted automatically.');
+  appendConfigProperty(lines, 'deepthink', config.deepthink);
 
   lines.push('');
   lines.push('  // Prompt customization');
@@ -2002,6 +2098,14 @@ function getConsultantConfig() {
 
 function consultantEnabled() {
   return getConsultantConfig().enabled;
+}
+
+function getDeepthinkConfig() {
+  return normalizeDeepthinkConfig(sapperConfig.deepthink);
+}
+
+function deepthinkEnabled() {
+  return getDeepthinkConfig().enabled;
 }
 
 function streamPhaseStatusEnabled() {
@@ -3153,6 +3257,7 @@ const COMMAND_GROUPS = Object.freeze([
       ['/shell read <id>', 'Read output from a tracked shell session'],
       ['/shell stop <id>', 'Stop a tracked shell session'],
       ['/consult', 'Show or configure the heavyweight consultant tool (separate model)'],
+      ['/think', 'Show or configure the deep-think tool (multi-turn reasoning with a separate model)'],
       ['/context', 'Inspect token usage, summary trigger, and model window'],
       ['/ctx <limit>', 'Set context window limit (e.g. /ctx 64k)'],
       ['/debug', 'Toggle regex and tool debug output'],
@@ -6065,6 +6170,292 @@ async function consultExpert({ summary, question, goal, attempts, hints, files }
   return `${header}\n\n${answer}`;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// DEEP-THINK TOOL — multi-turn back-and-forth with a reasoning model
+// Each call extends an ongoing thought session so the main agent can
+// have a real conversation with the thinker (ask, refine, follow up).
+// Session state lives in memory and is evicted on idle timeout or LRU.
+// ─────────────────────────────────────────────────────────────────
+
+const DEFAULT_DEEPTHINK_SYSTEM_PROMPT = `You are a deep-reasoning partner for a junior coding agent. The agent is stuck or facing something unexpected and wants to think out loud with you across multiple turns.
+
+Your job each turn:
+- Respond with substantive reasoning, not pleasantries.
+- Identify what the agent is actually trying to figure out, separate from what they think the problem is.
+- Walk through the relevant logic, edge cases, alternatives, and tradeoffs.
+- End with a concrete next thought, suggestion, or clarifying question — something the agent can act on or push back against.
+- Stay focused. Each turn should build on the previous one. Do not restart the analysis from scratch every turn.
+
+You have a small set of READ-ONLY tools (read_file, read_chunk, list_directory, search_files, grep, find, regex_search, head, tail, cat, pwd, changes, fetch_web, recall_memory, search_memory_notes, read_memory_notes — exact set depends on configuration). Use them sparingly when the agent's message references code you need to verify. Do not over-explore: only read what is necessary to answer the current turn. You cannot write, patch, run shell commands, or modify state.
+
+Be direct. Skip filler like "great question!" or "let me think about this...". Just think.`;
+
+const deepThinkSessions = new Map(); // session_id -> { id, model, messages, turn, startedAt, lastUsedAt }
+let _deepThinkCounter = 0;
+
+function pruneIdleDeepThinkSessions(cfg) {
+  const now = Date.now();
+  for (const [sid, s] of deepThinkSessions) {
+    if (now - s.lastUsedAt > cfg.sessionIdleTimeoutMs) {
+      deepThinkSessions.delete(sid);
+    }
+  }
+}
+
+function evictOldestDeepThinkSession() {
+  let oldestSid = null;
+  let oldestTs = Infinity;
+  for (const [sid, s] of deepThinkSessions) {
+    if (s.lastUsedAt < oldestTs) { oldestTs = s.lastUsedAt; oldestSid = sid; }
+  }
+  if (oldestSid) deepThinkSessions.delete(oldestSid);
+}
+
+function saveDeepThinkTranscript(cfg, session) {
+  if (!cfg.saveTranscripts) return null;
+  try {
+    const dir = isAbsolute(cfg.transcriptDir)
+      ? cfg.transcriptDir
+      : pathResolve(getToolWorkingDirectory(), cfg.transcriptDir);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${session.id}.md`);
+    const lines = [
+      `# Deep-Think Session ${session.id}`,
+      `- model: ${session.model}`,
+      `- started: ${new Date(session.startedAt).toISOString()}`,
+      `- last used: ${new Date(session.lastUsedAt).toISOString()}`,
+      `- turns so far: ${session.turn}`,
+      ``,
+    ];
+    for (const m of session.messages) {
+      if (m.role === 'system') continue;
+      lines.push(`## ${m.role}`);
+      if (m.thinking) lines.push(`> _thinking_\n>\n> ${m.thinking.split('\n').join('\n> ')}\n`);
+      lines.push(m.content || '(empty)');
+      lines.push('');
+    }
+    fs.writeFileSync(file, lines.join('\n'));
+    return file;
+  } catch { return null; }
+}
+
+async function deepThink({ message, session_id, new_session, system_override } = {}) {
+  const cfg = getDeepthinkConfig();
+  if (!cfg.enabled) {
+    return 'Deep-think tool is disabled (deepthink.enabled = false in .sapper/config.json). Enable it before calling deep_think.';
+  }
+
+  const trimmedMessage = String(message ?? '').trim();
+  if (!trimmedMessage) {
+    return 'Error invoking deep_think: \'message\' is required. Pass the question, thought, or context you want to reason about.';
+  }
+  if (trimmedMessage.length > cfg.maxMessageChars) {
+    return `Error invoking deep_think: message is ${trimmedMessage.length} chars (max ${cfg.maxMessageChars}). Trim it or split into multiple turns.`;
+  }
+
+  pruneIdleDeepThinkSessions(cfg);
+
+  let session;
+  const wantsNew = !!new_session;
+  let sid = String(session_id || '').trim();
+  if (sid && !wantsNew && deepThinkSessions.has(sid)) {
+    session = deepThinkSessions.get(sid);
+    if (session.turn >= cfg.maxTurnsPerSession) {
+      return `Deep-think session ${sid} reached max ${cfg.maxTurnsPerSession} turns. Start a new session by calling deep_think with new_session: true and no session_id.`;
+    }
+  } else {
+    if (deepThinkSessions.size >= cfg.maxSessions) {
+      evictOldestDeepThinkSession();
+    }
+    _deepThinkCounter++;
+    sid = `think-${Date.now().toString(36)}-${_deepThinkCounter}`;
+    const systemPrompt = (typeof system_override === 'string' && system_override.trim())
+      ? system_override.trim()
+      : ((cfg.systemPrompt || '').trim() || DEFAULT_DEEPTHINK_SYSTEM_PROMPT);
+    session = {
+      id: sid,
+      model: cfg.model,
+      messages: [{ role: 'system', content: systemPrompt }],
+      turn: 0,
+      startedAt: Date.now(),
+      lastUsedAt: Date.now(),
+    };
+    deepThinkSessions.set(sid, session);
+  }
+
+  session.messages.push({ role: 'user', content: trimmedMessage });
+  session.turn++;
+  session.lastUsedAt = Date.now();
+
+  // Verbose logging
+  const verbose = cfg.verbose !== false;
+  const dim = chalk.gray;
+  const accent = chalk.hex('#b7b9ff');
+  const log = (m) => { if (verbose) console.log(m); };
+  const logBlock = (label, body, max = 600) => {
+    if (!verbose) return;
+    const text = String(body ?? '').trim();
+    if (!text) { console.log(`${accent('[think]')} ${dim(label + ': (empty)')}`); return; }
+    const truncated = text.length > max ? text.slice(0, max) + dim(`\n... (${text.length - max} more chars)`) : text;
+    console.log(`${accent('[think]')} ${chalk.white(label)}:\n${dim('  ' + truncated.split('\n').join('\n  '))}`);
+  };
+
+  console.log();
+  console.log(box(
+    `${keyValue('session', chalk.white(sid), 11)}\n` +
+    `${keyValue('model', chalk.white(session.model), 11)}\n` +
+    `${keyValue('turn', chalk.white(`${session.turn} / ${cfg.maxTurnsPerSession}`), 11)} ${UI.slate('·')} ${UI.slate(`per-turn timeout ${Math.round(cfg.perTurnTimeoutMs / 1000)}s`)}\n` +
+    `${keyValue('tools', chalk.white(cfg.tools && cfg.tools.length ? `${cfg.tools.length} read-only · max ${cfg.toolRoundLimit} rounds` : 'disabled (pure reasoning)'), 11)}`,
+    'Deep Think', 'magenta'
+  ));
+  logBlock(`turn ${session.turn} message`, trimmedMessage, 1200);
+
+  // ── Detect tool capability and build the allowed read-only tool defs ──
+  const allowedSet = new Set((cfg.tools || []).map(normalizeToolName));
+  let useTools = false;
+  let thinkerNativeTools = [];
+  if (allowedSet.size > 0 && cfg.toolRoundLimit > 0) {
+    try {
+      const info = await ollama.show({ model: session.model });
+      useTools = !!(info?.capabilities && info.capabilities.includes('tools'));
+    } catch { useTools = false; }
+    if (useTools) thinkerNativeTools = buildConsultantNativeTools(allowedSet);
+  }
+
+  const start = Date.now();
+  const spinner = ora(chalk.magenta(`Deep-think turn ${session.turn}...`)).start();
+
+  const callOllama = async (messagesForCall, withThink) => {
+    const chatOpts = {
+      model: session.model,
+      messages: messagesForCall,
+      stream: false,
+      options: {
+        temperature: cfg.temperature,
+        ...(cfg.contextLimit ? { num_ctx: cfg.contextLimit } : {}),
+      },
+    };
+    if (withThink && cfg.thinking === 'on') chatOpts.think = true;
+    if (useTools && thinkerNativeTools.length) chatOpts.tools = thinkerNativeTools;
+    return Promise.race([
+      ollama.chat(chatOpts),
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`per-turn timeout ${cfg.perTurnTimeoutMs}ms exceeded`)), cfg.perTurnTimeoutMs)),
+    ]);
+  };
+
+  let resp;
+  let toolRounds = 0;
+  let aggregatedThinking = '';
+  try {
+    while (true) {
+      try {
+        resp = await callOllama(session.messages, true);
+      } catch (err) {
+        const msg = err?.message || String(err);
+        if (/does not support thinking/i.test(msg)) {
+          resp = await callOllama(session.messages, false);
+        } else {
+          throw err;
+        }
+      }
+
+      const reply = resp?.message || {};
+      const toolCalls = Array.isArray(reply.tool_calls) ? reply.tool_calls : [];
+      if (reply.thinking) aggregatedThinking += (aggregatedThinking ? '\n\n' : '') + reply.thinking;
+
+      if (toolCalls.length === 0 || toolRounds >= cfg.toolRoundLimit || !useTools) {
+        break;
+      }
+
+      // Push the assistant turn that requested tools, then run each tool and feed results back
+      session.messages.push({ role: 'assistant', content: reply.content || '', tool_calls: toolCalls });
+      toolRounds++;
+      spinner.text = chalk.magenta(`Deep-think turn ${session.turn} · tool round ${toolRounds}/${cfg.toolRoundLimit}...`);
+
+      for (const tc of toolCalls) {
+        const fn = tc.function || {};
+        const args = fn.arguments || {};
+        const mapped = normalizeToolName(fn.name || '');
+        const argPreview = (() => {
+          try {
+            const keys = Object.keys(args || {});
+            if (keys.length === 0) return '';
+            return keys.map(k => `${k}=${ellipsis(String(args[k] ?? ''), 50)}`).join(', ');
+          } catch { return ''; }
+        })();
+        spinner.stop();
+        log(`  ${accent('→')} ${chalk.white(fn.name)}${argPreview ? dim('(' + argPreview + ')') : ''}`);
+        if (!allowedSet.has(mapped)) {
+          log(`    ${chalk.red('blocked')} ${dim('not in allowed tools')}`);
+          session.messages.push({ role: 'tool', tool_name: fn.name, content: `Tool ${fn.name} is not allowed for the deep-think reasoner.` });
+          spinner.start(chalk.magenta(`Deep-think turn ${session.turn} · tool round ${toolRounds}/${cfg.toolRoundLimit}...`));
+          continue;
+        }
+        let toolResult;
+        const tStart = Date.now();
+        try {
+          toolResult = await runConsultantToolCall(fn.name, args);
+        } catch (err) {
+          toolResult = `Error: ${err.message}`;
+        }
+        const tMs = Date.now() - tStart;
+        const resultStr = String(toolResult ?? '');
+        const isErr = /^error/i.test(resultStr.trim());
+        log(`    ${isErr ? chalk.red('err') : chalk.green('ok')} ${dim(`${tMs}ms, ${resultStr.length} chars`)}: ${dim(ellipsis(resultStr.replace(/\s+/g, ' '), 200))}`);
+        session.messages.push({
+          role: 'tool',
+          tool_name: fn.name,
+          content: truncateToolText(resultStr, 12000),
+        });
+        spinner.start(chalk.magenta(`Deep-think turn ${session.turn} · tool round ${toolRounds}/${cfg.toolRoundLimit}...`));
+      }
+    }
+  } catch (err) {
+    spinner.stop();
+    const msg = err?.message || String(err);
+    // Roll back the user message and any half-pushed assistant/tool entries so the session stays usable
+    while (session.messages.length > 0 && session.messages[session.messages.length - 1].role !== 'user') {
+      session.messages.pop();
+    }
+    if (session.messages.length > 0 && session.messages[session.messages.length - 1].role === 'user') {
+      session.messages.pop();
+    }
+    session.turn--;
+    log(`${chalk.red('[think]')} error: ${msg}`);
+    return `Deep-think error on session ${sid}: ${msg}`;
+  }
+  spinner.stop();
+
+  const replyMessage = resp?.message || {};
+  const content = replyMessage.content || '';
+  const thinking = aggregatedThinking || replyMessage.thinking || '';
+  const elapsed = Math.round((Date.now() - start) / 1000);
+
+  session.messages.push({
+    role: 'assistant',
+    content,
+    ...(thinking ? { thinking } : {}),
+  });
+  session.lastUsedAt = Date.now();
+
+  if (thinking) logBlock(`turn ${session.turn} reasoning (${elapsed}s)`, thinking, 800);
+  if (toolRounds > 0) log(`${accent('[think]')} ${dim(`turn ${session.turn} ran ${toolRounds} tool round${toolRounds === 1 ? '' : 's'}`)}`);
+  logBlock(`turn ${session.turn} reply`, content, 1500);
+
+  const transcriptPath = saveDeepThinkTranscript(cfg, session);
+  const remaining = cfg.maxTurnsPerSession - session.turn;
+  const transcriptNote = transcriptPath
+    ? ` · transcript: ${relative(getToolWorkingDirectory(), transcriptPath) || transcriptPath}`
+    : '';
+
+  const header = `Deep-think session ${sid} · turn ${session.turn}/${cfg.maxTurnsPerSession} · ${elapsed}s${transcriptNote}`;
+  const continuation = remaining > 0
+    ? `\n\nTo continue this thought, call deep_think again with session_id="${sid}" and a follow-up message. ${remaining} turn${remaining === 1 ? '' : 's'} remaining.`
+    : `\n\nThis was the final turn for this session. Start a fresh thought with new_session: true if you need to keep reasoning.`;
+
+  return `${header}\n\n${content || '(no content returned)'}${continuation}`;
+}
+
 const tools = {
   read: (path) => {
     const trimmedPath = typeof path === 'string' ? path.trim() : '';
@@ -6616,7 +7007,8 @@ const tools = {
       });
     });
   },
-  consult: async (args) => consultExpert(args || {})
+  consult: async (args) => consultExpert(args || {}),
+  deepthink: async (args) => deepThink(args || {})
 };
 
 async function checkForUpdates() {
@@ -7226,6 +7618,22 @@ async function runSapper() {
             files: { type: 'array', items: { type: 'string' }, description: 'File paths to attach. Use "path:start-end" to attach a line range only (recommended for large files). Examples: ["src/router.ts", "src/handlers/auth.ts:40-120"].' }
           },
           required: ['goal', 'question', 'summary']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'deep_think',
+        description: 'Have a multi-turn back-and-forth with a separate reasoning model . Use when you hit something unexpected, need deep reasoning, or want to think out loud with a smarter model. Each call extends an ongoing thought session if you pass session_id; otherwise a new session starts. Sessions cap at a configured max turns. The thinker has NO tools \u2014 it reasons from the message you give it. Include relevant code/context inline. Returns the thinker\\u2019s reply plus the session_id to use for the next turn.',
+        parameters: {
+          type: 'object',
+          properties: {
+            message: { type: 'string', description: 'The question, thought, or context to reason about. The thinker has read-only tools, so referencing paths and what to inspect is enough — include errors, constraints, or short code snippets when they matter.' },
+            session_id: { type: 'string', description: 'Optional. Pass the session_id from a previous deep_think reply to continue the same conversation. Omit to start a new session.' },
+            new_session: { type: 'boolean', description: 'Optional. Set true to force a new thought session even if session_id is provided.' }
+          },
+          required: ['message']
         }
       }
     }
@@ -8359,6 +8767,169 @@ async function runSapper() {
 
         console.log(chalk.yellow(`Unknown consult option: ${subcommand}`));
         console.log(chalk.gray('  Usage: /consult  |  /consult model <name>  |  /consult on|off  |  /consult tools <a,b,c>  |  /consult minwords <N>  |  /consult rounds <N>  |  /consult timeout <secs>  |  /consult thinking <auto|on|off>  |  /consult temp <0..2>  |  /consult transcripts on|off  |  /consult verbose on|off  |  /consult reset'));
+        continue;
+      }
+
+      if (input.toLowerCase() === '/think' || input.toLowerCase().startsWith('/think ')) {
+        const arg = input.substring(6).trim();
+        const cfg = getDeepthinkConfig();
+        const updateThink = (patch) => {
+          sapperConfig.deepthink = { ...getDeepthinkConfig(), ...patch };
+          saveConfig(sapperConfig);
+        };
+
+        if (!arg || ['status', 'show'].includes(arg.toLowerCase())) {
+          const liveSessions = Array.from(deepThinkSessions.values()).sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+          const lines = [
+            `enabled       ${chalk.white(cfg.enabled ? 'on' : 'off')}`,
+            `model         ${chalk.white(cfg.model)}`,
+            `loop          ${UI.slate(`max ${cfg.maxTurnsPerSession} turns/session \u00b7 max ${cfg.maxSessions} sessions \u00b7 idle ${Math.round(cfg.sessionIdleTimeoutMs/60000)}m \u00b7 per-turn ${Math.round(cfg.perTurnTimeoutMs/1000)}s`)}`,
+            `reasoning     ${UI.slate(`thinking ${cfg.thinking} \u00b7 temp ${cfg.temperature} \u00b7 max msg ${cfg.maxMessageChars} chars`)}`,
+            `tools         ${chalk.white(cfg.tools && cfg.tools.length ? `${cfg.tools.length} read-only` : 'disabled')} ${UI.slate('\u00b7')} ${UI.slate(`max ${cfg.toolRoundLimit} rounds/turn`)}`,
+            `              ${UI.slate((cfg.tools || []).join(', ') || '(no tools \u2014 pure reasoning from the message)')}`,
+            `transcripts   ${chalk.white(cfg.saveTranscripts ? 'on' : 'off')} ${UI.slate('\u2192')} ${UI.slate(cfg.transcriptDir)}`,
+            `verbose       ${chalk.white(cfg.verbose ? 'on' : 'off')}`,
+            `live sessions ${chalk.white(`${liveSessions.length}`)}`,
+          ];
+          for (const s of liveSessions.slice(0, 5)) {
+            const ageMin = Math.round((Date.now() - s.lastUsedAt) / 60000);
+            lines.push(`  ${chalk.white(s.id)} ${UI.slate('\u00b7')} ${UI.slate(`turn ${s.turn}/${cfg.maxTurnsPerSession}`)} ${UI.slate('\u00b7')} ${UI.slate(`idle ${ageMin}m`)}`);
+          }
+          lines.push('');
+          lines.push(UI.slate('Usage: /think model <name> | /think on|off | /think turns <N> | /think sessions <N>'));
+          lines.push(UI.slate('       /think idle <minutes> | /think timeout <secs> | /think thinking <auto|on|off>'));
+          lines.push(UI.slate('       /think temp <0..2> | /think maxmsg <chars> | /think tools <a,b,c | none>'));
+          lines.push(UI.slate('       /think toolrounds <N> | /think transcripts <on|off> | /think verbose <on|off>'));
+          lines.push(UI.slate('       /think list | /think clear [<id>] | /think reset'));
+          console.log();
+          console.log(box(lines.join('\n'), 'Deep Think', 'magenta'));
+          continue;
+        }
+
+        const [subcommandRaw, ...rest] = arg.split(/\s+/);
+        const subcommand = subcommandRaw.toLowerCase();
+        const value = rest.join(' ').trim();
+
+        if (subcommand === 'reset' || subcommand === 'default') {
+          sapperConfig.deepthink = { ...DEFAULT_CONFIG.deepthink };
+          saveConfig(sapperConfig);
+          console.log(chalk.green('Deep-think settings reset to defaults.'));
+          continue;
+        }
+        if (['on', 'true', 'yes', 'enable', 'enabled'].includes(subcommand)) { updateThink({ enabled: true }); console.log(chalk.green('Deep-think enabled.')); continue; }
+        if (['off', 'false', 'no', 'disable', 'disabled'].includes(subcommand)) { updateThink({ enabled: false }); console.log(chalk.yellow('Deep-think disabled.')); continue; }
+        if (subcommand === 'model') {
+          if (!value) { console.log(chalk.yellow('Usage: /think model <name>')); continue; }
+          updateThink({ model: value });
+          console.log(chalk.green(`Deep-think model set to ${value}.`));
+          continue;
+        }
+        if (subcommand === 'turns' || subcommand === 'maxturns') {
+          const n = parseInt(value, 10);
+          if (!Number.isFinite(n)) { console.log(chalk.yellow('Usage: /think turns <N>')); continue; }
+          updateThink({ maxTurnsPerSession: n });
+          console.log(chalk.green(`Deep-think max turns per session: ${getDeepthinkConfig().maxTurnsPerSession}`));
+          continue;
+        }
+        if (subcommand === 'sessions' || subcommand === 'maxsessions') {
+          const n = parseInt(value, 10);
+          if (!Number.isFinite(n)) { console.log(chalk.yellow('Usage: /think sessions <N>')); continue; }
+          updateThink({ maxSessions: n });
+          console.log(chalk.green(`Deep-think max concurrent sessions: ${getDeepthinkConfig().maxSessions}`));
+          continue;
+        }
+        if (subcommand === 'idle') {
+          const n = parseInt(value, 10);
+          if (!Number.isFinite(n)) { console.log(chalk.yellow('Usage: /think idle <minutes>')); continue; }
+          updateThink({ sessionIdleTimeoutMs: n * 60000 });
+          console.log(chalk.green(`Deep-think idle timeout: ${n}m`));
+          continue;
+        }
+        if (subcommand === 'timeout') {
+          const n = parseInt(value, 10);
+          if (!Number.isFinite(n)) { console.log(chalk.yellow('Usage: /think timeout <seconds>')); continue; }
+          updateThink({ perTurnTimeoutMs: n * 1000 });
+          console.log(chalk.green(`Deep-think per-turn timeout: ${n}s`));
+          continue;
+        }
+        if (subcommand === 'thinking') {
+          updateThink({ thinking: value });
+          console.log(chalk.green(`Deep-think reasoning mode: ${getDeepthinkConfig().thinking}`));
+          continue;
+        }
+        if (subcommand === 'temp' || subcommand === 'temperature') {
+          const n = Number(value);
+          if (!Number.isFinite(n)) { console.log(chalk.yellow('Usage: /think temp <0..2>')); continue; }
+          updateThink({ temperature: n });
+          console.log(chalk.green(`Deep-think temperature: ${getDeepthinkConfig().temperature}`));
+          continue;
+        }
+        if (subcommand === 'maxmsg' || subcommand === 'msgmax') {
+          const n = parseInt(value, 10);
+          if (!Number.isFinite(n)) { console.log(chalk.yellow('Usage: /think maxmsg <chars>')); continue; }
+          updateThink({ maxMessageChars: n });
+          console.log(chalk.green(`Deep-think max message chars: ${getDeepthinkConfig().maxMessageChars}`));
+          continue;
+        }
+        if (subcommand === 'tools') {
+          if (!value || ['none', 'off', 'disable', 'disabled', '[]'].includes(value.toLowerCase())) {
+            updateThink({ tools: [] });
+            console.log(chalk.yellow('Deep-think tools: disabled (thinker now reasons only from the message)'));
+            continue;
+          }
+          if (['default', 'reset'].includes(value.toLowerCase())) {
+            updateThink({ tools: [...DEFAULT_CONFIG.deepthink.tools] });
+            console.log(chalk.green(`Deep-think tools reset to defaults: ${getDeepthinkConfig().tools.join(', ')}`));
+            continue;
+          }
+          const list = value.split(/[,\s]+/).map(t => t.trim()).filter(Boolean);
+          if (!list.length) { console.log(chalk.yellow('Usage: /think tools read,list,grep,...  |  /think tools none  |  /think tools default')); continue; }
+          updateThink({ tools: list });
+          console.log(chalk.green(`Deep-think tools: ${getDeepthinkConfig().tools.join(', ')}`));
+          continue;
+        }
+        if (subcommand === 'toolrounds' || subcommand === 'rounds') {
+          const n = parseInt(value, 10);
+          if (!Number.isFinite(n)) { console.log(chalk.yellow('Usage: /think toolrounds <N>  (0 disables tool calls for the thinker)')); continue; }
+          updateThink({ toolRoundLimit: n });
+          console.log(chalk.green(`Deep-think tool-round limit: ${getDeepthinkConfig().toolRoundLimit}`));
+          continue;
+        }
+        if (subcommand === 'transcripts' || subcommand === 'transcript') {
+          if (['on', 'true', 'yes'].includes(value.toLowerCase())) { updateThink({ saveTranscripts: true }); console.log(chalk.green('Deep-think transcripts: on')); continue; }
+          if (['off', 'false', 'no'].includes(value.toLowerCase())) { updateThink({ saveTranscripts: false }); console.log(chalk.yellow('Deep-think transcripts: off')); continue; }
+          console.log(chalk.yellow('Usage: /think transcripts on|off'));
+          continue;
+        }
+        if (subcommand === 'verbose' || subcommand === 'log' || subcommand === 'logging') {
+          if (['on', 'true', 'yes', '1'].includes(value.toLowerCase())) { updateThink({ verbose: true }); console.log(chalk.green('Deep-think verbose logging: on')); continue; }
+          if (['off', 'false', 'no', '0'].includes(value.toLowerCase())) { updateThink({ verbose: false }); console.log(chalk.yellow('Deep-think verbose logging: off')); continue; }
+          console.log(chalk.yellow('Usage: /think verbose on|off'));
+          continue;
+        }
+        if (subcommand === 'list' || subcommand === 'sess' || subcommand === 'ls') {
+          if (deepThinkSessions.size === 0) { console.log(UI.slate('No active deep-think sessions.')); continue; }
+          for (const s of deepThinkSessions.values()) {
+            const ageMin = Math.round((Date.now() - s.lastUsedAt) / 60000);
+            console.log(`  ${chalk.white(s.id)} ${UI.slate('\u00b7')} ${UI.slate(`turn ${s.turn}/${cfg.maxTurnsPerSession}`)} ${UI.slate('\u00b7')} ${UI.slate(`idle ${ageMin}m`)}`);
+          }
+          continue;
+        }
+        if (subcommand === 'clear' || subcommand === 'drop' || subcommand === 'end') {
+          if (!value) {
+            const n = deepThinkSessions.size;
+            deepThinkSessions.clear();
+            console.log(chalk.green(`Cleared ${n} deep-think session${n === 1 ? '' : 's'}.`));
+          } else if (deepThinkSessions.delete(value)) {
+            console.log(chalk.green(`Cleared session ${value}.`));
+          } else {
+            console.log(chalk.yellow(`No session named ${value}.`));
+          }
+          continue;
+        }
+
+        console.log(chalk.yellow(`Unknown think option: ${subcommand}`));
+        console.log(chalk.gray('  Usage: /think  |  /think model <name>  |  /think on|off  |  /think turns <N>  |  /think sessions <N>  |  /think idle <m>  |  /think timeout <s>  |  /think thinking <auto|on|off>  |  /think temp <0..2>  |  /think maxmsg <chars>  |  /think tools <a,b,c | none | default>  |  /think toolrounds <N>  |  /think transcripts on|off  |  /think verbose on|off  |  /think list  |  /think clear [<id>]  |  /think reset'));
         continue;
       }
 
@@ -9698,7 +10269,7 @@ async function runSapper() {
             ls: 'LS', cat: 'CAT', head: 'HEAD', tail: 'TAIL', grep: 'GREP', find: 'FIND',
             pwd: 'PWD', cd: 'CD', rmdir: 'RMDIR', changes: 'CHANGES',
             fetch_web: 'FETCH', recall_memory: 'MEMORY', open_url: 'OPEN', run_shell: 'SHELL',
-            consult_expert: 'CONSULT'
+            consult_expert: 'CONSULT', deep_think: 'DEEPTHINK'
           };
 
           showStreamPhase(`Running ${nativeToolCalls.length} native tool call${nativeToolCalls.length === 1 ? '' : 's'}...`);
@@ -9829,6 +10400,10 @@ async function runSapper() {
                 case 'consult_expert':
                   result = await tools.consult(args);
                   logEntry('tool', { toolType: 'CONSULT', path: (args && args.question ? String(args.question).slice(0, 80) : 'consult'), duration: Date.now() - toolStart, success: !String(result).startsWith('Error'), resultSize: result?.length });
+                  break;
+                case 'deep_think':
+                  result = await tools.deepthink(args);
+                  logEntry('tool', { toolType: 'DEEPTHINK', path: (args && args.message ? String(args.message).slice(0, 80) : 'deepthink'), duration: Date.now() - toolStart, success: !String(result).startsWith('Error'), resultSize: result?.length });
                   break;
                 default:
                   result = `Unknown tool: ${fn.name}`;
@@ -10119,9 +10694,37 @@ async function runSapper() {
               result = await tools.consult(consultArgs);
               logEntry('tool', { toolType: 'CONSULT', path: (consultArgs.question || 'consult').slice(0, 80), duration: Date.now() - toolStart, success: !String(result).startsWith('Error'), resultSize: result?.length });
             }
+            else if (type.toLowerCase() === 'deepthink' || type.toLowerCase() === 'think' || type.toLowerCase() === 'talk' || type.toLowerCase() === 'moe') {
+              // Text-marker forms:
+              //   [TOOL:THINK]<message>[/TOOL]                  -> new session
+              //   [TOOL:THINK]session_id:::<message>[/TOOL]     -> continue session
+              //   [TOOL:THINK]{"message":"...","session_id":"..."}[/TOOL]
+              let thinkArgs = null;
+              const raw = (content && content.trim()) ? `${path}:::${content}` : String(path || '');
+              const trimmedRaw = raw.trim();
+              if (trimmedRaw.startsWith('{')) {
+                try { thinkArgs = JSON.parse(trimmedRaw); } catch { thinkArgs = null; }
+              }
+              if (!thinkArgs) {
+                const sepIdx = trimmedRaw.indexOf(':::');
+                if (sepIdx > -1) {
+                  const maybeSid = trimmedRaw.slice(0, sepIdx).trim();
+                  // Treat the first segment as a session_id only if it looks like one
+                  if (/^think-[a-z0-9-]+$/i.test(maybeSid)) {
+                    thinkArgs = { session_id: maybeSid, message: trimmedRaw.slice(sepIdx + 3).trim() };
+                  } else {
+                    thinkArgs = { message: trimmedRaw };
+                  }
+                } else {
+                  thinkArgs = { message: trimmedRaw };
+                }
+              }
+              result = await tools.deepthink(thinkArgs);
+              logEntry('tool', { toolType: 'DEEPTHINK', path: ((thinkArgs && thinkArgs.message) || 'deepthink').slice(0, 80), duration: Date.now() - toolStart, success: !String(result).startsWith('Error'), resultSize: result?.length });
+            }
 
             // Log tool execution (for non-shell, non-file specific ones)
-            if (!['list', 'ls', 'read', 'cat', 'head', 'tail', 'mkdir', 'rmdir', 'pwd', 'cd', 'write', 'patch', 'search', 'grep', 'find', 'regex', 'chunk', 'read_chunk', 'changes', 'fetch', 'memory', 'memory_note_save', 'memory_note_search', 'memory_note_read', 'open', 'shell', 'consult'].includes(type.toLowerCase())) {
+            if (!['list', 'ls', 'read', 'cat', 'head', 'tail', 'mkdir', 'rmdir', 'pwd', 'cd', 'write', 'patch', 'search', 'grep', 'find', 'regex', 'chunk', 'read_chunk', 'changes', 'fetch', 'memory', 'memory_note_save', 'memory_note_search', 'memory_note_read', 'open', 'shell', 'consult', 'deepthink', 'think', 'talk', 'moe'].includes(type.toLowerCase())) {
               logEntry('tool', { toolType: type.toUpperCase(), path, duration: Date.now() - toolStart, success: toolSuccess, resultSize: result?.length, error: toolSuccess ? undefined : result });
             }
 
