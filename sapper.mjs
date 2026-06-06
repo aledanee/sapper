@@ -7,7 +7,7 @@ import chalk from 'chalk';
 import ora from 'ora';
 import readline from 'readline';
 import { fileURLToPath } from 'url';
-import { dirname, join, isAbsolute, resolve as pathResolve, extname } from 'path';
+import { dirname, join, isAbsolute, resolve as pathResolve, relative, extname } from 'path';
 import { marked } from 'marked';
 import { markedTerminal } from 'marked-terminal';
 import { highlight as highlightCode } from 'cli-highlight';
@@ -650,6 +650,12 @@ const TOOL_NAME_MAP = {
   'open': 'OPEN',
   'browser': 'OPEN',
   'open_url': 'OPEN',
+  'consult': 'CONSULT',
+  'consultant': 'CONSULT',
+  'consult_expert': 'CONSULT',
+  'ask_expert': 'CONSULT',
+  'expert': 'CONSULT',
+  'advisor': 'CONSULT',
   'todo': 'LIST',   // alias — list tasks
 };
 
@@ -676,6 +682,7 @@ const TOOL_ALLOWED_BY = {
   MEMORY: ['MEMORY'],
   OPEN: ['OPEN', 'SHELL'],
   SHELL: ['SHELL'],
+  CONSULT: ['CONSULT'],
 };
 
 function normalizeToolName(toolName = '') {
@@ -1143,6 +1150,29 @@ const DEFAULT_CONFIG = Object.freeze({
     archive: true,                                                      // Save every recording (audio + transcript) to disk
     archiveDir: '.sapper/voice',                                        // Folder for archive (relative to cwd or absolute). A YYYY-MM-DD subfolder is auto-created.
   }),
+  consultant: Object.freeze({
+    // Heavyweight second-model advisor. The main agent must NOT call it casually:
+    // every invocation requires a written summary + a specific question + supporting files.
+    // Use it when the agent is stuck or about to make an important / hard-to-reverse change.
+    enabled: true,
+    model: 'juilpark/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-heretic:q4_k_m', // Default consultant model — change to any model you have via `ollama list`.
+    contextLimit: null,            // Tokens to give the consultant (null = use model default).
+    temperature: 0.2,              // Lower = more deliberate.
+    thinking: 'on',                // 'on' | 'off' | 'auto' — reasoning models should stay on.
+    requireSummary: true,          // Reject calls without a real summary.
+    requireQuestion: true,         // Reject calls without a concrete question.
+    requireGoal: true,             // Reject calls without a goal (what important thing is happening).
+    minSummaryWords: 25,           // Gate against drive-by calls.
+    maxFiles: 20,                  // Max file attachments per consultation.
+    maxFileBytes: 200000,          // Per-file byte cap before truncation.
+    totalBytesLimit: 800000,       // Total bytes across all attached files.
+    toolRoundLimit: 12,            // How many tool rounds the consultant may run on its own.
+    timeoutMs: 600000,             // Hard wall-clock cap on a single consultation (10 min).
+    tools: ['read', 'read_chunk', 'list', 'search', 'grep', 'find', 'regex', 'head', 'tail', 'cat', 'pwd', 'changes', 'fetch_web', 'recall_memory', 'search_memory_notes', 'read_memory_notes'], // Read-only subset by default — no write / patch / shell / open / mkdir / rmdir.
+    saveTranscripts: true,         // Persist every consultation to disk for audit.
+    transcriptDir: '.sapper/consultations', // Where transcripts are written.
+    systemPrompt: '',              // Override the built-in consultant system prompt (empty = use default).
+  }),
   prompt: Object.freeze({
     prepend: '',
     append: '',
@@ -1162,7 +1192,7 @@ RULES:
 5. NO HALLUCINATIONS: If a file doesn't exist, don't guess its content. List the directory instead.`,
       nativeTools: `TOOLS:
 You have function-calling tools available. Call them directly — do NOT use [TOOL:...] text markers.
-Available tools: list_directory, read_file, search_files, write_file, patch_file, create_directory, ls, cat, head, tail, grep, find, regex_search, read_chunk, pwd, cd, rmdir, changes, fetch_web, recall_memory, save_memory_note, search_memory_notes, read_memory_notes, open_url, run_shell.
+Available tools: list_directory, read_file, search_files, write_file, patch_file, create_directory, ls, cat, head, tail, grep, find, regex_search, read_chunk, pwd, cd, rmdir, changes, fetch_web, recall_memory, save_memory_note, search_memory_notes, read_memory_notes, open_url, run_shell, consult_expert.
 
 PATCH TIPS:
 - For patch_file, set old_text to "LINE:<number>" to replace a specific line by number (most reliable).
@@ -1184,6 +1214,11 @@ EXTRA TOOL TIPS:
 - search_memory_notes searches markdown long-memory notes in .sapper/long-memory.md.
 - read_memory_notes reads the full markdown long-memory file.
 - open_url opens a URL in the default browser and always asks for approval.
+
+CONSULTANT (consult_expert):
+- consult_expert calls a separate, more capable model for advice. Use it ONLY when you are stuck after a real attempt OR before making an important / hard-to-reverse change (e.g. large refactor, schema change, security-sensitive code).
+- DO NOT call it casually. Every call requires: goal (what important thing you're doing), question (specific decision you need help with), summary (≥25 words of what you've explored and why you're stuck), and files (paths the consultant should read — use "path:start-end" for line ranges on large files).
+- The consultant is read-only. It will use its own tools to verify facts and will return a RECOMMENDATION / REASONING / RISKS / NEXT STEPS answer that you then act on.
 
 SHELL TIPS:
 - run_shell may keep long-running commands in a background session depending on config.
@@ -1217,6 +1252,7 @@ SHELL TIPS:
 - [TOOL:MEMORY_NOTE_READ][/TOOL] - Read markdown long memory file
 - [TOOL:OPEN]https://example.com[/TOOL] - Open a URL in the default browser (asks for approval)
 - [TOOL:SHELL]command[/TOOL] - Run shell command
+- [TOOL:CONSULT]goal:::question:::summary (>=25 words):::attempts:::hints:::file1,file2:start-end[/TOOL] - Call the heavyweight consultant model for advice. ONLY when stuck or before an important change. Or pass a JSON blob: [TOOL:CONSULT]{"goal":"...","question":"...","summary":"...","files":["src/x.ts:40-120"]}[/TOOL]
 
 PATCH TIPS:
 - PREFER the LINE:number mode when you know which line to change. It is much more reliable than text matching.
@@ -1514,6 +1550,51 @@ function normalizeVoiceConfig(voiceConfig = {}) {
   };
 }
 
+function normalizeConsultantConfig(consultantConfig = {}) {
+  if (typeof consultantConfig === 'boolean') {
+    return { ...DEFAULT_CONFIG.consultant, enabled: consultantConfig };
+  }
+  if (typeof consultantConfig === 'string') {
+    return { ...DEFAULT_CONFIG.consultant, enabled: normalizeBoolean(consultantConfig, DEFAULT_CONFIG.consultant.enabled) };
+  }
+  if (!consultantConfig || typeof consultantConfig !== 'object' || Array.isArray(consultantConfig)) {
+    return { ...DEFAULT_CONFIG.consultant };
+  }
+  const D = DEFAULT_CONFIG.consultant;
+  const toolsList = Array.isArray(consultantConfig.tools)
+    ? consultantConfig.tools.map(t => String(t || '').trim()).filter(Boolean)
+    : (typeof consultantConfig.tools === 'string'
+      ? consultantConfig.tools.split(',').map(t => t.trim()).filter(Boolean)
+      : [...D.tools]);
+  return {
+    enabled: normalizeBoolean(consultantConfig.enabled, D.enabled),
+    model: typeof consultantConfig.model === 'string' && consultantConfig.model.trim()
+      ? consultantConfig.model.trim()
+      : D.model,
+    contextLimit: normalizeContextLimit(consultantConfig.contextLimit),
+    temperature: (() => {
+      const v = Number(consultantConfig.temperature);
+      return Number.isFinite(v) && v >= 0 && v <= 2 ? v : D.temperature;
+    })(),
+    thinking: normalizeThinkingMode(consultantConfig.thinking),
+    requireSummary: normalizeBoolean(consultantConfig.requireSummary, D.requireSummary),
+    requireQuestion: normalizeBoolean(consultantConfig.requireQuestion, D.requireQuestion),
+    requireGoal: normalizeBoolean(consultantConfig.requireGoal, D.requireGoal),
+    minSummaryWords: normalizeIntegerInRange(consultantConfig.minSummaryWords, D.minSummaryWords, 0, 500),
+    maxFiles: normalizeIntegerInRange(consultantConfig.maxFiles, D.maxFiles, 0, 200),
+    maxFileBytes: normalizeIntegerInRange(consultantConfig.maxFileBytes, D.maxFileBytes, 1024, 10000000),
+    totalBytesLimit: normalizeIntegerInRange(consultantConfig.totalBytesLimit, D.totalBytesLimit, 1024, 50000000),
+    toolRoundLimit: normalizeIntegerInRange(consultantConfig.toolRoundLimit, D.toolRoundLimit, 0, 200),
+    timeoutMs: normalizeIntegerInRange(consultantConfig.timeoutMs, D.timeoutMs, 10000, 3600000),
+    tools: toolsList.length ? toolsList : [...D.tools],
+    saveTranscripts: normalizeBoolean(consultantConfig.saveTranscripts, D.saveTranscripts),
+    transcriptDir: typeof consultantConfig.transcriptDir === 'string' && consultantConfig.transcriptDir.trim()
+      ? consultantConfig.transcriptDir.trim()
+      : D.transcriptDir,
+    systemPrompt: typeof consultantConfig.systemPrompt === 'string' ? consultantConfig.systemPrompt : D.systemPrompt,
+  };
+}
+
 function normalizePromptText(value) {
   if (typeof value === 'string') return value;
   if (value === null || value === undefined) return '';
@@ -1559,6 +1640,7 @@ function normalizeConfig(config = {}) {
     ui: normalizeUIConfig(config.ui),
     chunking: normalizeChunkingConfig(config.chunking),
     voice: normalizeVoiceConfig(config.voice),
+    consultant: normalizeConsultantConfig(config.consultant),
     prompt: normalizePromptConfig(config.prompt),
   };
 }
@@ -1683,6 +1765,13 @@ function renderConfigFile(config) {
   lines.push('  // Requires whisper.cpp `whisper-cli` and ffmpeg (or sox) on PATH, plus a ggml-*.bin model file.');
   lines.push('  // Trigger from the chat with /voice record [seconds] or /voice file <path>.');
   appendConfigProperty(lines, 'voice', config.voice);
+
+  lines.push('');
+  lines.push('  // Consultant tool — deliberate second-model advisor.');
+  lines.push('  // The main agent calls it via consult_expert / [TOOL:CONSULT] when stuck or before important changes.');
+  lines.push('  // Every call must include a summary, question, goal, and attached file paths. Calls are read-only by default.');
+  lines.push('  // Tip: pick a stronger reasoning model than your main model — that is the whole point.');
+  appendConfigProperty(lines, 'consultant', config.consultant);
 
   lines.push('');
   lines.push('  // Prompt customization');
@@ -1903,6 +1992,14 @@ function getVoiceConfig() {
 
 function voiceEnabled() {
   return getVoiceConfig().enabled;
+}
+
+function getConsultantConfig() {
+  return normalizeConsultantConfig(sapperConfig.consultant);
+}
+
+function consultantEnabled() {
+  return getConsultantConfig().enabled;
 }
 
 function streamPhaseStatusEnabled() {
@@ -3053,6 +3150,7 @@ const COMMAND_GROUPS = Object.freeze([
       ['/shell', 'Inspect shell config and background sessions'],
       ['/shell read <id>', 'Read output from a tracked shell session'],
       ['/shell stop <id>', 'Stop a tracked shell session'],
+      ['/consult', 'Show or configure the heavyweight consultant tool (separate model)'],
       ['/context', 'Inspect token usage, summary trigger, and model window'],
       ['/ctx <limit>', 'Set context window limit (e.g. /ctx 64k)'],
       ['/debug', 'Toggle regex and tool debug output'],
@@ -5572,6 +5670,337 @@ function keywordRecallMemory(query, embeddings, topK = 3) {
     .slice(0, topK);
 }
 
+// ─────────────────────────────────────────────────────────────────
+// CONSULTANT TOOL — deliberate second-model advisor
+// The main agent calls this when stuck or before an important change.
+// Read-only by default; runs in its own ollama session with its own
+// tool budget. All settings live under sapperConfig.consultant.
+// ─────────────────────────────────────────────────────────────────
+
+const DEFAULT_CONSULTANT_SYSTEM_PROMPT = `You are a senior consulting engineer brought in to advise on a stuck or high-stakes situation. A junior agent has called you with a summary, attached files, and a specific question.
+
+Your job:
+- Read the context carefully. Do not restate the question back.
+- Use your read-only tools (read_file, list_directory, search_files, regex_search, read_chunk, head, tail, cat, pwd, changes, fetch_web, recall_memory, search_memory_notes, read_memory_notes) to verify facts in the codebase before answering. Never guess.
+- Return a precise, actionable recommendation.
+
+You are READ-ONLY: you cannot write, patch, run shell commands, open URLs, or modify state. Your only outputs are tool reads and your final advice.
+
+Format your final answer EXACTLY as:
+
+RECOMMENDATION
+<1-3 sentences \u2014 the bottom line>
+
+REASONING
+<what evidence in the code/context supports the recommendation, referencing file:line>
+
+RISKS
+<what could go wrong, edge cases to watch>
+
+NEXT STEPS
+1. <concrete action the calling agent should take>
+2. <\u2026>
+
+Be brief but specific. No preamble. No restating the question. Reference exact file paths and line numbers.`;
+
+function buildConsultantNativeTools(allowedSet) {
+  // Compact read-only tool defs the consultant can call.
+  const defs = [
+    { name: 'list_directory', mapsTo: 'LIST', def: { description: 'List the contents of a directory.', parameters: { type: 'object', properties: { path: { type: 'string' } } } } },
+    { name: 'read_file', mapsTo: 'READ', def: { description: 'Read the full contents of a file.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
+    { name: 'read_chunk', mapsTo: 'READ_CHUNK', def: { description: 'Read a specific line range from a file.', parameters: { type: 'object', properties: { path: { type: 'string' }, start: { type: 'number' }, end: { type: 'number' }, context: { type: 'number' } }, required: ['path', 'start'] } } },
+    { name: 'search_files', mapsTo: 'SEARCH', def: { description: 'Search for a pattern across project files.', parameters: { type: 'object', properties: { pattern: { type: 'string' } }, required: ['pattern'] } } },
+    { name: 'grep', mapsTo: 'GREP', def: { description: 'Alias for search_files.', parameters: { type: 'object', properties: { pattern: { type: 'string' } }, required: ['pattern'] } } },
+    { name: 'find', mapsTo: 'FIND', def: { description: 'Find files or directories by name.', parameters: { type: 'object', properties: { pattern: { type: 'string' }, path: { type: 'string' } }, required: ['pattern'] } } },
+    { name: 'regex_search', mapsTo: 'REGEX', def: { description: 'Regex search across source code.', parameters: { type: 'object', properties: { pattern: { type: 'string' }, include: { type: 'string' }, path: { type: 'string' } }, required: ['pattern'] } } },
+    { name: 'head', mapsTo: 'HEAD', def: { description: 'Read first N lines of a file.', parameters: { type: 'object', properties: { path: { type: 'string' }, lines: { type: 'number' } }, required: ['path'] } } },
+    { name: 'tail', mapsTo: 'TAIL', def: { description: 'Read last N lines of a file.', parameters: { type: 'object', properties: { path: { type: 'string' }, lines: { type: 'number' } }, required: ['path'] } } },
+    { name: 'cat', mapsTo: 'CAT', def: { description: 'Read the full contents of a file.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
+    { name: 'pwd', mapsTo: 'PWD', def: { description: 'Show current tool working directory.', parameters: { type: 'object', properties: {} } } },
+    { name: 'changes', mapsTo: 'CHANGES', def: { description: 'Show git status and diffs.', parameters: { type: 'object', properties: { path: { type: 'string' } } } } },
+    { name: 'fetch_web', mapsTo: 'FETCH', def: { description: 'Fetch a web page and return readable text.', parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] } } },
+    { name: 'recall_memory', mapsTo: 'MEMORY', def: { description: 'Search saved conversation memory.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } },
+    { name: 'search_memory_notes', mapsTo: 'MEMORY', def: { description: 'Search markdown long-memory notes.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } } },
+    { name: 'read_memory_notes', mapsTo: 'MEMORY', def: { description: 'Read markdown long-memory file.', parameters: { type: 'object', properties: {} } } },
+  ];
+  return defs
+    .filter(t => allowedSet.has(t.mapsTo))
+    .map(t => ({ type: 'function', function: { name: t.name, description: t.def.description, parameters: t.def.parameters } }));
+}
+
+async function runConsultantToolCall(fnName, args) {
+  const a = args || {};
+  switch (fnName) {
+    case 'list_directory': return tools.list(a.path ?? '.');
+    case 'read_file': return tools.read(a.path);
+    case 'read_chunk': return tools.read_chunk(a.path, a.start, a.end, a.context);
+    case 'search_files':
+    case 'grep': return await tools.search(a.pattern);
+    case 'find': return tools.find(a.pattern, a.path ?? '.');
+    case 'regex_search': return tools.regex(a.pattern, a.include ?? '', a.path ?? '.');
+    case 'head': return tools.head(a.path, a.lines);
+    case 'tail': return tools.tail(a.path, a.lines);
+    case 'cat': return tools.cat(a.path);
+    case 'pwd': return tools.pwd();
+    case 'changes': return await tools.changes(a.path);
+    case 'fetch_web': return await tools.fetch_web(a.url);
+    case 'recall_memory': return await tools.recall_memory(a.query);
+    case 'search_memory_notes': return await tools.search_memory_notes(a.query);
+    case 'read_memory_notes': return await tools.read_memory_notes();
+    default: return `Consultant tool not available: ${fnName}`;
+  }
+}
+
+function parseConsultantFilesArg(filesArg) {
+  if (!filesArg) return [];
+  if (Array.isArray(filesArg)) return filesArg.map(s => String(s).trim()).filter(Boolean);
+  return String(filesArg).split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+}
+
+function attachConsultantFiles(fileEntries, cfg) {
+  const attachments = [];
+  let totalBytes = 0;
+  for (const entry of fileEntries.slice(0, cfg.maxFiles)) {
+    // Parse "path:start-end" or "path#L20-50"
+    const m = String(entry).match(/^(.+?)(?:[:#](?:L)?(\d+)\s*[-:]\s*(\d+))?$/);
+    if (!m) continue;
+    const filePath = m[1].trim();
+    const start = m[2] ? parseInt(m[2], 10) : null;
+    const end = m[3] ? parseInt(m[3], 10) : null;
+    try {
+      const abs = resolveToolPath(filePath);
+      const stat = fs.statSync(abs);
+      if (!stat.isFile()) {
+        attachments.push({ path: filePath, error: 'not a regular file' });
+        continue;
+      }
+      if (stat.size > cfg.maxFileBytes && !start) {
+        attachments.push({ path: filePath, error: `file too large (${stat.size} bytes > ${cfg.maxFileBytes}). Pass a line range as ${filePath}:start-end.` });
+        continue;
+      }
+      const raw = fs.readFileSync(abs, 'utf8');
+      let content;
+      let header;
+      if (start) {
+        const lines = raw.split('\n');
+        const s = Math.max(1, start);
+        const e = Math.min(lines.length, end || start + 100);
+        const gutter = String(e).length;
+        content = lines.slice(s - 1, e).map((l, i) => `${String(s + i).padStart(gutter, ' ')} | ${l}`).join('\n');
+        header = `${filePath} (lines ${s}-${e} of ${lines.length})`;
+      } else {
+        content = raw;
+        header = `${filePath} (full file, ${stat.size} bytes)`;
+      }
+      if (totalBytes + content.length > cfg.totalBytesLimit) {
+        attachments.push({ path: filePath, error: 'skipped \u2014 total byte limit reached' });
+        break;
+      }
+      attachments.push({ path: header, content });
+      totalBytes += content.length;
+    } catch (err) {
+      attachments.push({ path: filePath, error: err.message });
+    }
+  }
+  return { attachments, totalBytes };
+}
+
+function saveConsultantTranscript(cfg, payload) {
+  if (!cfg.saveTranscripts) return null;
+  try {
+    const dir = isAbsolute(cfg.transcriptDir)
+      ? cfg.transcriptDir
+      : pathResolve(getToolWorkingDirectory(), cfg.transcriptDir);
+    fs.mkdirSync(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const file = join(dir, `consult-${stamp}.md`);
+    fs.writeFileSync(file, payload);
+    return file;
+  } catch { return null; }
+}
+
+async function consultExpert({ summary, question, goal, attempts, hints, files } = {}) {
+  const cfg = getConsultantConfig();
+  if (!cfg.enabled) {
+    return 'Consultant tool is disabled (consultant.enabled = false in .sapper/config.json). Enable it before calling consult_expert.';
+  }
+
+  // ── Gating: refuse drive-by calls ──
+  const errors = [];
+  const summaryText = String(summary || '').trim();
+  const summaryWords = summaryText ? summaryText.split(/\s+/).length : 0;
+  if (cfg.requireSummary && summaryWords < cfg.minSummaryWords) {
+    errors.push(`'summary' must be at least ${cfg.minSummaryWords} words (got ${summaryWords}). Write a real summary of what you have explored, what you understand, and what is blocking you`);
+  }
+  if (cfg.requireQuestion && !String(question || '').trim()) {
+    errors.push("'question' is required and must be specific (e.g. 'should I refactor X into Y, or is there a simpler way?')");
+  }
+  if (cfg.requireGoal && !String(goal || '').trim()) {
+    errors.push("'goal' is required \u2014 describe the important thing you are trying to accomplish or about to change");
+  }
+  if (errors.length) {
+    return `Error invoking consultant: ${errors.join('; ')}.\n\nThe consultant is a deliberate, heavyweight advisor. Before calling it, gather context: read the relevant files, run searches, then call consult_expert with summary, question, goal, attempts, and files.`;
+  }
+
+  const fileEntries = parseConsultantFilesArg(files);
+  const { attachments, totalBytes } = attachConsultantFiles(fileEntries, cfg);
+
+  // ── Build the consultation request ──
+  let userPrompt = '';
+  userPrompt += `# Consultation Request\n\n`;
+  userPrompt += `## Goal\n${goal || '(not provided)'}\n\n`;
+  userPrompt += `## Specific question\n${question}\n\n`;
+  userPrompt += `## Summary of context and current understanding\n${summaryText}\n\n`;
+  if (attempts) userPrompt += `## What has been tried\n${String(attempts).trim()}\n\n`;
+  if (hints) userPrompt += `## Hints / suspected causes\n${String(hints).trim()}\n\n`;
+  userPrompt += `## Working directory\n${getToolWorkingDirectory()}\n\n`;
+  if (attachments.length > 0) {
+    userPrompt += `## Attached files (${attachments.length}, ~${formatBytes(totalBytes)})\n\n`;
+    for (const a of attachments) {
+      if (a.error) {
+        userPrompt += `### ${a.path}\n_Error attaching: ${a.error}_\n\n`;
+      } else {
+        userPrompt += `### ${a.path}\n\`\`\`\n${a.content}\n\`\`\`\n\n`;
+      }
+    }
+  } else {
+    userPrompt += `## Attached files\n_(none \u2014 the calling agent did not attach files; rely on your tools to read what you need)_\n\n`;
+  }
+  userPrompt += `Analyze carefully. Use your tools to verify anything in the codebase you need to check. Return a precise RECOMMENDATION / REASONING / RISKS / NEXT STEPS answer.`;
+
+  const systemPrompt = (cfg.systemPrompt && cfg.systemPrompt.trim())
+    ? cfg.systemPrompt
+    : DEFAULT_CONSULTANT_SYSTEM_PROMPT;
+
+  const consultMessages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userPrompt },
+  ];
+
+  // ── Detect consultant capabilities & build tool defs ──
+  let useTools = false;
+  try {
+    const info = await ollama.show({ model: cfg.model });
+    useTools = !!(info?.capabilities && info.capabilities.includes('tools'));
+  } catch (err) {
+    return `Error invoking consultant: cannot reach model '${cfg.model}' (${err.message}). Pull it with \`ollama pull ${cfg.model}\` or change consultant.model in .sapper/config.json.`;
+  }
+
+  const allowedSet = new Set((cfg.tools || []).map(normalizeToolName));
+  const consultantNativeTools = useTools ? buildConsultantNativeTools(allowedSet) : [];
+
+  // ── Run the consultation loop ──
+  const startedAt = Date.now();
+  const deadline = startedAt + cfg.timeoutMs;
+  console.log();
+  console.log(box(
+    `${keyValue('model', chalk.white(cfg.model), 11)}\n` +
+    `${keyValue('files', chalk.white(`${attachments.length} attached`), 11)} ${UI.slate('\u00b7')} ${chalk.white(formatBytes(totalBytes))}\n` +
+    `${keyValue('tools', chalk.white(useTools ? `native (${consultantNativeTools.length} read-only)` : 'one-shot (no native tools)'), 11)}\n` +
+    `${keyValue('rounds', chalk.white(`max ${cfg.toolRoundLimit}`), 11)} ${UI.slate('\u00b7')} ${UI.slate(`timeout ${Math.round(cfg.timeoutMs / 1000)}s`)}`,
+    'Consulting expert', 'magenta'
+  ));
+
+  const consultantSpinner = ora(chalk.magenta(`Consultant (${cfg.model.split(':')[0]}) is thinking...`)).start();
+  let finalAnswer = '';
+  let rounds = 0;
+  try {
+    while (true) {
+      if (Date.now() > deadline) {
+        consultantSpinner.stop();
+        return `Consultant aborted: hit timeout of ${Math.round(cfg.timeoutMs / 1000)}s before finishing.\n\nPartial answer:\n${finalAnswer || '(none produced yet)'}`;
+      }
+
+      const chatOpts = {
+        model: cfg.model,
+        messages: consultMessages,
+        stream: false,
+        options: {
+          temperature: cfg.temperature,
+          ...(cfg.contextLimit ? { num_ctx: cfg.contextLimit } : {}),
+        },
+      };
+      if (cfg.thinking === 'on') chatOpts.think = true;
+      if (useTools && consultantNativeTools.length) chatOpts.tools = consultantNativeTools;
+
+      let resp;
+      try {
+        resp = await ollama.chat(chatOpts);
+      } catch (err) {
+        const msg = err?.message || String(err);
+        if (/does not support thinking/i.test(msg) && chatOpts.think) {
+          delete chatOpts.think;
+          resp = await ollama.chat(chatOpts);
+        } else {
+          throw err;
+        }
+      }
+
+      const msg = resp?.message || {};
+      const toolCalls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+      finalAnswer = msg.content || finalAnswer;
+
+      if (toolCalls.length === 0 || rounds >= cfg.toolRoundLimit) {
+        break;
+      }
+
+      // Push assistant message with tool_calls
+      consultMessages.push({ role: 'assistant', content: msg.content || '', tool_calls: toolCalls });
+      rounds++;
+      consultantSpinner.text = chalk.magenta(`Consultant running tool round ${rounds}/${cfg.toolRoundLimit}...`);
+
+      for (const tc of toolCalls) {
+        const fn = tc.function || {};
+        const args = fn.arguments || {};
+        const mapped = normalizeToolName(fn.name || '');
+        if (!allowedSet.has(mapped)) {
+          consultMessages.push({ role: 'tool', tool_name: fn.name, content: `Tool ${fn.name} is not allowed for the consultant (read-only restriction).` });
+          continue;
+        }
+        let toolResult;
+        try {
+          toolResult = await runConsultantToolCall(fn.name, args);
+        } catch (err) {
+          toolResult = `Error: ${err.message}`;
+        }
+        consultMessages.push({
+          role: 'tool',
+          tool_name: fn.name,
+          content: truncateToolText(String(toolResult ?? ''), 16000),
+        });
+      }
+    }
+  } catch (err) {
+    consultantSpinner.stop();
+    return `Error during consultation: ${err.message}`;
+  }
+  consultantSpinner.stop();
+
+  const elapsed = Math.round((Date.now() - startedAt) / 1000);
+  const answer = (finalAnswer || '').trim() || '(consultant returned no content)';
+
+  // Save transcript for audit
+  const transcriptBody = [
+    `# Consultation Transcript`,
+    `- timestamp: ${new Date().toISOString()}`,
+    `- model: ${cfg.model}`,
+    `- duration: ${elapsed}s`,
+    `- tool rounds: ${rounds}`,
+    `- files attached: ${attachments.length}`,
+    ``,
+    `## Request`,
+    userPrompt,
+    ``,
+    `## Final answer`,
+    answer,
+    ``,
+  ].join('\n');
+  const transcriptPath = saveConsultantTranscript(cfg, transcriptBody);
+
+  const header = `Consultation complete (${cfg.model.split(':')[0]}, ${elapsed}s, ${rounds} tool round${rounds === 1 ? '' : 's'}${transcriptPath ? `, saved: ${relative(getToolWorkingDirectory(), transcriptPath) || transcriptPath}` : ''}).`;
+  return `${header}\n\n${answer}`;
+}
+
 const tools = {
   read: (path) => {
     const trimmedPath = typeof path === 'string' ? path.trim() : '';
@@ -6122,7 +6551,8 @@ const tools = {
         }
       });
     });
-  }
+  },
+  consult: async (args) => consultExpert(args || {})
 };
 
 async function checkForUpdates() {
@@ -6713,6 +7143,25 @@ async function runSapper() {
             command: { type: 'string', description: 'Shell command to execute' }
           },
           required: ['command']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'consult_expert',
+        description: 'Call a heavyweight second-model consultant for advice when you are stuck or before making an important/hard-to-reverse change. The consultant is read-only and runs with its own tools. DO NOT call casually: every invocation requires a written summary, a specific question, a goal, optionally what you have tried, and the file paths the consultant needs. The consultant will read those files (line ranges supported via "path:start-end"), verify facts with its own tools, and return RECOMMENDATION / REASONING / RISKS / NEXT STEPS. Use sparingly.',
+        parameters: {
+          type: 'object',
+          properties: {
+            goal: { type: 'string', description: 'What important thing you are trying to accomplish or about to change.' },
+            question: { type: 'string', description: 'The specific question or decision you need help with.' },
+            summary: { type: 'string', description: 'A real summary (at least 25 words) of what you have explored, what you understand, and what is blocking you. Drive-by calls will be rejected.' },
+            attempts: { type: 'string', description: 'Optional: what you have already tried and why it did not work.' },
+            hints: { type: 'string', description: 'Optional: suspected causes or constraints worth flagging.' },
+            files: { type: 'array', items: { type: 'string' }, description: 'File paths to attach. Use "path:start-end" to attach a line range only (recommended for large files). Examples: ["src/router.ts", "src/handlers/auth.ts:40-120"].' }
+          },
+          required: ['goal', 'question', 'summary']
         }
       }
     }
@@ -7745,6 +8194,103 @@ async function runSapper() {
         }
         // No `continue` here — `input` was set to the transcript, let the rest of the loop process it.
         }
+      }
+
+      if (input.toLowerCase() === '/consult' || input.toLowerCase().startsWith('/consult ')) {
+        const arg = input.substring(8).trim();
+        const cfg = getConsultantConfig();
+        const updateConsultant = (patch) => {
+          sapperConfig.consultant = { ...getConsultantConfig(), ...patch };
+          saveConfig(sapperConfig);
+        };
+
+        if (!arg || ['status', 'show'].includes(arg.toLowerCase())) {
+          const lines = [
+            `enabled        ${chalk.white(cfg.enabled ? 'on' : 'off')}`,
+            `model          ${chalk.white(cfg.model)}`,
+            `tools          ${UI.slate(cfg.tools.join(', '))}`,
+            `gating         ${UI.slate(`summary>=${cfg.minSummaryWords}w \u00b7 question ${cfg.requireQuestion ? 'required' : 'optional'} \u00b7 goal ${cfg.requireGoal ? 'required' : 'optional'}`)}`,
+            `limits         ${UI.slate(`${cfg.maxFiles} files \u00b7 ${formatBytes(cfg.maxFileBytes)}/file \u00b7 ${formatBytes(cfg.totalBytesLimit)} total`)}`,
+            `loop           ${UI.slate(`${cfg.toolRoundLimit} tool rounds \u00b7 timeout ${Math.round(cfg.timeoutMs/1000)}s \u00b7 thinking ${cfg.thinking} \u00b7 temp ${cfg.temperature}`)}`,
+            `transcripts    ${chalk.white(cfg.saveTranscripts ? 'on' : 'off')} ${UI.slate('\u2192')} ${UI.slate(cfg.transcriptDir)}`,
+            '',
+            UI.slate('Usage: /consult model <name> | /consult on|off | /consult tools <a,b,c> | /consult minwords <N>'),
+            UI.slate('       /consult rounds <N> | /consult timeout <secs> | /consult thinking <auto|on|off> | /consult temp <0..2>'),
+            UI.slate('       /consult transcripts <on|off> | /consult reset'),
+          ];
+          console.log();
+          console.log(box(lines.join('\n'), 'Consultant', 'magenta'));
+          continue;
+        }
+
+        const [subcommandRaw, ...rest] = arg.split(/\s+/);
+        const subcommand = subcommandRaw.toLowerCase();
+        const value = rest.join(' ').trim();
+
+        if (subcommand === 'reset' || subcommand === 'default') {
+          sapperConfig.consultant = { ...DEFAULT_CONFIG.consultant };
+          saveConfig(sapperConfig);
+          console.log(chalk.green('Consultant settings reset to defaults.'));
+          continue;
+        }
+        if (['on', 'true', 'yes', 'enable', 'enabled'].includes(subcommand)) { updateConsultant({ enabled: true }); console.log(chalk.green('Consultant enabled.')); continue; }
+        if (['off', 'false', 'no', 'disable', 'disabled'].includes(subcommand)) { updateConsultant({ enabled: false }); console.log(chalk.yellow('Consultant disabled.')); continue; }
+        if (subcommand === 'model') {
+          if (!value) { console.log(chalk.yellow('Usage: /consult model <name>')); continue; }
+          updateConsultant({ model: value });
+          console.log(chalk.green(`Consultant model set to ${value}.`));
+          continue;
+        }
+        if (subcommand === 'tools') {
+          const list = value.split(/[,\s]+/).map(t => t.trim()).filter(Boolean);
+          if (!list.length) { console.log(chalk.yellow('Usage: /consult tools read,list,grep,...')); continue; }
+          updateConsultant({ tools: list });
+          console.log(chalk.green(`Consultant tools: ${list.join(', ')}`));
+          continue;
+        }
+        if (subcommand === 'minwords' || subcommand === 'minsummary') {
+          const n = parseInt(value, 10);
+          if (!Number.isFinite(n)) { console.log(chalk.yellow('Usage: /consult minwords <N>')); continue; }
+          updateConsultant({ minSummaryWords: n });
+          console.log(chalk.green(`Min summary words: ${n}`));
+          continue;
+        }
+        if (subcommand === 'rounds') {
+          const n = parseInt(value, 10);
+          if (!Number.isFinite(n)) { console.log(chalk.yellow('Usage: /consult rounds <N>')); continue; }
+          updateConsultant({ toolRoundLimit: n });
+          console.log(chalk.green(`Consultant tool rounds: ${n}`));
+          continue;
+        }
+        if (subcommand === 'timeout') {
+          const n = parseInt(value, 10);
+          if (!Number.isFinite(n)) { console.log(chalk.yellow('Usage: /consult timeout <seconds>')); continue; }
+          updateConsultant({ timeoutMs: n * 1000 });
+          console.log(chalk.green(`Consultant timeout: ${n}s`));
+          continue;
+        }
+        if (subcommand === 'thinking') {
+          updateConsultant({ thinking: value });
+          console.log(chalk.green(`Consultant thinking: ${getConsultantConfig().thinking}`));
+          continue;
+        }
+        if (subcommand === 'temp' || subcommand === 'temperature') {
+          const n = Number(value);
+          if (!Number.isFinite(n)) { console.log(chalk.yellow('Usage: /consult temp <0..2>')); continue; }
+          updateConsultant({ temperature: n });
+          console.log(chalk.green(`Consultant temperature: ${getConsultantConfig().temperature}`));
+          continue;
+        }
+        if (subcommand === 'transcripts' || subcommand === 'transcript') {
+          if (['on', 'true', 'yes'].includes(value.toLowerCase())) { updateConsultant({ saveTranscripts: true }); console.log(chalk.green('Consultant transcripts: on')); continue; }
+          if (['off', 'false', 'no'].includes(value.toLowerCase())) { updateConsultant({ saveTranscripts: false }); console.log(chalk.yellow('Consultant transcripts: off')); continue; }
+          console.log(chalk.yellow('Usage: /consult transcripts on|off'));
+          continue;
+        }
+
+        console.log(chalk.yellow(`Unknown consult option: ${subcommand}`));
+        console.log(chalk.gray('  Usage: /consult  |  /consult model <name>  |  /consult on|off  |  /consult tools <a,b,c>  |  /consult minwords <N>  |  /consult rounds <N>  |  /consult timeout <secs>  |  /consult thinking <auto|on|off>  |  /consult temp <0..2>  |  /consult transcripts on|off  |  /consult reset'));
+        continue;
       }
 
       if (input.toLowerCase().startsWith('/ui')) {
@@ -9082,7 +9628,8 @@ async function runSapper() {
             write_file: 'WRITE', patch_file: 'PATCH', create_directory: 'MKDIR',
             ls: 'LS', cat: 'CAT', head: 'HEAD', tail: 'TAIL', grep: 'GREP', find: 'FIND',
             pwd: 'PWD', cd: 'CD', rmdir: 'RMDIR', changes: 'CHANGES',
-            fetch_web: 'FETCH', recall_memory: 'MEMORY', open_url: 'OPEN', run_shell: 'SHELL'
+            fetch_web: 'FETCH', recall_memory: 'MEMORY', open_url: 'OPEN', run_shell: 'SHELL',
+            consult_expert: 'CONSULT'
           };
 
           showStreamPhase(`Running ${nativeToolCalls.length} native tool call${nativeToolCalls.length === 1 ? '' : 's'}...`);
@@ -9209,6 +9756,10 @@ async function runSapper() {
                 case 'run_shell':
                   result = await tools.shell(args.command);
                   logEntry('shell', { command: args.command, duration: Date.now() - toolStart, userApproved: !result.includes('blocked'), exitCode: result.match(/code (\d+)/)?.[1] ?? null });
+                  break;
+                case 'consult_expert':
+                  result = await tools.consult(args);
+                  logEntry('tool', { toolType: 'CONSULT', path: (args && args.question ? String(args.question).slice(0, 80) : 'consult'), duration: Date.now() - toolStart, success: !String(result).startsWith('Error'), resultSize: result?.length });
                   break;
                 default:
                   result = `Unknown tool: ${fn.name}`;
@@ -9476,9 +10027,32 @@ async function runSapper() {
               const approved = !result.includes('blocked');
               logEntry('shell', { command: path, duration: Date.now() - toolStart, userApproved: approved, exitCode: result.match(/code (\d+)/)?.[1] ?? null });
             }
+            else if (type.toLowerCase() === 'consult') {
+              // Text-marker form: [TOOL:CONSULT]goal:::question:::summary:::file1,file2[/TOOL]
+              // Or pass a single JSON blob in `path`: {"goal":"...","question":"...","summary":"...","files":["..."]}
+              let consultArgs = null;
+              const raw = (content && content.trim()) ? `${path}:::${content}` : String(path || '');
+              const trimmedRaw = raw.trim();
+              if (trimmedRaw.startsWith('{')) {
+                try { consultArgs = JSON.parse(trimmedRaw); } catch { consultArgs = null; }
+              }
+              if (!consultArgs) {
+                const parts = trimmedRaw.split(/\s*:::\s*/);
+                consultArgs = {
+                  goal: parts[0] || '',
+                  question: parts[1] || '',
+                  summary: parts[2] || '',
+                  attempts: parts[3] || '',
+                  hints: parts[4] || '',
+                  files: parts[5] ? parts[5].split(/[,\n]/).map(s => s.trim()).filter(Boolean) : [],
+                };
+              }
+              result = await tools.consult(consultArgs);
+              logEntry('tool', { toolType: 'CONSULT', path: (consultArgs.question || 'consult').slice(0, 80), duration: Date.now() - toolStart, success: !String(result).startsWith('Error'), resultSize: result?.length });
+            }
 
             // Log tool execution (for non-shell, non-file specific ones)
-            if (!['list', 'ls', 'read', 'cat', 'head', 'tail', 'mkdir', 'rmdir', 'pwd', 'cd', 'write', 'patch', 'search', 'grep', 'find', 'regex', 'chunk', 'read_chunk', 'changes', 'fetch', 'memory', 'memory_note_save', 'memory_note_search', 'memory_note_read', 'open', 'shell'].includes(type.toLowerCase())) {
+            if (!['list', 'ls', 'read', 'cat', 'head', 'tail', 'mkdir', 'rmdir', 'pwd', 'cd', 'write', 'patch', 'search', 'grep', 'find', 'regex', 'chunk', 'read_chunk', 'changes', 'fetch', 'memory', 'memory_note_save', 'memory_note_search', 'memory_note_read', 'open', 'shell', 'consult'].includes(type.toLowerCase())) {
               logEntry('tool', { toolType: type.toUpperCase(), path, duration: Date.now() - toolStart, success: toolSuccess, resultSize: result?.length, error: toolSuccess ? undefined : result });
             }
 
